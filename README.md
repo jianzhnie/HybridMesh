@@ -6,7 +6,7 @@
 `hpmesh` 是一个**从零搭建、用于学习**的分布式训练框架。目标不是交付一个产品，
 而是让你**通过亲手实现**搞懂分布式训练的核心模块。模型本体用 `transformers`
 的 `AutoModelForCausalLM`（离线可用 `AutoConfig.for_model` 构造小模型，无需联网），
-分布式的硬活集中在 `mesh` + `parallelism/`，训练循环保持端到端可读。
+分布式的硬活集中在 `mesh` + `parallel/`，训练循环保持端到端可读。
 
 > 说明：GitHub 仓库名为 `HybridMesh`，Python 包名为 `hpmesh`。
 
@@ -44,10 +44,11 @@ torchrun --nproc_per_node=2 -m hpmesh --dp 2
 | `hpmesh/mesh.py` | **DeviceMesh / 进程拓扑** + torchrun 初始化 | 可运行 |
 | `hpmesh/bundle.py` | HF 模型包装成统一 `(input_ids, labels) -> loss` | 可运行 |
 | `hpmesh/trainer/trainer.py` | 训练循环 + 确定性 seeding + DP 数据切分 | 可运行 |
-| `hpmesh/parallelism/fsdp.py` | 数据并行（FSDP2 `fully_shard`） | 已实现 |
-| `hpmesh/parallelism/tp.py` | 张量并行（声明式 sharding） | 学习练习 |
-| `hpmesh/parallelism/pp.py` | 流水线并行（1F1B 调度） | 学习练习 |
-| `hpmesh/parallelism/cp_ep.py` | 上下文并行 / 专家并行 | 学习练习 |
+| `hpmesh/parallel/fsdp.py` | 数据并行（FSDP2 `fully_shard`） | 已实现 |
+| `hpmesh/parallel/linear.py` | async-TP 融合原语（`AllGatherLinear` / `LinearReduceScatter`） | 已实现（CUDA） |
+| `hpmesh/parallel/tp.py` | 张量并行（声明式 sharding -> 融合原语） | 已实现（CUDA） |
+| `hpmesh/parallel/pp.py` | 流水线并行（1F1B 调度） | 学习练习 |
+| `hpmesh/parallel/cp_ep.py` | 上下文并行 / 专家并行 | 学习练习 |
 | `hpmesh/trainer/train.py` | 入口：`HfArgumentParser` 解析 config -> `Trainer(cfg).train()` | 可运行 |
 
 ## 学习路径
@@ -57,9 +58,9 @@ torchrun --nproc_per_node=2 -m hpmesh --dp 2
 ```text
 第 0 步  单设备纯训练      已实现   python -m hpmesh --steps 20
 第 1 步  +FSDP 数据并行    已实现   torchrun --nproc_per_node=2 -m hpmesh --dp 2
-第 2 步  +TP 张量并行      练习     parallelism/tp.py (声明式 sharding, spmd_types)
-第 3 步  +PP 流水线并行    练习     parallelism/pp.py (pipelining 1F1B)
-第 4 步  +CP 或 EP         练习     parallelism/cp_ep.py (KV all-gather / all-to-all)
+第 2 步  +TP 张量并行      已实现   parallel/linear.py + tp.py (声明式 -> 融合 GEMM)
+第 3 步  +PP 流水线并行    练习     parallel/pp.py (pipelining 1F1B)
+第 4 步  +CP 或 EP         练习     parallel/cp_ep.py (KV all-gather / all-to-all)
 ```
 
 ## 验证方法
@@ -75,6 +76,10 @@ torchrun --nproc_per_node=2 -m hpmesh --dp 2
 - 第 1 步起的多进程（torchrun + FSDP）需要 **CUDA/NCCL**。在无 CUDA 的机器
   （如 Apple Silicon / MPS）上：第 0 步可正常运行，但 FSDP2 `fully_shard` 面向
   NCCL 设计，在 CPU+gloo 上不可用 —— 请在 GPU 机器上做第 1 步及以后。
+- **第 2 步 TP 同样是 CUDA-only**：`parallel/linear.py` 的融合算子走
+  `torch.ops.symm_mem.fused_*`（对称内存），本机 `symm_mem.is_available()==False`。
+  CPU 上只能验证声明层与权重切分（见 `tests/test_tp.py`），完整的 all-gather /
+  reduce-scatter 前反向要在 GPU 上跑。
 
 ## License
 
