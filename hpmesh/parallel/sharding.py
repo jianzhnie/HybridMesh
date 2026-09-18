@@ -18,10 +18,8 @@ import spmd_types as spmd
 from spmd_types import SpmdType
 from torch.distributed.device_mesh import DeviceMesh
 from torch.distributed.tensor import Partial, Placement, Replicate, Shard
-
 from torchtitan.distributed.parallel_dims import MeshAxisName, unfold_dp_axis
 from torchtitan.distributed.spmd_types import _per_axis_types, spmd_axes
-
 
 __all__ = [
     "ShardingConfig",
@@ -120,7 +118,7 @@ def resolve_placements(
                 f"required: {list(mesh.mesh_dim_names)}."
             )
         p = spmd.spmd_type_to_dtensor_placement(concrete_axis_types[key])
-        if isinstance(p, (Shard, Partial)) and mesh.size(i) == 1:
+        if isinstance(p, Shard | Partial) and mesh.size(i) == 1:
             p = Replicate()
         result.append(p)
     return tuple(result)
