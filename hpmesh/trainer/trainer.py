@@ -14,7 +14,7 @@ import torch.distributed as dist
 
 from ..bundle import Batch, ModelBundle, build_bundle
 from ..mesh import build_mesh, init_distributed
-from .. import parallelism
+from .. import parallel
 from .config import HybridMeshConfig
 
 
@@ -40,12 +40,12 @@ class Trainer:
 
         # 3. parallelism, in Titan's order: tp/pp/cp/ep declared first, fsdp last
         #    (outer wraps inner). Each is a no-op when its degree is 1.
-        model = parallelism.apply_tp(model, self.mesh, cfg)
-        model = parallelism.apply_cp_ep(model, self.mesh, cfg)
-        parallelism.apply_pp(model, self.mesh, cfg)  # returns schedule later (step 3)
+        model = parallel.apply_tp(model, self.mesh, cfg)
+        model = parallel.apply_cp_ep(model, self.mesh, cfg)
+        parallel.apply_pp(model, self.mesh, cfg)  # returns schedule later (step 3)
         if cfg.compile:
             model = torch.compile(model)
-        model = parallelism.apply_fsdp(model, self.mesh, cfg)
+        model = parallel.apply_fsdp(model, self.mesh, cfg)
         self.model = model
 
         self.optimizer = torch.optim.AdamW(
