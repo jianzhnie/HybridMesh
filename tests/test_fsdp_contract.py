@@ -8,6 +8,10 @@ reconcile them, since a break in either is invisible until either:
 * the model silently fails to shard (an adapter that stops taking effect), or
 * FSDP raises partway through a distributed run (a name that stopped resolving).
 
+They run against the real ``HFTransformerModel`` over a tiny offline LLaMA --
+now that there is only one wrapper, the contract is worth pinning on the object
+FSDP actually receives rather than on a stand-in that could drift from it.
+
 No process group is needed: the layer iterator is pure container logic, and the
 accessors are plain attribute lookups on a tiny offline model.
 """
@@ -18,39 +22,29 @@ import pytest
 import torch.nn as nn
 from torch.nn import ModuleDict, ModuleList
 
-from hpmesh.bundle import HFModelWrapper
+from hpmesh.models.hf_wrapper import HFTransformerModel, build_model_config
 from hpmesh.parallel.fsdp import iter_transformer_layers
 
-
-class _DecoderLike(nn.Module):
-    """A HF-shaped decoder: the parts nested one level below the CausalLM."""
-
-    def __init__(self, vocab_size: int, hidden: int, num_layers: int):
-        super().__init__()
-        self.embed_tokens = nn.Embedding(vocab_size, hidden)
-        self.layers = ModuleList([nn.Linear(hidden, hidden) for _ in range(num_layers)])
-        self.norm = nn.LayerNorm(hidden)
+_VOCAB = 32
+_HIDDEN = 8
+_NUM_LAYERS = 3
 
 
-class _CausalLMLike(nn.Module):
-    """Stands in for ``AutoModelForCausalLM``: ``model`` plus a sibling ``lm_head``.
-
-    Mirrors the real nesting -- the head is a child of the CausalLM, not of the
-    decoder, which is why the wrapper has to reach up a level for it.
-    """
-
-    def __init__(self, vocab_size: int, hidden: int, num_layers: int, tied: bool):
-        super().__init__()
-        self.model = _DecoderLike(vocab_size, hidden, num_layers)
-        self.lm_head = nn.Linear(hidden, vocab_size, bias=False)
-        if tied:
-            self.lm_head.weight = self.model.embed_tokens.weight
-
-
-def _wrapper(*, tied: bool = False) -> HFModelWrapper:
-    return HFModelWrapper(
-        _CausalLMLike(vocab_size=32, hidden=8, num_layers=3, tied=tied)
+def _wrapper(*, tied: bool = False) -> HFTransformerModel:
+    config = build_model_config(
+        "llama",
+        seq_len=32,
+        arch_overrides={
+            "vocab_size": _VOCAB,
+            "hidden_size": _HIDDEN,
+            "intermediate_size": 16,
+            "num_hidden_layers": _NUM_LAYERS,
+            "num_attention_heads": 2,
+            "num_key_value_heads": 2,
+            "tie_word_embeddings": tied,
+        },
     )
+    return HFTransformerModel(config)
 
 
 # -- container layout --------------------------------------------------------
@@ -95,7 +89,7 @@ def test_decoder_parts_resolve_off_the_top_level_wrapper() -> None:
 def test_layers_are_a_container_torchtitan_can_iterate() -> None:
     wrapper = _wrapper()
 
-    assert len(list(iter_transformer_layers(wrapper.layers))) == 3
+    assert len(list(iter_transformer_layers(wrapper.layers))) == _NUM_LAYERS
 
 
 def test_untied_head_reports_no_weight_tying() -> None:

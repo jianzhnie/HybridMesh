@@ -118,13 +118,18 @@ if hasattr(block, "experts"): ...                  # moe_probe.py, moe_swap.py [
 
 按"从 trainer 出发能否到达"做的精确可达性分析 (AST 解析相对导入, 非子串匹配):
 
+> 本节是**迁移前**的画像. 阶段 0 / 阶段 1 之后, 表里的条目除
+> `pipeline.py` 与 `models/common/embedding.py` 外都已按"处理"列落地, 详见 §7.
+> 表里两处需要勘误: `_utils.py` 从未在树里 (也从未提交), 无需删除;
+> `spec.py` 的真实引用者只有 `rope.py` 的文档字符串, "被 `registry.py` 取代"
+> 是超前表述 —— `registry.py` 要到阶段 3 才存在.
+
 | 模块 | 可达 | 原因 | 处理 |
 |---|---|---|---|
 | `models/hf_wrapper.py` | 否 | 只有 `tests/test_hf_wrapper.py` 引用 | 保留 (§1.5 要升级它) |
 | `models/spec.py` (`HPModelSpec`) | 否 | 仅 `rope.py` 文档字符串提了一句 | **删除** (被 `registry.py` 取代) |
 | `models/moe_swap.py` + `moe_probe.py` | 否 | `moe_swap` -> `moe_probe`, 无外部入口 | **删除** |
 | `parallel/hf_sharding.py` + `placements.py` | 否 | 无 hpmesh 内部引用 | **删除** |
-| `parallel/_utils.py` | 否 | 无引用 | **删除** |
 | `parallel/pipeline.py` | 否 | `pp.py` 只提了名字, 没 import | **保留** —— 它是 PP 的前半段 (§1.6) |
 | `models/common/embedding.py` | 否 | 自身 docstring 写明 "currently unused" | **保留** —— 待 TP 接上 `Shard(0)` |
 | `protocols/` | —— | 空目录 | **删除** |
@@ -143,7 +148,8 @@ models/hf_wrapper.py:HFTransformerModel  <- 死的 (只有 tests/test_hf_wrapper
 (无 flex attention 装配、无 CP 支持、无 logits 转储), 死掉的那个恰好是设计更好的一份.
 
 > 这不是"还没合并", 这是**两条设计路线在同一个仓库里并行生长**. 设计文档的第一件事
-> 就是裁决它们 (§5.1).
+> 就是裁决它们 (§5.1). 阶段 1 之后本节描述的状态已不存在: 活的那个被换成
+> `HFTransformerModel`, `bundle.py` 整体删除.
 
 ### 1.6 一句重要的区分: "不可达" != "可删除"
 
@@ -151,7 +157,7 @@ models/hf_wrapper.py:HFTransformerModel  <- 死的 (只有 tests/test_hf_wrapper
 
 | 不可达的原因 | 例子 | 处理 |
 |---|---|---|
-| 被取代 (superseded) | `hf_sharding`/`placements` 被 `spmd_types` 取代; `spec.py` 被 `registry.py` 取代 | **删除** |
+| 被取代 (superseded) | `hf_sharding`/`placements` 被 `spmd_types` 取代; `spec.py`/`moe_swap.py`/`moe_probe.py` 无任何接续者 | **删除** (阶段 0 已执行) |
 | 还没接线 (not yet wired) | `pipeline.py` (PP stage 切分, 296 行, 完整可用); `models/common/embedding.py` (vocab-parallel embedding) | **保留**, 由对应阶段接上 |
 
 `pipeline.py` 尤其容易被误判: 它可独立使用, 只依赖 torch 的
@@ -451,13 +457,19 @@ def pp_size():   return _size("pp")
 
 - 返回 `logits` 是正确的边界. loss 是训练策略 (是否 shift、是否 z-loss、
   是否带 aux loss 加权), 属于 trainer; 塞进 wrapper 会把 trainer 的一半逻辑
-  搬进模型层.
+  搬进模型层. **阶段 1 已实测**: `Trainer._loss` 与 HF 自己的 `.loss` 逐位相等
+  (abs diff 0.0), 所以这条分层没有付出任何数值代价.
 - `get_attention_masks` 是 CP 与 packed-document 训练**必需**的, 而 CP 已经建好了
   (`parallel/cp_ep.py`), 没有 mask 装配它的等价脚本就跑不起来.
 - PP 需要 property setter 来原地替换 stage.
 
-`bundle.py` 只保留**构建职责** (`build_bundle`), 类名统一为 `HFTransformerModel`,
-`HFModelWrapper` 这个名字从仓库消失.
+**执行结果 (阶段 1)**: `bundle.py` 整个删除, 不走"只留 `build_bundle`"的中间态 ——
+`build_bundle` 的全部内容就是 `AutoModelForCausalLM.from_config` + `to(device)`,
+而 `HFTransformerModel.__init__` 自己就能从 config 构建. 保留一个只剩三行的
+`bundle.py` 只会让"模型层在哪"这个问题重新出现两个答案, 正是 §1.5 那个诊断
+要消掉的东西. 配置映射 (`hf_model` -> HF config, 含离线 arch overrides)
+并入 `models/hf_wrapper.py:build_model_config_for`. `HFModelWrapper` 这个名字
+从仓库消失.
 
 ### 5.2 归一后的接口
 
@@ -476,7 +488,9 @@ class HFTransformerModel(nn.Module):
     2. OUTPUT: return raw logits. Loss is the trainer's business.
     """
 
-    def __init__(self, hf_model: nn.Module, *, attn_mask_type: str = "causal"): ...
+    def __init__(self, config: PretrainedConfig) -> None: ...
+    # 传入的是 HF config, 不是已构建的模型: 构建职责也在这一层
+    # (build_model_config_for 负责 cfg -> config 的映射, 见阶段 1)
 
     # -- 平行层读取的五个名字 ------------------------------------------------
     @property
@@ -493,6 +507,16 @@ class HFTransformerModel(nn.Module):
     def enable_weight_tying(self) -> bool: ...    # 按 identity 判, 不按 config 标志
 
     def get_attention_masks(self, positions: torch.Tensor): ...   # -> BlockMask
+
+    def _apply_attention(
+        self, positions: torch.Tensor, attention_masks
+    ) -> dict[str, Any]:
+        """ROLE-IN / CONVENTION-OUT 的缝: 决定交给 decoder 什么.
+
+        角色固定: 永远经某个 attention 实现, 且永远有一个 mask 描述可注意范围.
+        而"某个后端想要什么形状的 mask" (flex 要 BlockMask, sdpa 要 bool 张量
+        且靠 mask 是否存在推因果) 全部收敛在这里, 其他任何地方都不判断后端.
+        """
 
     def forward(self, input_ids, *, positions=None, attention_masks=None) -> Tensor:
         """Return logits (T, V). Deliberately NOT the loss: shifting labels and
@@ -638,32 +662,51 @@ def apply_tp(model, *, plan: ParallelPlan):
   `models/spec.py` 的真实引用者只有 `rope.py` 的文档字符串, 写成"被 `registry.py` 取代"
   是超前表述 —— `registry.py` 要到阶段 3 才存在.
 
-### 阶段 1: 统一模型层 (收敛 §5.1)
+### 阶段 1: 统一模型层 (收敛 §5.1) — 已完成
 
 - `HFTransformerModel` 成为唯一 wrapper; `forward` 返回 logits.
-- trainer 承担 loss 计算 (从 `labels` 移位 + 交叉熵).
-- `bundle.py` 删除 (构建职责并入 `trainer`), `tests/test_hf_wrapper.py` 并入
-  `tests/test_core.py`.
-- **验收前必须解决的前置**: 今天 `HFTransformerModel` 在**无 CUDA 的机器上直接跑不起来**:
+- trainer 承担 loss 计算 (`_loss`: 丢弃最后一个 logit / 第一个 label, float32 交叉熵).
+- `bundle.py` 删除 (构建职责并入 `trainer` 的 `build_model_config_for`),
+  `tests/test_hf_wrapper.py` 并入 `tests/test_core.py`.
+- **必须解决的前置**: 阶段 0 实测 `HFTransformerModel` 在**无 CUDA 的机器上直接跑不起来**:
 
   ```
   InductorError: NotImplementedError: torch.compile on current platform is
   not supported for CPU.  target: flex_attention
   ```
 
-  (flex attention 走 inductor, inductor 没有 CPU 后端.) 所以把 trainer 切到
-  `HFTransformerModel` 的同时, 必须加一个 `"_attn_implementation"` 回退:
-  无 CUDA 时用 `"sdpa"`. 这也解释了为什么原计划里"阶段 0 就把 `test_hf_wrapper.py`
-  并入 `test_core.py`"走不通 —— 那次合并已经顺带把回退带进来了.
-- **验收 (已修正)**: 原计划的"loss 逐位一致"**不成立**, 因为回退把 attention
-  从 flex 换成 sdpa, 数值必然变. 阶段 1 的正确门禁是:
-  1. CPU 上 `HFTransformerModel` 的前向能跑通 (回退生效);
-  2. 回退到 sdpa 后, 单设备 `--steps N` 的 loss **收敛**(单调下降且量级正常),
-     不是逐位相等;
-  3. 在 **CUDA 机器**上补一次带 flex 的逐位对拍 —— 那台机器上回退不触发,
-     "wrapper 返回 loss -> trainer 算 loss" 这条改动本身必须零数值差异.
+  (flex attention 走 inductor, inductor 没有 CPU 后端.) 解法是 `_flex_supported()`:
+  无 CUDA 时把 `_attn_implementation` 设为 `"sdpa"`. 这也解释了为什么原计划里
+  "阶段 0 就把 `test_hf_wrapper.py` 并入 `test_core.py`"走不通 —— 那次合并必然
+  顺带把回退带进来.
+
+- **回退不是"算术降级", 真相比原计划的担心更微妙.** 两条路本来可以给出同一个数,
+  但有个陷阱: HF 的 sdpa 包装器**只要 mask 存在就忽略 `is_causal`, 改从 mask 推因果**.
+  所以把 `BlockMask` 传下去会静默关掉 mask (或直接崩, `BlockMask` 没有 `.ndim`).
+  正确做法是**什么都不传**, 让 HF 走它自己的路径 —— 它只在必须时才物化 4D mask
+  (滑窗层、padding), 否则返回 `None`, 并据此决定 `is_causal`.
+  (`is_causal=True` 显式传下去反而会与 HF 自己物化的 mask 撞车: sdpa 拒绝
+  `attn_mask` 与 `is_causal=True` 同时出现.)
+
+  这段逻辑被收进一个显式的**缝**——`HFTransformerModel._apply_attention(positions, masks)`:
+  角色固定 ("永远经某个 attention 实现, 永远喂它一个描述可注意范围的 mask"),
+  而"某个后端想要什么形状的 mask"在这里被隔离. 于是 mask **无条件构建**,
+  即使最后被丢弃 —— 不建会让两条路差的就不只是后端了.
+  真正失去的能力只有 **packed-document masking**: `get_attention_masks` 仍能造出
+  正确的 `BlockMask`, 只是没有 flex kernel 去跑它. 这个缺口不静默: 位置出现回退
+  (即 packed 序列) 时 `_apply_attention` 直接 `ValueError`.
+
+- **验收 (已修正)**: 原计划的"loss 逐位一致"**不成立**, 因为回退把 attention 从
+  flex 换成 sdpa, 数值必然变. 阶段 1 实际的门禁与结果:
+  1. CPU 上前向跑通 —— 通过.
+  2. **trainer 的 `_loss` 与 HF 自己的 `.loss` 逐位相等** —— 通过, `abs diff = 0.0`,
+     `torch.equal(...) is True`. 这条比"收敛"强得多: 它把"接口重构"这一半单独锁死.
+  3. **真的能学**: 固定一个 batch 过拟合 200 步, `4.8516 -> 0.7588`
+     (最后 50 步均值 `1.0133`). 用固定 batch 而不是"loss 下降", 因为随机 token 的
+     下界就是 `ln(vocab) = 4.852`, 在它附近的抖动不含信息.
+  4. **CUDA 上补 flex 逐位对拍** —— 仍未做 (本机无 CUDA), 是阶段 1 唯一的欠账.
 - **理由**: 把"接口重构"和"attention 后端切换"混在一次对拍里, 会得到一个
-  既无法归因、又必然失败的验收标准.
+  既无法归因、又必然失败的验收标准; 拆开后, 不变量 (2) 在 CPU 上就能钉死.
 
 ### 阶段 2: SEAM 2 — 分布式上下文
 

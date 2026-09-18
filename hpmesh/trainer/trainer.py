@@ -9,13 +9,24 @@ parallelism dimension is an explicit, individually-understandable call.
 
 from __future__ import annotations
 
+from dataclasses import dataclass
+
 import torch
 import torch.distributed as dist
+import torch.nn.functional as F
 
 from .. import parallel
-from ..bundle import Batch, ModelBundle, build_bundle
 from ..mesh import build_mesh, build_parallel_dims, init_distributed
+from ..models.hf_wrapper import HFTransformerModel, build_model_config_for
 from .config import HybridMeshConfig
+
+
+@dataclass
+class Batch:
+    """One micro-batch: input_ids/labels on the model's device."""
+
+    input_ids: torch.Tensor
+    labels: torch.Tensor
 
 
 class Trainer:
@@ -37,9 +48,8 @@ class Trainer:
         self.parallel_dims = build_parallel_dims(cfg, self.world_size)
         self.mesh = build_mesh(self.parallel_dims)
 
-        # 2. build the model bundle
-        self.bundle: ModelBundle = build_bundle(cfg, device=self.device)
-        model = self.bundle.model
+        # 2. the model -- HF's own initialization, wrapped for this loop
+        model = HFTransformerModel(build_model_config_for(cfg)).to(self.device)
 
         # 3. parallelism, in Titan's order: tp/pp/cp/ep declared first, fsdp last
         #    (outer wraps inner). Each is a no-op when its degree is 1.
@@ -94,13 +104,38 @@ class Trainer:
             labels=batch.labels[sl].to(self.device),
         )
 
+    @staticmethod
+    def _flatten(batch: Batch) -> tuple[torch.Tensor, torch.Tensor]:
+        """Flatten ``(B, T)`` into the ``(B*T,)`` shape the wrapper takes.
+
+        The wrapper is a single-sequence entry point -- it adds and removes its
+        own batch dim around the decoder call. This micro-batch is one document
+        per row of length ``max_seq_len``, so the concatenation is exactly the
+        single causal document the fallback attention path expects; RoPE is
+        driven per row because positions restart at each row boundary.
+        """
+        return batch.input_ids.reshape(-1), batch.labels.reshape(-1)
+
     def train_step(self, step: int) -> float:
         batch = self._dp_slice(self._make_batch(step))
+        input_ids, labels = self._flatten(batch)
         self.optimizer.zero_grad(set_to_none=True)
-        loss = self.model(batch.input_ids, batch.labels)
+        loss = self._loss(self.model(input_ids), labels)
         loss.backward()
         self.optimizer.step()
         return float(loss.detach())
+
+    @staticmethod
+    def _loss(logits: torch.Tensor, labels: torch.Tensor) -> torch.Tensor:
+        """Next-token cross-entropy over the flattened sequence.
+
+        The same arithmetic HF's ``ForCausalLM`` performs when handed ``labels``:
+        cast to float32, drop the last logit and the first label, average. It
+        lives here rather than in the model because the objective is training
+        policy -- the wrapper returns logits and the trainer decides what they
+        mean.
+        """
+        return F.cross_entropy(logits[:-1].float(), labels[1:])
 
     def _all_reduce_loss(self, loss: float) -> float:
         """Average the loss across DP ranks so logging reflects the global batch."""

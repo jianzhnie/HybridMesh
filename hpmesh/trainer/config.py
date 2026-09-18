@@ -410,7 +410,7 @@ class HybridMeshConfig:
                 f"cp ({self.parallel.cp})"
             )
 
-    # -- Flat view: lets mesh/bundle/trainer read cfg.dp / cfg.lr / ... uniformly. --
+    # -- Flat view: lets mesh/trainer read cfg.dp / cfg.lr / ... uniformly. --
     @property
     def hf_model(self) -> str:
         return self.model.model_name_or_path
