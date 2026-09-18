@@ -7,13 +7,11 @@
 from __future__ import annotations
 
 import logging
-
 from collections.abc import Iterable
 from dataclasses import dataclass, field
 from enum import StrEnum
 
 from torch.distributed.device_mesh import DeviceMesh, init_device_mesh
-
 from torchtitan.config.configs import ParallelismConfig
 from torchtitan.tools.utils import device_type
 
