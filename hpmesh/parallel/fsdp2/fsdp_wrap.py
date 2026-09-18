@@ -26,13 +26,13 @@ import torch.distributed as dist
 from torch.distributed._composable.fsdp import FSDPModule
 from torch.distributed.device_mesh import DeviceMesh
 
-from ..trainer.config import HybridMeshConfig
+from ...trainer.config import HybridMeshConfig
+from ..parallel_dims import ParallelDims
 from .fsdp import (
     apply_fsdp_to_decoder,
     resolve_fsdp_mesh,
     resolve_sparse_fsdp_mesh,
 )
-from .parallel_dims import ParallelDims
 
 __all__ = ["apply_fsdp"]
 

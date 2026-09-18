@@ -41,7 +41,7 @@ import torch
 import torch.nn as nn
 from torch.distributed.device_mesh import DeviceMesh
 
-from ..trainer.config import HybridMeshConfig
+from ...trainer.config import HybridMeshConfig
 from .linear import AllGatherLinear, LinearReduceScatter
 
 ShardKind = Literal["colwise", "rowwise"]

@@ -28,7 +28,7 @@ import torch.distributed as dist
 import torch.nn as nn
 import torch.nn.functional as F
 
-from ..parallel.spmd_types import spmd_mesh_group
+from ...parallel.spmd_types import spmd_mesh_group
 
 __all__ = ["Embedding"]
 

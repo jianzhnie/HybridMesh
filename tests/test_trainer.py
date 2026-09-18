@@ -12,24 +12,24 @@ from __future__ import annotations
 import torch
 import torch.nn as nn
 
+from hpmesh.components.checkpointer.checkpoint import Checkpointer
 from hpmesh.components.loss import (
     IGNORE_INDEX,
     cross_entropy_loss,
     next_token_targets,
     vocab_shard_bounds,
 )
+from hpmesh.datasets.random_data import (
+    Batch,
+    DataLoaderExhausted,
+    RandomTokenSource,
+    batch_iterator,
+)
 from hpmesh.parallel.collectives import (
     clip_grad_norm_,
     dist_max,
     dist_sum,
     dist_sum_tensor,
-)
-from hpmesh.trainer.checkpoint import Checkpointer
-from hpmesh.trainer.data import (
-    Batch,
-    DataLoaderExhausted,
-    RandomTokenSource,
-    batch_iterator,
 )
 
 # -- losses -------------------------------------------------------------------
@@ -64,9 +64,9 @@ def test_cross_entropy_ignores_the_shifted_padding() -> None:
 
     total = cross_entropy_loss(logits, targets)
 
-    # Same number as computing the CE over only the two real targets.
-    kept = torch.tensor([1, 6])
-    expected = cross_entropy_loss(logits[[0, 3]], kept)
+    # Same number as computing the CE over only the three real targets.
+    kept_logits = logits[[0, 1, 3]]
+    expected = cross_entropy_loss(kept_logits, torch.tensor([1, 2, 6]))
     assert torch.allclose(total, expected, atol=1e-6)
 
 

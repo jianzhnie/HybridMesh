@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import pytest
 
-from hpmesh.parallel.pipeline import generate_llm_fqn_per_model_part
+from hpmesh.parallel.pepeline_parallel.pipeline import generate_llm_fqn_per_model_part
 
 
 def test_single_stage_owns_everything() -> None:

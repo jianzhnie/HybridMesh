@@ -31,13 +31,32 @@ import torch.nn as nn
 
 from ..trainer.config import HybridMeshConfig
 from .cp_ep import apply_cp_ep
-from .fsdp_wrap import apply_fsdp
-from .pp import apply_pp
-from .tp import apply_tp
+from .fsdp2.fsdp_wrap import apply_fsdp
+from .tensor_parallel.tp import apply_tp
 
 logger = logging.getLogger(__name__)
 
 __all__ = ["parallelize_hf_transformers"]
+
+
+def _reject_pp(parallel_dims) -> None:
+    """Fail loudly on ``pp > 1``, which no code here can honour.
+
+    ``pepeline_parallel/pipeline.py`` can split a model into stages, but nothing
+    builds a schedule over them, so a PP run would train every rank on the whole
+    model and look like a working job. Raising here -- before the loop starts --
+    is the only outcome that is not silently wrong.
+
+    ``parallel_dims`` is ``None`` in the single-process case, where there is no
+    mesh and so no PP to reject.
+    """
+    if parallel_dims is not None and parallel_dims.pp_enabled:
+        raise NotImplementedError(
+            "pipeline parallelism is not wired: "
+            "parallel/pepeline_parallel/pipeline.py splits the model into "
+            "stages, but no schedule drives them. Set pp=1, or see "
+            "docs/hybridmesh_design.md, stage 4."
+        )
 
 
 def parallelize_hf_transformers(
@@ -49,12 +68,12 @@ def parallelize_hf_transformers(
 ) -> nn.Module:
     """Apply every parallelism dimension the config asks for, in order.
 
-    Returns the (possibly wrapped) model; ``apply_pp`` is still a stub, so a
-    ``pp > 1`` config raises there rather than producing a schedule.
+    Returns the (possibly wrapped) model.
     """
+    _reject_pp(parallel_dims)
+
     model = apply_tp(model, mesh, cfg)
     model = apply_cp_ep(model, mesh, cfg)
-    apply_pp(model, mesh, cfg)  # returns the schedule once PP is implemented
 
     if cfg.compile:
         model = torch.compile(model)
