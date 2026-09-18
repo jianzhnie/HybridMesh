@@ -6,7 +6,7 @@ NOT reimplement the model; we wrap AutoModelForCausalLM and expose a uniform
 forward that returns a scalar loss (HF already computes it when given labels).
 
 Learning note: keep this thin. The interesting distributed machinery lives in
-parallelism/, not here.
+parallel/, not here.
 """
 
 from __future__ import annotations
@@ -23,6 +23,7 @@ from .trainer.config import HybridMeshConfig
 @dataclass
 class Batch:
     """One micro-batch. input_ids/labels are (batch, seq) on the model's device."""
+
     input_ids: torch.Tensor
     labels: torch.Tensor
 
