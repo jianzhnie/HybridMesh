@@ -76,6 +76,68 @@ def test_plan_resolution_from_hf_string_map() -> None:
     assert _match(plan, "layers.0.up_proj") is None
 
 
+def test_plan_resolution_prefers_the_tp_plan_property_over_the_attribute() -> None:
+    """A wrapper that re-parents the model must win over the raw attribute.
+
+    ``HFTransformerModel`` holds the HF model under ``self.model``, so its module
+    paths carry a ``model.`` prefix the raw HF plan does not. Reading ``_tp_plan``
+    off such a wrapper yields patterns that match nothing.
+    """
+
+    class Wrapper(nn.Module):
+        _tp_plan = {"layers.*.q_proj": "colwise"}
+
+        @property
+        def tp_plan(self) -> dict[str, str]:
+            return {"model.layers.*.q_proj": "colwise"}
+
+    plan = _resolve_plan(Wrapper(), None)
+    assert set(plan) == {"model.layers.*.q_proj"}
+
+
+def test_a_wrapper_tp_plan_matches_the_modules_it_exposes() -> None:
+    """The regression this locks in: TP matched 0 of 15 projections.
+
+    Two things had to line up and neither did. The plan lives on the inner HF
+    model, not the wrapper, so ``_resolve_plan`` found nothing; and even once
+    found, HF's patterns are spelled relative to the HF model while the
+    wrapper's ``named_modules`` paths sit under ``model.``. ``apply_tp`` then
+    matched nothing and left the model replicated -- a TP run that silently
+    trains a non-sharded model and looks like a success.
+
+    Checked on the real wrapper so the path spelling is the real one.
+    """
+    from hpmesh.models.hf_wrapper import HFTransformerModel, build_model_config
+
+    config = build_model_config(
+        "llama",
+        seq_len=32,
+        arch_overrides={
+            "vocab_size": 32,
+            "hidden_size": 8,
+            "intermediate_size": 16,
+            "num_hidden_layers": 2,
+            "num_attention_heads": 2,
+            "num_key_value_heads": 2,
+        },
+    )
+    model = HFTransformerModel(config)
+    plan = _resolve_plan(model, None)
+
+    assert plan, "the wrapper exposed no usable TP plan"
+
+    matched = [
+        path
+        for path, mod in model.named_modules()
+        if isinstance(mod, nn.Linear) and _match(plan, path) is not None
+    ]
+    # 7 projections per layer x 2 layers. ``lm_head`` is deliberately absent:
+    # HF's plan does not shard it, which is why the vocab-parallel loss path
+    # stays unreachable until a Shard(0) head plan lands.
+    assert len(matched) == 14
+    assert not any(path.endswith("lm_head") for path in matched)
+
+
 def test_apply_tp_is_a_noop_when_tp_is_one() -> None:
     model = nn.Linear(4, 4)
     cfg = HybridMeshConfig()  # tp defaults to 1

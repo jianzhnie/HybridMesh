@@ -38,6 +38,7 @@ __all__ = [
     "maybe_set_sparse_mesh",
     "plain_tensor_to_dtensor_state_dict",
     "spmd_dense_mesh",
+    "spmd_context",
     "spmd_mesh_group",
     "spmd_sparse_mesh",
     "spmd_mesh_size",
@@ -214,6 +215,45 @@ def maybe_set_sparse_mesh() -> Iterator[None]:
         return
 
     with set_current_spmd_mesh(mesh):
+        yield
+
+
+@contextlib.contextmanager
+def spmd_context(parallel_dims: ParallelDims | None) -> Iterator[None]:
+    """Make the run's meshes answerable by name for the duration of the block.
+
+    This is the one place the ambient SPMD state is entered. Everything
+    downstream that asks "which process group is the TP axis?" -- the MoE token
+    reduction, the vocab-parallel embedding, the fused dist-GEMMs -- reads it
+    from here rather than receiving a mesh through its arguments, which is what
+    keeps a ``DeviceMesh`` from having to thread through every model component.
+
+    Two pieces of state, and both are required:
+
+    * ``set_spmd_meshes`` registers the dense and sparse meshes so
+      ``spmd_dense_mesh`` / ``spmd_sparse_mesh`` can answer. The sparse mesh is
+      ``None`` unless EP is on, and ``None`` there reads as "no EP axis".
+    * ``set_current_spmd_mesh`` pushes onto the mesh stack, which is what the
+      by-name lookups (``spmd_mesh_group`` / ``current_spmd_mesh``) read.
+      It also enters ``spmd_types.set_current_mesh``, so a model that wants
+      *static* SPMD type checking gets a live mesh too.
+
+    Without the second one the first is inert: the registry would hold a mesh
+    that no lookup consults, and every caller would keep taking its "no mesh"
+    branch -- the exact silent degradation this exists to remove.
+
+    ``parallel_dims is None`` is the single-process case: there is no process
+    group and no axis, so every lookup below correctly answers ``None``/``1``.
+    """
+    if parallel_dims is None:
+        yield
+        return
+
+    set_spmd_meshes(
+        dense_mesh=parallel_dims.spmd_dense_mesh(),
+        sparse_mesh=parallel_dims.spmd_sparse_mesh(),
+    )
+    with set_current_spmd_mesh(spmd_dense_mesh()):
         yield
 
 

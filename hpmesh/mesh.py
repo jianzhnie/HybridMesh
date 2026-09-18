@@ -8,26 +8,30 @@ run along one mesh axis.
 The degrees come from ``ParallelismConfig`` (the torchtitan-shaped config hpmesh
 adopts) and are resolved/validated by ``ParallelDims.from_config`` -- the same
 class torchtitan uses -- so the ``world_size = dp * cp * tp * pp`` constraint is
-enforced in exactly one place. We then build the named (dp, cp, tp, pp) mesh the
-trainer indexes uniformly.
+enforced in exactly one place.
 
-TODO: adopt ``ParallelDims.build_mesh()``'s richer axis set (``dp_shard``,
-``efsdp``, ``loss``) once FSDP/EP need to distinguish replicate from shard axes.
+``build_mesh`` deliberately does NOT call ``init_device_mesh`` itself. The
+parallelism layer needs more than one view of the same ranks -- FSDP wants
+``(dp_replicate, dp_shard, cp, tp)``, SPMD type checking wants ``(dp, cp, tp)``
+with the two DP axes folded and singletons dropped, EP wants a separate sparse
+mesh -- and those views have to come from ONE unflatten of the world mesh or they
+end up with disjoint process groups covering the same ranks. ``ParallelDims``
+owns that unflatten; this function just hands back the dense view the parallel
+``apply_*`` functions index. Building a second mesh here would work right up
+until something addressed a rank through one group and collected on another.
 """
 
 from __future__ import annotations
 
-import math
-
 import torch.distributed as dist
-from torch.distributed.device_mesh import DeviceMesh, init_device_mesh
 
 from .parallel.parallel_dims import ParallelDims
 from .trainer.config import HybridMeshConfig
-from .utils.device import device_type
 
 # Mesh axis names. `axis` names a specific DeviceMesh axis; `dim` is for shapes.
-MESH_AXES = ("dp", "cp", "tp", "pp")
+# These are the axes of the dense mesh the parallel layer is handed; ``pp`` is
+# not among them because pipeline parallelism is not wired (see parallel/pp).
+MESH_AXES = ("dp", "cp", "tp")
 
 
 def build_parallel_dims(cfg: HybridMeshConfig, world_size: int) -> ParallelDims | None:
@@ -41,30 +45,41 @@ def build_parallel_dims(cfg: HybridMeshConfig, world_size: int) -> ParallelDims 
     return ParallelDims.from_config(cfg.parallel, world_size)
 
 
-def build_mesh(parallel_dims: ParallelDims | None) -> DeviceMesh | None:
-    """Build a named 4-d device mesh (dp, cp, tp, pp) covering all ranks.
+def build_mesh(parallel_dims: ParallelDims | None):
+    """The dense ``(dp, cp, tp)`` mesh the parallel ``apply_*`` functions index.
 
     Takes the *already-resolved* ``ParallelDims`` (see ``build_parallel_dims``)
     rather than a config, so a run has exactly one degree-resolution object --
     and therefore one set of process groups. ``None`` in, ``None`` out: there is
     no process group and no parallelism to describe.
+
+    Aliases ``ParallelDims.spmd_dense_mesh()``, which is the same object the
+    SPMD context registers, so ``apply_tp``'s ``mesh["tp"]`` and a component's
+    ``spmd_mesh_group("tp")`` resolve to the very same process group.
     """
     if parallel_dims is None:
         return None
-    # ``dp`` here is the full data-parallel group (dp_replicate * dp_shard);
-    # torchtitan splits the two so FSDP can shard on one and replicate on the
-    # other, which is more than this learning mesh needs to expose.
-    dp = parallel_dims.dp_replicate * parallel_dims.dp_shard
-    mesh_shape = (dp, parallel_dims.cp, parallel_dims.tp, parallel_dims.pp)
-    assert math.prod(mesh_shape) == parallel_dims.world_size, (
-        f"mesh shape {mesh_shape} (dp*cp*tp*pp) != "
-        f"world_size={parallel_dims.world_size}"
+    mesh = parallel_dims.spmd_dense_mesh()
+    if mesh.mesh_dim_names != MESH_AXES:
+        raise ValueError(
+            f"dense mesh axes {mesh.mesh_dim_names} != expected {MESH_AXES}; the "
+            "parallel layer indexes these names directly"
+        )
+    # The dense mesh spans dp * cp * tp ranks. PP is not an axis of it, so a
+    # ``pp > 1`` run would be handed a mesh that silently covers only a fraction
+    # of the world. ``_reject_pp`` refuses those earlier; this is the backstop.
+    covered = (
+        parallel_dims.dp_replicate
+        * parallel_dims.dp_shard
+        * parallel_dims.cp
+        * parallel_dims.tp
     )
-    return init_device_mesh(
-        device_type,
-        mesh_shape,
-        mesh_dim_names=list(MESH_AXES),
-    )
+    if covered != parallel_dims.world_size:
+        raise ValueError(
+            f"dense mesh (dp*cp*tp = {covered}) does not cover the world "
+            f"({parallel_dims.world_size} ranks); is pp > 1?"
+        )
+    return mesh
 
 
 def init_distributed() -> tuple[int, int, int]:

@@ -329,6 +329,30 @@ class HFTransformerModel(nn.Module):
         """Record the CP mesh so logit dumps can tag their CP coordinate."""
         self.cp_mesh = mesh
 
+    @property
+    def tp_plan(self) -> dict[str, str]:
+        """HF's TP plan, with patterns rewritten to THIS wrapper's module paths.
+
+        HF states its plan relative to the model it ships -- ``layers.*.q_proj``,
+        plus a ``model.``-prefixed variant for families that nest one level
+        deeper. The parallel layer, however, walks *this* wrapper, whose
+        ``named_modules`` paths all sit under ``model.`` because that is the
+        attribute the HF CausalLM is held in. Prefixing every pattern with
+        ``model.`` maps one spelling onto the other, so HF's own two variants
+        both resolve here and no call site has to know either layout.
+
+        Without this the plan is simply not found (the attribute lives on the
+        inner HF model) and ``apply_tp`` silently shards nothing -- a replicated
+        run that looks like a working one. That failure is what makes this
+        translation load-bearing rather than cosmetic.
+
+        Returns ``{}`` when the model ships no plan. That is left as an empty
+        plan rather than an error because "no declared plan" is a real answer:
+        ``apply_tp`` then leaves the model replicated instead of guessing.
+        """
+        plan = getattr(self.model, "_tp_plan", None) or {}
+        return {f"model.{pattern}": spec for pattern, spec in plan.items()}
+
     def named_children(self):
         """Present the decoder's parts as direct children.
 

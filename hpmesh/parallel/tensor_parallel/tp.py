@@ -160,12 +160,18 @@ def rowwise() -> ShardingConfig:
 def _resolve_plan(model: nn.Module, plan) -> dict[str, ShardingConfig]:
     """Normalize a plan into ``{module_path_pattern: ShardingConfig}``.
 
-    ``plan`` may be ``None`` (use the model's HF ``tp_plan``), a map of patterns
+    ``plan`` may be ``None`` (use the model's declared plan), a map of patterns
     to ``ShardingConfig``, or a map of patterns to ``"colwise"`` / ``"rowwise"``
     strings (the form HF ships).
+
+    When ``plan`` is omitted the model's own declaration is used, preferring the
+    ``tp_plan`` property over the raw ``_tp_plan`` attribute: a wrapper that
+    re-parents the HF model has to rewrite the patterns to its own module paths
+    (see ``HFTransformerModel.tp_plan``), and reading the raw attribute on such a
+    wrapper yields either nothing or patterns that match no module.
     """
     if plan is None:
-        plan = getattr(model, "_tp_plan", None) or {}
+        plan = getattr(model, "tp_plan", None) or getattr(model, "_tp_plan", None) or {}
     resolved: dict[str, ShardingConfig] = {}
     for pattern, spec in plan.items():
         if isinstance(spec, ShardingConfig):
