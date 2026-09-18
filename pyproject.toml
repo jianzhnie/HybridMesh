@@ -1,0 +1,34 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "hpmesh"
+version = "0.1.0"
+description = "Hybrid Parallel training over a Torch DeviceMesh -- a minimal, learning-oriented distributed-training framework (FSDP / TP / PP / CP / EP)."
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "Apache-2.0" }
+authors = [{ name = "jianzhnie" }]
+keywords = ["distributed-training", "pytorch", "fsdp", "tensor-parallel", "pipeline-parallel", "device-mesh"]
+dependencies = [
+    "torch>=2.4",
+    "transformers>=4.45",
+    "tyro>=0.8",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8", "ruff>=0.6"]
+
+[project.scripts]
+hpmesh-train = "hpmesh.train:main"
+
+[tool.setuptools.packages.find]
+include = ["hpmesh*"]
+
+[tool.ruff]
+line-length = 88
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B"]
