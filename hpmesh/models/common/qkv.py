@@ -96,11 +96,24 @@ class QKVLinear(nn.Module):
         self, x: torch.Tensor
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """Project ``x`` and return ``(q, k, v)``, each ``(T, n_heads, H)``."""
-        num_tokens = x.shape[0]
-        # Fused QKV: one matmul, then reshape and split along R.
+        return self._split(self._project(x))
+
+    def _project(self, x: torch.Tensor) -> torch.Tensor:
+        """Run the fused projection. Subclasses swap this for a fused collective.
+
+        The seam exists so a backend that folds the TP all-gather into the GEMM
+        can replace only the matmul; the reshape, the R-dim split and the shape
+        normalization downstream are identical either way.
+        """
+        return self.wqkv(x)
+
+    def _split(
+        self, qkv: torch.Tensor
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        """Reshape the fused output by KV group and cut out ``(q, k, v)``."""
+        num_tokens = qkv.shape[0]
         # [T, n_kv_heads * R * head_dim] -> [T, n_kv_heads, R, head_dim].
         # -1 rather than n_kv_heads so a TP-sharded output still reshapes.
-        qkv = self.wqkv(x)
         qkv = qkv.view(num_tokens, -1, self.r_dim, self.head_dim)
 
         local_num_tokens = qkv.shape[0]
