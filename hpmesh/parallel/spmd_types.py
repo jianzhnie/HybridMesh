@@ -17,7 +17,8 @@ import spmd_types as spmd
 import torch
 from torch.distributed.device_mesh import DeviceMesh
 from torch.distributed.tensor import DTensor
-from torchtitan.distributed.parallel_dims import (
+
+from .parallel_dims import (
     MeshAxisName,
     ParallelDims,
     unfold_dp_axes,
@@ -70,7 +71,7 @@ def plain_tensor_to_dtensor_state_dict(
     parallel_dims: ParallelDims,
 ) -> dict[str, Any]:
     """Represent plain local state tensors as DTensors for state transfer."""
-    from torchtitan.protocols.sharding import resolve_placements
+    from .sharding import resolve_placements
 
     dtensor_state_dict = dict(state_dict)
     with torch.no_grad():

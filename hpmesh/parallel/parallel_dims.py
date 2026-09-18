@@ -12,8 +12,9 @@ from dataclasses import dataclass, field
 from enum import StrEnum
 
 from torch.distributed.device_mesh import DeviceMesh, init_device_mesh
-from torchtitan.config.configs import ParallelismConfig
-from torchtitan.tools.utils import device_type
+
+from ..trainer.config import ParallelismConfig
+from ..utils.device import device_type
 
 logger = logging.getLogger(__name__)
 

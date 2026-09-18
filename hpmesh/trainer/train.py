@@ -1,16 +1,17 @@
 """Console entry point: parse the config groups and run the Trainer.
 
 HfArgumentParser is given the four argument GROUPS (not the composed config), so
-each field becomes a clean flat CLI flag (--steps, --dp, --learning_rate, ...)
-and each group runs its own __post_init__ validation. We then compose them into
-the single HybridMeshConfig. A YAML/JSON file can also be passed positionally.
+each field becomes a clean flat CLI flag (--steps, --data_parallel_shard_degree,
+--learning_rate, ...) and each group runs its own __post_init__ validation. We
+then compose them into the single HybridMeshConfig. A YAML/JSON file can also be
+passed positionally.
 
 Single process (step 0):
     python -m hpmesh --steps 20
     # or, after `pip install -e .`:  hpmesh-train --steps 20
 
 Data parallel, 2 ranks (step 1):
-    torchrun --nproc_per_node=2 -m hpmesh --dp 2
+    torchrun --nproc_per_node=2 -m hpmesh --data_parallel_shard_degree -1
 """
 
 from __future__ import annotations

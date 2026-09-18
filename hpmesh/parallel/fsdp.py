@@ -18,7 +18,8 @@ from torch.distributed.fsdp import (
     fully_shard,
 )
 from torch.distributed.tensor import Shard
-from torchtitan.distributed.parallel_dims import ParallelDims
+
+from .parallel_dims import ParallelDims
 
 logger = logging.getLogger(__name__)
 
