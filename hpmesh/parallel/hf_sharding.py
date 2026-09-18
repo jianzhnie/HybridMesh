@@ -31,7 +31,7 @@ import spmd_types as spmd
 import torch.nn as nn
 from spmd_types import SpmdType
 
-from ..models.flex_kernel import HFFlexKernel
+from ..models.common.flex_kernel import HFFlexKernel
 from .parallel_dims import MeshAxisName
 from .placements import (
     dense_activation_placement,

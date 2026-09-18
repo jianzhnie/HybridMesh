@@ -5,7 +5,7 @@
 # LICENSE file in the root directory of this source tree.
 
 import logging
-from typing import TYPE_CHECKING, Any
+from typing import Any
 
 import torch
 import torch.nn as nn
@@ -22,11 +22,6 @@ from torch.distributed.tensor import Shard
 from .parallel_dims import ParallelDims
 
 logger = logging.getLogger(__name__)
-
-
-if TYPE_CHECKING:
-    from ..models.decoder import Decoder
-
 
 _DENSE_STORAGE_AXES = ["dp_replicate", "dp_shard", "cp", "tp"]
 _SPARSE_STORAGE_AXES = ["dp_replicate", "efsdp", "ep"]
@@ -173,7 +168,7 @@ def apply_fsdp_to_vision_encoder(
 
 
 def apply_fsdp_to_decoder(
-    model: "Decoder",
+    model: nn.Module,
     dp_mesh: DeviceMesh,
     param_dtype: torch.dtype,
     reduce_dtype: torch.dtype,
@@ -196,7 +191,7 @@ def apply_fsdp_to_decoder(
     FSDP unit and the expert-parallel prefetching below is skipped.
 
     Args:
-        model (Decoder): The model to apply data parallelism to.
+        model (nn.Module): The model to apply data parallelism to.
         dp_mesh (DeviceMesh): The device mesh to use for data parallelism.
         param_dtype (torch.dtype): The data type to use for model parameters.
         reduce_dtype (torch.dtype): The data type to use for reductions.
