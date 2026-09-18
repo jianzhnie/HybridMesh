@@ -256,6 +256,23 @@ class HFTransformerModel(nn.Module):
     def rotary_emb(self, value: nn.Module | None) -> None:
         self._decoder.rotary_emb = value
 
+    @property
+    def enable_weight_tying(self) -> bool:
+        """Whether ``lm_head`` and the embedding share one ``Parameter``.
+
+        Read by FSDP, which must not let one Parameter be owned by two FSDP
+        units; the two modules are wrapped together when this is true.
+
+        Compared by identity rather than by ``config.tie_word_embeddings``: that
+        flag records intent, and a model may carry an unshared head anyway (or
+        share one the flag does not mention). Identity is also exactly the check
+        FSDP2 itself performs, so the answer here matches what FSDP will do.
+        """
+        embed, head = self.tok_embeddings, self.lm_head
+        if head is None:
+            return False
+        return getattr(embed, "weight", None) is getattr(head, "weight", None)
+
     # -- HF integration hooks --------------------------------------------------
 
     def set_cp_mesh(self, mesh) -> None:
