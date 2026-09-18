@@ -271,7 +271,11 @@ def split_model_into_stages(
             f"v schedules assume 2 stages per rank, got {stages_per_rank}"
         )
         stage_v_pairs = list(
-            zip(range(pp_degree), range(num_stages - 1, pp_degree - 1, -1))
+            zip(
+                range(pp_degree),
+                range(num_stages - 1, pp_degree - 1, -1),
+                strict=True,
+            )
         )
         return stage_v_pairs[pp_rank]
 

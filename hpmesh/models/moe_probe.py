@@ -22,7 +22,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
-from typing import Any, Literal
+from typing import Literal
 
 import torch.nn as nn
 from transformers.configuration_utils import PretrainedConfig
