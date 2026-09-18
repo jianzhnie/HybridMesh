@@ -90,10 +90,13 @@ def test_synthetic_batch_is_deterministic() -> None:
         training=TrainingArguments(global_batch_size=8, max_seq_len=16, seed=42)
     )
     t = _bare_trainer(cfg)
-    b1 = t._make_batch(step=0)
-    b2 = t._make_batch(step=0)
+    # Two independent iterators over the same config must agree: that is what
+    # makes two runs comparable and what makes every DP rank see one global batch.
+    b1 = next(t._data_iterator())
+    b2 = next(t._data_iterator())
     assert torch.equal(b1.input_ids, b2.input_ids)
     assert b1.input_ids.shape == (8, 16)
+    assert torch.equal(b1.labels, b1.input_ids)
 
 
 def test_dp_slice_partitions_global_batch() -> None:
@@ -102,7 +105,7 @@ def test_dp_slice_partitions_global_batch() -> None:
         training=TrainingArguments(global_batch_size=8, max_seq_len=16, seed=42)
     )
     t = _bare_trainer(cfg)
-    batch = t._make_batch(step=0)
+    batch = next(t._data_iterator())
     per = cfg.global_batch_size // 2
     r0 = batch.input_ids[0:per]
     r1 = batch.input_ids[per : 2 * per]
@@ -275,6 +278,8 @@ def test_wrapper_forward_returns_logits_the_trainer_can_score() -> None:
         logits = model(ids)
 
     assert logits.shape == (ids.shape[0], cfg.vocab_size)
-    loss = Trainer._loss(logits, ids)
-    assert loss.ndim == 0
-    assert float(loss) > 0
+    loss_sum, num_valid_tokens = Trainer._loss_sum(logits, ids)
+    assert loss_sum.ndim == 0
+    assert float(loss_sum) > 0
+    # One prediction per token except the last: the sequence is shifted by one.
+    assert num_valid_tokens == ids.shape[0] - 1

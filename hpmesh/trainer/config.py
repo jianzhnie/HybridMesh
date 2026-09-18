@@ -378,6 +378,24 @@ class TrainingArguments:
         },
     )
     log_freq: int = field(default=1, metadata={"help": "Log every N steps"})
+    max_norm: float = field(
+        default=1.0,
+        metadata={
+            "help": "Gradient-norm clip threshold. A non-positive value disables "
+            "clipping but still reports grad_norm."
+        },
+    )
+    checkpoint_folder: str = field(
+        default="./outputs/checkpoints",
+        metadata={"help": "Directory for per-rank training checkpoints"},
+    )
+    checkpoint_interval: int = field(
+        default=0,
+        metadata={
+            "help": "Save a checkpoint every N steps; 0 disables checkpointing "
+            "entirely (no directory is created)."
+        },
+    )
 
     def __post_init__(self) -> None:
         if self.global_batch_size < 1:
@@ -388,6 +406,10 @@ class TrainingArguments:
             raise ValueError(f"max_seq_len must be >= 1, got {self.max_seq_len}")
         if self.steps < 1:
             raise ValueError(f"steps must be >= 1, got {self.steps}")
+        if self.checkpoint_interval < 0:
+            raise ValueError(
+                f"checkpoint_interval must be >= 0, got {self.checkpoint_interval}"
+            )
 
 
 @dataclass
@@ -494,6 +516,18 @@ class HybridMeshConfig:
     @property
     def log_freq(self) -> int:
         return self.training.log_freq
+
+    @property
+    def max_norm(self) -> float:
+        return self.training.max_norm
+
+    @property
+    def checkpoint_folder(self) -> str:
+        return self.training.checkpoint_folder
+
+    @property
+    def checkpoint_interval(self) -> int:
+        return self.training.checkpoint_interval
 
     def derive_dp(self, world_size: int) -> int:
         """Flat passthrough so callers use cfg.derive_dp(world_size) uniformly."""
