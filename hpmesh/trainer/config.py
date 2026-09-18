@@ -13,7 +13,9 @@ schedule, deterministic seeding. Add knobs only when a learning step needs them.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from typing import Literal
 
+import torch
 from transformers import AutoConfig
 
 from hpmesh.utils.logger_utils import get_logger
@@ -62,7 +64,8 @@ class ModelArguments:
 
 @dataclass
 class ParallelArguments:
-    """Hybrid-parallelism degrees. world_size = dp * cp * tp * pp (ep stays 1 until MoE).
+    """Hybrid-parallelism degrees. world_size = dp * cp * tp * pp (ep stays 1
+    until MoE).
 
     dp = -1 means "derive from world_size" once the other degrees are known.
     """
@@ -132,17 +135,18 @@ class ParallelismConfig:
     only `data_parallel_shard_degree` can be negative. 1 means disabled.
     """
 
-    fsdp_reshard_after_forward: Literal[default, always, never] = "default"
+    fsdp_reshard_after_forward: Literal["default", "always", "never"] = "default"
     """
-    `reshard_after_forward` specifies the policy for applying `reshard_after_forward`
-    within an FSDP setup. `reshard_after_forward` controls parameter behavior after forward,
-    trading off memory and communication. See torch's `fully_shard` API for more documentation
-    on `reshard_after_forward`.
+    `reshard_after_forward` specifies the policy for applying
+    `reshard_after_forward` within an FSDP setup. `reshard_after_forward`
+    controls parameter behavior after forward, trading off memory and
+    communication. See torch's `fully_shard` API for more documentation on
+    `reshard_after_forward`.
 
     The supported policies include "default", "always" and "never":
 
-    - "default" applies default resharding behavior, implementing "smart defaults" for known optimal
-      scenarios.
+    - "default" applies default resharding behavior, implementing "smart
+      defaults" for known optimal scenarios.
     - "always" will enable `reshard_after_forward` for all forward passes.
     - "never" will disable `reshard_after_forward` for all forward passes.
     """
@@ -157,50 +161,62 @@ class ParallelismConfig:
     """Tensor Parallelism degree. 1 means disabled."""
 
     enable_sequence_parallel: bool = True
-    """Whether to use SequenceParallel as part of tensor parallelism. Enabled by default."""
+    """Whether to use SequenceParallel as part of tensor parallelism. Enabled
+    by default."""
 
     pipeline_parallel_degree: int = 1
     """
     Pipeline Parallelism degree, or number of ranks. 1 means disabled.
-    If using looped schedules, this still specifies the number of physical ranks, not the number
-    of stages. Stages per rank are inferred from split points degree, and schedule.
+    If using looped schedules, this still specifies the number of physical
+    ranks, not the number of stages. Stages per rank are inferred from split
+    points degree, and schedule.
     """
 
     module_fqns_per_model_part: list[list[str]] | None = None
     """
-    Specify a list of lists containing the FQNs (Fully Qualified Names) of modules for each model chunk.
-    Each inner list represents one model chunk and contains the module names that belong to that chunk.
-    e.g. [['tok_embeddings', 'layers.0'], ['layers.1', 'layers.2'], ['layers.3', 'layers.4']]
+    Specify a list of lists containing the FQNs (Fully Qualified Names) of
+    modules for each model chunk.
+    Each inner list represents one model chunk and contains the module names
+    that belong to that chunk.
+    e.g. [['tok_embeddings', 'layers.0'], ['layers.1', 'layers.2'],
+    ['layers.3', 'layers.4']]
     will create 3 chunks: the first containing tok_embeddings and layers.0,
-    the second containing layers.1 and layers.2, and the third containing layers.3 and layers.4.
-    This provides more explicit control over which modules belong to each chunk compared to split points.
+    the second containing layers.1 and layers.2, and the third containing
+    layers.3 and layers.4.
+    This provides more explicit control over which modules belong to each chunk
+    compared to split points.
     """
 
     pipeline_parallel_first_stage_less_layers: int = 1
     """
-    The number of layers to reduce in the first stage of pipeline parallelism. This is because
-    the first stage has the extra overhead of the embedding layer, which is not present in the other stages.
+    The number of layers to reduce in the first stage of pipeline parallelism.
+    This is because the first stage has the extra overhead of the embedding
+    layer, which is not present in the other stages.
     """
 
     pipeline_parallel_last_stage_less_layers: int = 1
     """
-    The number of layers to reduce in the last stage of pipeline parallelism. This is because
-    the last stage has the extra overhead of the output layer, which is not present in the other stages.
+    The number of layers to reduce in the last stage of pipeline parallelism.
+    This is because the last stage has the extra overhead of the output layer,
+    which is not present in the other stages.
     """
 
     pipeline_parallel_layers_per_stage: int | None = None
     """
-    The number of layers per (virtual) pipeline stage. If specified, the module_fqns_per_model_part will be
-    calculated from the number of layers and pipeline_parallel_degree. If not specified, the
-    layers per stage will be inferred from the model, schedule, and pipeline_parallel_degree.
+    The number of layers per (virtual) pipeline stage. If specified, the
+    module_fqns_per_model_part will be calculated from the number of layers and
+    pipeline_parallel_degree. If not specified, the layers per stage will be
+    inferred from the model, schedule, and pipeline_parallel_degree.
     """
 
     pipeline_parallel_schedule: str = "1F1B"
+    # Supported schedules (see schedules.py#L2161 for the list):
+    # https://github.com/pytorch/pytorch/blob/de4c2a3b4e89d96334dc678d1c3f2ae51a6630a0/torch/distributed/pipelining/schedules.py  # noqa: E501
     """
-    Specify the Pipeline Parallel schedule to use. The supported schedules are:
-    https://github.com/pytorch/pytorch/blob/de4c2a3b4e89d96334dc678d1c3f2ae51a6630a0/torch/distributed/pipelining/schedules.py#L2161.
-    The schedule must be compatible with the split points and stages_per_rank.
-    Looped schedules (e.g. Interleaved1F1B) require specifying pipeline_parallel_degree = number of ranks,
+    Specify the Pipeline Parallel schedule to use. The schedule must be
+    compatible with the split points and stages_per_rank.
+    Looped schedules (e.g. Interleaved1F1B) require specifying
+    pipeline_parallel_degree = number of ranks,
     and split_points = number of stages - 1
     """
 
@@ -441,7 +457,7 @@ class HybridMeshConfig:
             return  # offline architecture name; explicit sizes are authoritative
         try:
             hf_config = AutoConfig.from_pretrained(mp)
-        except Exception as e:  # noqa: BLE001 - surface as a warning, keep explicit values
+        except Exception as e:  # noqa: BLE001 - warn, keep explicit values
             logger.warning("Could not load AutoConfig for '%s': %s", mp, e)
             return
         m = self.model

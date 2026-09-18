@@ -113,7 +113,8 @@ class ParallelDims:
         assert dp_shard >= 1
 
         assert dp_replicate * dp_shard * cp * tp * pp == self.world_size, (
-            f"Invalid parallel dims: dp_replicate({dp_replicate}) * dp_shard({dp_shard}) * "
+            f"Invalid parallel dims: dp_replicate({dp_replicate}) * "
+            f"dp_shard({dp_shard}) * "
             f"cp({cp}) * tp({tp}) * pp({pp}) != WORLD_SIZE({self.world_size})"
         )
 
@@ -143,20 +144,22 @@ class ParallelDims:
         The following mesh dimensions will be created:
 
             pp:      Pipeline Parallelism (PP).
-            batch:   Used by data loading to determine the global batch size and which
-                     part of the data each rank should read. This dimension includes both
-                     ``dp_replicate`` and ``dp_shard``.
-            loss:    Used by all-reduce when computing the loss. Includes ``dp_replicate``,
-                     ``dp_shard``, and ``cp`` degrees, as all of them parallelize the data,
-                     essentially require the weight gradients reduction.
+            batch:   Used by data loading to determine the global batch size and
+                     which part of the data each rank should read. This dimension
+                     includes both ``dp_replicate`` and ``dp_shard``.
+            loss:    Used by all-reduce when computing the loss. Includes
+                     ``dp_replicate``, ``dp_shard``, and ``cp`` degrees, as all of
+                     them parallelize the data, essentially require the weight
+                     gradients reduction.
             dp_replicate: For DDP or HSDP replicate dimension.
             cp:      Context Parallelism (CP).
             tp:      Tensor Parallelism (TP).
             ep:      Expert Parallelism (EP).
             efsdp:   FSDP in the EP region.
 
-        Note: Most dimensions above are created by unflattening the world mesh, except for loss,
-        which is created by flattening the batch and cp dimensions.
+        Note: Most dimensions above are created by unflattening the world mesh,
+        except for loss, which is created by flattening the batch and cp
+        dimensions.
         This API performs the following unflatten operations from the world mesh:
 
             ["pp", "batch", "cp", "tp"]  # dataloading_mesh
@@ -196,7 +199,8 @@ class ParallelDims:
 
         logger.info(
             f"Building device mesh with parallelism: "
-            f"pp={self.pp}, dp_replicate={self.dp_replicate}, dp_shard={self.dp_shard}, "
+            f"pp={self.pp}, dp_replicate={self.dp_replicate}, "
+            f"dp_shard={self.dp_shard}, "
             f"cp={self.cp}, tp={self.tp}, ep={self.ep}"
         )
 
@@ -369,8 +373,8 @@ class ParallelDims:
             DeviceMesh for the requested dimension(s).
 
         Raises:
-            ValueError: If the mesh is not available (dimension size = 1 or not enabled),
-                or if the requested dimension name(s) is not valid.
+            ValueError: If the mesh is not available (dimension size = 1 or not
+                enabled), or if the requested dimension name(s) is not valid.
         """
         mesh = self.get_optional_mesh(dims)
         if mesh is None:
@@ -524,5 +528,5 @@ class ParallelDims:
 
         # Context Parallel requires that seq_len be divisible by 2 * CP degree,
         # when load balancing is enabled (by default).
-        # https://github.com/pytorch/pytorch/blob/4f62dcc/torch/distributed/tensor/experimental/_attention.py#L1246
+        # https://github.com/pytorch/pytorch/blob/4f62dcc/torch/distributed/tensor/experimental/_attention.py#L1246  # noqa: E501
         return self.tp * (self.cp * 2)
