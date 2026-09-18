@@ -5,7 +5,7 @@
 # LICENSE file in the root directory of this source tree.
 
 import logging
-from typing import Any, TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import torch
 import torch.nn as nn
@@ -14,14 +14,19 @@ from torch.distributed.device_mesh import DeviceMesh
 from torch.distributed.fsdp import (
     CPUOffloadPolicy,
     DataParallelMeshDims,
-    fully_shard,
     MixedPrecisionPolicy,
+    fully_shard,
 )
 from torch.distributed.tensor import Shard
 
 from .parallel_dims import ParallelDims
 
 logger = logging.getLogger(__name__)
+
+
+if TYPE_CHECKING:
+    from ..models.decoder import Decoder
+
 
 _DENSE_STORAGE_AXES = ["dp_replicate", "dp_shard", "cp", "tp"]
 _SPARSE_STORAGE_AXES = ["dp_replicate", "efsdp", "ep"]
@@ -266,7 +271,7 @@ def apply_fsdp_to_decoder(
                 reshard_after_forward=reshard_after_forward_policy == "always",
             )
 
-    for layer_id, transformer_block in model.layers.items():
+    for _layer_id, transformer_block in model.layers.items():
         # NOTE: In an MoE layer, we use shard_placement_fn to apply different
         # FSDP mesh and shard placement to different parameters:
         # - When EP > 1: routed experts use edp_mesh, other params use dp_mesh
@@ -396,7 +401,7 @@ def apply_fsdp_to_decoder(
         model.tok_embeddings.set_modules_to_forward_prefetch([transformer_blocks[0]])
 
     for transformer_block, next_transformer_block in zip(
-        transformer_blocks, next_transformer_blocks
+        transformer_blocks, next_transformer_blocks, strict=False
     ):
         if next_transformer_block is not None:
             # pyrefly: ignore [not-callable]
@@ -416,7 +421,7 @@ def apply_fsdp_to_decoder(
         model.lm_head.set_modules_to_backward_prefetch([reversed_transformer_blocks[0]])
 
     for transformer_block, prev_transformer_block in zip(
-        reversed_transformer_blocks, prev_transformer_blocks
+        reversed_transformer_blocks, prev_transformer_blocks, strict=False
     ):
         if prev_transformer_block is not None:
             # pyrefly: ignore [missing-attribute]
