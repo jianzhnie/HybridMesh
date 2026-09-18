@@ -43,13 +43,12 @@ class Trainer:
 
         # 3. parallelism, in Titan's order: tp/pp/cp/ep declared first, fsdp last
         #    (outer wraps inner). Each is a no-op when its degree is 1.
-        model = parallel.apply_tp(model, self.mesh, cfg)
-        model = parallel.apply_cp_ep(model, self.mesh, cfg)
-        parallel.apply_pp(model, self.mesh, cfg)  # returns schedule later (step 3)
-        if cfg.compile:
-            model = torch.compile(model)
-        model = parallel.apply_fsdp(model, self.mesh, cfg)
-        self.model = model
+        self.model = parallel.parallelize_hf_transformers(
+            model,
+            cfg=cfg,
+            mesh=self.mesh,
+            parallel_dims=self.parallel_dims,
+        )
 
         self.optimizer = torch.optim.AdamW(
             self.model.parameters(), lr=cfg.lr, weight_decay=cfg.weight_decay
@@ -114,8 +113,12 @@ class Trainer:
     def train(self) -> None:
         for step in range(self.cfg.steps):
             loss = self.train_step(step)
-            if step % self.cfg.log_freq == 0 and self.rank == 0:
+            if step % self.cfg.log_freq == 0:
+                # The reduction is a collective, so EVERY rank must enter it.
+                # Only the print is rank-gated -- putting the rank check first
+                # would leave rank 0 blocked in all_reduce forever.
                 global_loss = self._all_reduce_loss(loss)
-                print(f"step {step:4d} | loss {global_loss:.6f}")
+                if self.rank == 0:
+                    print(f"step {step:4d} | loss {global_loss:.6f}")
         if dist.is_initialized():
             dist.destroy_process_group()

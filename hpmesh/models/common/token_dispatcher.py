@@ -1,10 +1,24 @@
 """Route tokens to experts: reorder locally, all-to-all across EP ranks.
 
-Vendored from torchtitan ``models/common/token_dispatcher.py`` (the ``Local`` and
-``AllToAll`` dispatchers; the DeepEP/HybridEP backends and the AOT variant are
-dropped -- they need a third-party communication library).
+Vendored from torchtitan ``models/common/token_dispatcher.py``. The ``Local`` and
+``AllToAll`` dispatchers came across; three backends did not, and each is
+unavailable for a different reason:
 
-What changed, and why:
+* ``TorchAOTokenDispatcher`` varies from ``AllToAllTokenDispatcher`` only in its
+  ``_permute``/``_unpermute``, which delegate to torchao's ``permute_and_pad``.
+  torchao is not a dependency, so supporting it means hand-writing the padded
+  expert-major permute -- new arithmetic, not a port, and untestable here.
+* ``DeepEPTokenDispatcher`` and ``HybridEPTokenDispatcher`` drive DeepEP v2's
+  ``ElasticBuffer`` and HybridEP's kernels. Both are CUDA-only, so they cannot
+  be installed or exercised on this (macOS/CPU) machine. Porting them would mean
+  vendoring torchtitan's ``distributed/deepep/`` wrappers (1155 lines) as
+  unrunnable reference code.
+
+None of that is a functional gap: neither backend changes the routing contract,
+only how the tokens cross ranks. The dispatch/combine/metadata interface below
+is the whole contract, and ``AllToAllTokenDispatcher`` implements it.
+
+What changed from upstream, and why:
 
 * ``Configurable`` is gone. Dispatchers already took no nested ``Config`` beyond
   plain ints, so they are constructed directly.
