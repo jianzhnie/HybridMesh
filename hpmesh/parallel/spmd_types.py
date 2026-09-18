@@ -17,13 +17,11 @@ import spmd_types as spmd
 import torch
 from torch.distributed.device_mesh import DeviceMesh
 from torch.distributed.tensor import DTensor
-
 from torchtitan.distributed.parallel_dims import (
     MeshAxisName,
     ParallelDims,
     unfold_dp_axes,
 )
-
 
 # TODO: Remove after spmd_types fixes deepcopy for its variadic tuple subclass.
 # PartitionSpec is immutable, so sharing it across a model deepcopy is safe.
@@ -219,7 +217,7 @@ def maybe_set_sparse_mesh() -> Iterator[None]:
 
 
 def annotate_input_spmd_types(
-    parallel_dims: "ParallelDims",
+    parallel_dims: ParallelDims,
     input_dict: dict[str, Any],
     input_sharding: dict[str, spmd.SpmdType],
 ) -> dict[str, Any]:
@@ -287,8 +285,7 @@ def _per_axis_types(
             for axis in axes:
                 if not isinstance(axis, str):
                     raise TypeError(
-                        "TorchTitan SPMD layouts require named mesh axes, "
-                        f"got {axis!r}"
+                        f"TorchTitan SPMD layouts require named mesh axes, got {axis!r}"
                     )
                 result[MeshAxisName(axis)] = spmd.S(dim)
     return result
@@ -392,7 +389,9 @@ def spmd_validate_redistributions(sharding_config: Any) -> None:
         # from the innermost position. For example, (DP) -> (DP, CP) is valid
         # when CP is the changed axis, but (DP) -> (CP, DP) changes shard order.
         changed_axis = changed_axes[0] if changed_axes else None
-        for dim, (src_entry, dst_entry) in enumerate(zip(src_spec, dst_spec)):
+        for dim, (src_entry, dst_entry) in enumerate(
+            zip(src_spec, dst_spec, strict=False)
+        ):
             src_axes = (
                 ()
                 if src_entry is None
