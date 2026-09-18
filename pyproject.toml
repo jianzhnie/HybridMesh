@@ -12,16 +12,42 @@ license = { text = "Apache-2.0" }
 authors = [{ name = "jianzhnie" }]
 keywords = ["distributed-training", "pytorch", "fsdp", "tensor-parallel", "pipeline-parallel", "device-mesh"]
 dependencies = [
-    "torch>=2.4",
-    "transformers>=4.45",
-    "tyro>=0.8",
+    # The floor is set by `torch.distributed.fsdp.DataParallelMeshDims`, which
+    # parallel/fsdp.py imports at module scope and which first shipped in 2.12.
+    # 2.11 has no `dp_mesh_dims` argument on `fully_shard` at all, so there is
+    # no shim that would let the package run on it.
+    # Caveat this line cannot express: `GroupedExperts(use_grouped_mm=True)`
+    # reaches for `torch._grouped_mm`, which is wrong on CPU builds before 2.14
+    # (large shapes return ~1e35 or NaN). It defaults to False and falls back to
+    # a per-expert loop, so a <2.14 install still runs correctly -- just without
+    # the fused kernel.
+    "torch>=2.12",
+    # Lower bound from the oldest API actually used: the
+    # `transformers.integrations.flex_attention` / `modeling_utils.AttentionInterface`
+    # attention-registration path (models/hf_wrapper.py, models/common/flex_kernel.py).
+    # No upper bound -- the swap in models/moe_swap.py reads both the 4.x
+    # per-expert ModuleList layout and the 5.x fused `gate_up_proj` one.
+    "transformers>=4.53",
+    # Direct import in utils/logger_utils.py (reached from trainer/config.py) --
+    # undeclared until now, and pulled in only transitively by transformers.
+    "colorama>=0.4",
+    # Used by the SPMD type-checker and by the mesh helpers in parallel/spmd_types.py.
+    # Pinned exactly the way torchtitan pins it -- the API is still moving.
+    "spmd_types==0.2.5",
 ]
 
 [project.optional-dependencies]
-dev = ["pytest>=8", "ruff>=0.6"]
+dev = [
+    "pre-commit>=3.7",
+    "pytest>=8",
+    "ruff>=0.9",
+]
 
 [project.scripts]
-hpmesh-train = "hpmesh.train:main"
+hpmesh-train = "hpmesh.trainer.train:main"
+
+[project.urls]
+Homepage = "https://github.com/jianzhnie/HybridMesh"
 
 [tool.setuptools.packages.find]
 include = ["hpmesh*"]
