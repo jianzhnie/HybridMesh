@@ -16,7 +16,8 @@
   （Model / Parallel / Optimizer / Training）再**组合**成单一配置；每组在自己的
   `__post_init__` 里校验。CLI 用 `HfArgumentParser` 暴露成扁平旗标
   （`--steps`、`--dp`、`--learning_rate`），也支持 YAML/JSON 配置文件。
-- **`ModelBundle`**（`hpmesh/bundle.py`）—— 模型唯一抽象：一个 HF 模型 + 并行化它的方式。
+- **`HFTransformerModel`**（`hpmesh/models/hf_wrapper.py`）—— 模型唯一抽象：一个 HF
+  模型 + 并行化它的方式。
 
 ## 安装
 
@@ -42,7 +43,7 @@ torchrun --nproc_per_node=2 -m hpmesh --dp 2
 |---|---|---|
 | `hpmesh/trainer/config.py` | 分组组合配置 + `derive_dp`（`world_size = dp*cp*tp*pp`） | 可运行 |
 | `hpmesh/mesh.py` | **DeviceMesh / 进程拓扑** + torchrun 初始化 | 可运行 |
-| `hpmesh/bundle.py` | HF 模型包装成统一 `(input_ids, labels) -> loss` | 可运行 |
+| `hpmesh/models/hf_wrapper.py` | HF 模型包装成统一的 decoder forward（返回 logits，loss 在 trainer 里算） | 可运行 |
 | `hpmesh/trainer/trainer.py` | 训练循环 + 确定性 seeding + DP 数据切分 | 可运行 |
 | `hpmesh/parallel/fsdp.py` | 数据并行（FSDP2 `fully_shard`） | 已实现 |
 | `hpmesh/parallel/linear.py` | async-TP 融合原语（`AllGatherLinear` / `LinearReduceScatter`） | 已实现（CUDA） |

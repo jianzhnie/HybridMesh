@@ -2,7 +2,7 @@
 
 Only the config is re-exported here. ``Trainer`` and the CLI entry point live in
 ``hpmesh.trainer.trainer`` / ``hpmesh.trainer.train`` and are imported lazily to
-avoid a circular import with ``hpmesh.bundle``.
+avoid a circular import with the model layer.
 """
 
 from .config import (

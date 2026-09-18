@@ -51,13 +51,35 @@ from .common.masks import (
 
 logger = logging.getLogger(__name__)
 
-__all__ = ["HFTransformerModel", "build_model_config"]
+__all__ = ["HFTransformerModel", "build_model_config", "build_model_config_for"]
 
 # HF picks its attention function off ``config._attn_implementation``. Registering
 # a name of our own lets us route through ``_flex_attention_hf`` without tripping
 # HF's per-model ``_supports_flex_attn`` gate -- some models support flex but do
 # not advertise it.
 _ATTN_IMPLEMENTATION = "flex_torchtitan"
+
+
+def _flex_supported() -> str:
+    """The attention implementation this machine can actually run.
+
+    Flex attention lowers through inductor, and inductor has no CPU target, so
+    ``torch.compile(flex_attention, ...)`` raises ``NotImplementedError`` off a
+    CUDA device. That is a property of the machine, not of the run, so it is
+    decided here rather than requested by the config.
+
+    ``"sdpa"`` is a fallback in *backend*, not in *arithmetic*: on the path this
+    wrapper takes (causal, no packing) both compute the same thing, for a reason
+    worth spelling out. The wrapper deliberately passes no ``attention_mask``
+    down to the decoder, and HF's sdpa path ignores ``is_causal`` whenever a mask
+    is present, deriving causality from the mask instead. Handing it the
+    ``BlockMask`` would therefore silently disable masking. Leaving the mask
+    unset lets sdpa default to causal -- the same thing the flex causal mod
+    applies. What is genuinely lost off CUDA is packed-document masking:
+    ``get_attention_masks`` still builds a correct ``BlockMask``, it just has no
+    flex kernel to run it in. Packed batches must run on CUDA.
+    """
+    return _ATTN_IMPLEMENTATION if torch.cuda.is_available() else "sdpa"
 
 
 def _flex_attention_hf(module, query, key, value, attention_mask, **kwargs):
@@ -97,6 +119,34 @@ def build_model_config(
     config = AutoConfig.from_pretrained(model_name_or_path)
     config.max_position_embeddings = max(config.max_position_embeddings, seq_len)
     return config
+
+
+def build_model_config_for(cfg) -> PretrainedConfig:
+    """Build the model config for a training run.
+
+    A thin adapter over :func:`build_model_config`: it maps the run's config onto
+    the explicit ``(name, seq_len, arch_overrides)`` that function takes, and
+    handles the offline case where the name is a bare architecture ("llama")
+    rather than a hub id ("org/name"). Offline, the explicit sizes in ``cfg`` are
+    authoritative, so they become the overrides; otherwise the Hub's own config
+    wins and the overrides are empty.
+    """
+    offline = cfg.hf_model.count("/") != 1
+    overrides = (
+        {
+            "vocab_size": cfg.vocab_size,
+            "hidden_size": cfg.hidden_size,
+            "intermediate_size": cfg.intermediate_size,
+            "num_hidden_layers": cfg.num_hidden_layers,
+            "num_attention_heads": cfg.num_attention_heads,
+            "num_key_value_heads": cfg.num_key_value_heads,
+        }
+        if offline
+        else None
+    )
+    return build_model_config(
+        cfg.hf_model, seq_len=cfg.max_seq_len, arch_overrides=overrides
+    )
 
 
 def _unwrap_text_config(config: PretrainedConfig) -> PretrainedConfig:
@@ -182,12 +232,12 @@ class HFTransformerModel(nn.Module):
         super().__init__()
 
         config = _unwrap_text_config(config)
-        config._attn_implementation = _ATTN_IMPLEMENTATION
+        config._attn_implementation = _flex_supported()
         AttentionInterface._global_mapping[_ATTN_IMPLEMENTATION] = _flex_attention_hf
 
         model_cls = _resolve_model_class(config)
         self.model = model_cls(config=config)
-        self.model.config._attn_implementation = _ATTN_IMPLEMENTATION
+        self.model.config._attn_implementation = config._attn_implementation
 
         self.max_seq_len = getattr(config, "max_position_embeddings", None)
         self.cp_mesh = None
@@ -332,8 +382,6 @@ class HFTransformerModel(nn.Module):
         *,
         positions: torch.Tensor | None = None,
         attention_masks=None,
-        labels: torch.Tensor | None = None,
-        **kwargs,
     ) -> torch.Tensor:
         """Run the decoder over one packed sequence and return logits.
 
@@ -342,29 +390,20 @@ class HFTransformerModel(nn.Module):
             positions: ``(T,)`` per-token positions, resetting at document
                 boundaries. Drives RoPE. Defaults to ``arange``, which is correct
                 only when the sequence is a single document.
-            attention_masks: a prebuilt BlockMask; built here from ``positions``
-                when omitted.
-            labels: accepted for interface compatibility. Loss is computed
-                outside this wrapper.
+            attention_masks: a prebuilt BlockMask. Only the flex backend consumes
+                it (see ``_apply_attention``); with sdpa the decoder is left to
+                its own causal default.
         """
-        del labels  # the training loop owns the loss
         local_seq_len = input_ids.shape[0]
         if positions is None:
             positions = torch.arange(local_seq_len, device=input_ids.device)
 
-        # Build the mask only when positions were supplied, mirroring the
-        # preprocess step that normally builds it: positions are what mark packed
-        # document boundaries, so without them there is nothing to mask. Flex
-        # attention with no mask computes *full* attention, so a trainer using
-        # this path must supply positions (or an explicit mask).
-        if attention_masks is None:
-            attention_masks = self.get_attention_masks(positions=positions)
+        kwargs = self._apply_attention(positions, attention_masks)
 
         # A HF decoder expects a batch dim; the wrapper's contract is flat.
         hidden_states = self._decoder(
             input_ids.unsqueeze(0),
             position_ids=positions.unsqueeze(0),
-            attention_mask=attention_masks,
             use_cache=False,
             **kwargs,
         ).last_hidden_state.squeeze(0)
@@ -378,6 +417,59 @@ class HFTransformerModel(nn.Module):
             self._maybe_dump_logits(_dump_dir, logits)
 
         return logits
+
+    def _apply_attention(
+        self, positions: torch.Tensor, attention_masks
+    ) -> dict[str, Any]:
+        """Cross the ROLE-IN / CONVENTION-OUT seam: decide what to hand the decoder.
+
+        Roles are fixed: this wrapper ALWAYS routes through an attention
+        implementation, and that implementation is ALWAYS fed a mask describing
+        how tokens may attend -- flex consumes it as a ``BlockMask``. How a
+        *backend* wants its mask is a different question (sdpa wants a boolean
+        tensor, and derives causality from the mask's presence), so it is settled
+        here and nowhere else.
+
+        Consequently the mask is built unconditionally, even on the backend that
+        ends up discarding it: not building it would make the two paths differ in
+        more than the backend, and would hide the packing gap this fallback
+        leaves open.
+        """
+        if attention_masks is None:
+            attention_masks = self.get_attention_masks(positions=positions)
+
+        # is_causal is the flex-only spelling: it selects which mod the BlockMask
+        # runs, so it is withheld from every other backend (see below).
+        if self.model.config._attn_implementation == _ATTN_IMPLEMENTATION:
+            return {"attention_mask": attention_masks, "is_causal": False}
+
+        # Every other backend wants a tensor mask (or none). There is no generic
+        # conversion from a BlockMask, and one is not wanted: the only hpmesh
+        # case that needs a tensor mask is packing, which the flex fallback
+        # cannot express anyway. Fail loudly rather than run with the mask
+        # silently dropped -- that would turn the packed path into full attention.
+        #
+        # Packing is detected from ``positions``, not from the sequence length: a
+        # document boundary is exactly where the position counter restarts, which
+        # is the same convention ``get_attention_masks`` masks on. Length would be
+        # the wrong test -- a long-context model may legitimately run a short
+        # single-document sequence.
+        if bool((positions[1:] < positions[:-1]).any()):
+            raise ValueError(
+                f"Attention backend {self.model.config._attn_implementation!r} "
+                "cannot express the mask for a packed sequence: positions restart "
+                "mid-sequence, so the batch holds more than one document. "
+                "Sequence packing requires CUDA and the flex attention kernel."
+            )
+
+        # A single causal document. Hand the decoder NOTHING and let HF follow its
+        # own path: it builds a 4D mask only when it must (sliding-window layers,
+        # padding) and otherwise returns None, and its sdpa wrapper derives
+        # ``is_causal`` from whether a mask is present. Passing ``is_causal=True``
+        # ourselves would double up with the mask HF does build -- sdpa rejects
+        # ``attn_mask`` together with ``is_causal=True`` -- which is what an
+        # earlier version of this method got wrong.
+        return {"attention_mask": None}
 
     def _maybe_dump_logits(self, dump_dir: str, logits: torch.Tensor) -> None:
         """Append this rank's logits (one entry per forward) for numerical tests."""
