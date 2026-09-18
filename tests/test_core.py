@@ -12,6 +12,8 @@ import pytest
 import torch
 
 from hpmesh.bundle import build_bundle
+from hpmesh.mesh import build_parallel_dims
+from hpmesh.parallel.parallel_dims import ParallelDims
 from hpmesh.trainer import HybridMeshConfig, ParallelArguments, TrainingArguments
 from hpmesh.trainer.trainer import Trainer
 
@@ -21,27 +23,52 @@ def _cfg(**parallel_kw) -> HybridMeshConfig:
 
 
 def test_derive_dp_derives_from_world_size() -> None:
-    cfg = _cfg(dp=-1)
+    cfg = _cfg(data_parallel_shard_degree=-1)
     assert cfg.derive_dp(world_size=8) == 8
     assert cfg.derive_dp(world_size=4) == 4
 
 
 def test_derive_dp_rejects_inconsistent_degrees() -> None:
-    cfg = _cfg(dp=1)
+    cfg = _cfg(data_parallel_shard_degree=1)
     with pytest.raises(ValueError):
         cfg.derive_dp(world_size=2)
 
 
 def test_derive_dp_rejects_indivisible_world() -> None:
-    cfg = _cfg(dp=-1, tp=3)
+    cfg = _cfg(data_parallel_shard_degree=-1, tensor_parallel_degree=3)
     with pytest.raises(ValueError):
         cfg.derive_dp(world_size=8)  # 8 % 3 != 0
+
+
+def test_derive_dp_narrows_by_the_non_dp_degrees() -> None:
+    # tp=2 consumes half the ranks; the rest are data-parallel.
+    cfg = _cfg(data_parallel_shard_degree=-1, tensor_parallel_degree=2)
+    assert cfg.derive_dp(world_size=8) == 4
+
+
+def test_build_parallel_dims_resolves_against_world_size() -> None:
+    # Single process -> no process group and no parallelism to describe.
+    assert build_parallel_dims(HybridMeshConfig(), world_size=1) is None
+
+    cfg = _cfg(data_parallel_shard_degree=-1, tensor_parallel_degree=2)
+    pd = build_parallel_dims(cfg, world_size=8)
+    assert isinstance(pd, ParallelDims)
+    # tp=2 over 8 ranks leaves 4 for data parallelism; dp_shard=-1 resolves here.
+    assert (pd.tp, pd.dp_shard) == (2, 4)
+
+
+def test_derive_dp_matches_parallel_dims_resolution() -> None:
+    # The config helper and the torchtitan class must agree, or the trainer and
+    # the mesh would disagree about how many ranks go to data parallelism.
+    cfg = _cfg(data_parallel_shard_degree=-1, tensor_parallel_degree=2)
+    pd = build_parallel_dims(cfg, world_size=8)
+    assert cfg.derive_dp(world_size=8) == pd.dp_shard
 
 
 def test_cp_must_divide_seq_len() -> None:
     with pytest.raises(ValueError):
         HybridMeshConfig(
-            parallel=ParallelArguments(cp=3),
+            parallel=ParallelArguments(context_parallel_degree=3),
             training=TrainingArguments(max_seq_len=64),
         )
 
