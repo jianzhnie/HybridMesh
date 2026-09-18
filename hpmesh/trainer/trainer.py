@@ -1,7 +1,7 @@
 """Trainer -- the single training loop, shared by every learning step.
 
 Learning note: this is deliberately small and linear. The distributed complexity
-lives in parallelism/ and mesh.py; the loop itself should stay readable end to end.
+lives in parallel/ and mesh.py; the loop itself should stay readable end to end.
 
 Order of operations mirrors Titan (parallelize -> compile -> fsdp), but here each
 parallelism dimension is an explicit, individually-understandable call.
@@ -12,9 +12,9 @@ from __future__ import annotations
 import torch
 import torch.distributed as dist
 
-from ..bundle import Batch, ModelBundle, build_bundle
-from ..mesh import build_mesh, init_distributed
 from .. import parallel
+from ..bundle import Batch, ModelBundle, build_bundle
+from ..mesh import build_mesh, build_parallel_dims, init_distributed
 from .config import HybridMeshConfig
 
 
@@ -31,8 +31,11 @@ class Trainer:
             f"cuda:{self.local_rank}" if torch.cuda.is_available() else "cpu"
         )
 
-        # 1. mesh (the process topology every dimension is built on)
-        self.mesh = build_mesh(cfg, self.world_size)
+        # 1. mesh (the process topology every dimension is built on). ``parallel_dims``
+        #    is the same resolved degrees the mesh was built from, kept so the
+        #    trainer can ask "how many DP ranks?" without re-indexing the mesh.
+        self.parallel_dims = build_parallel_dims(cfg, self.world_size)
+        self.mesh = build_mesh(self.parallel_dims)
 
         # 2. build the model bundle
         self.bundle: ModelBundle = build_bundle(cfg, device=self.device)
@@ -75,11 +78,16 @@ class Trainer:
 
     def _dp_slice(self, batch: Batch) -> Batch:
         """Give each DP rank its shard of the global batch (data parallel semantics)."""
-        if self.mesh is None:
+        if self.parallel_dims is None:
             dp, dp_rank = 1, 0
         else:
-            dp = self.mesh["dp"].size()
-            dp_rank = self.mesh["dp"].get_local_rank()
+            # The dense DP group spans replicate * shard; unsplit on torchrun
+            # it is a plain 1-D mesh, so ``mesh["dp"]`` sizes the batch.
+            dp_mesh = self.parallel_dims.get_optional_mesh(
+                "dp", include_singleton_axes=True
+            )
+            dp = dp_mesh.size()
+            dp_rank = dp_mesh.get_local_rank()
         per = self.cfg.global_batch_size // dp
         sl = slice(dp_rank * per, (dp_rank + 1) * per)
         return Batch(

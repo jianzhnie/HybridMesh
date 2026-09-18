@@ -62,54 +62,6 @@ class ModelArguments:
     )
 
 
-@dataclass
-class ParallelArguments:
-    """Hybrid-parallelism degrees. world_size = dp * cp * tp * pp (ep stays 1
-    until MoE).
-
-    dp = -1 means "derive from world_size" once the other degrees are known.
-    """
-
-    dp: int = field(
-        default=-1, metadata={"help": "Data-parallel (FSDP) degree; -1 = derive"}
-    )
-    tp: int = field(default=1, metadata={"help": "Tensor-parallel degree"})
-    pp: int = field(default=1, metadata={"help": "Pipeline-parallel degree"})
-    cp: int = field(default=1, metadata={"help": "Context-parallel degree"})
-    ep: int = field(default=1, metadata={"help": "Expert-parallel degree (MoE)"})
-    backend: str = field(default="nccl", metadata={"help": "Distributed backend"})
-
-    def __post_init__(self) -> None:
-        for name in ("tp", "pp", "cp", "ep"):
-            if getattr(self, name) < 1:
-                raise ValueError(f"{name} must be >= 1, got {getattr(self, name)}")
-        if self.dp < 1 and self.dp != -1:
-            raise ValueError(f"dp must be >= 1 or -1 (derive), got {self.dp}")
-        if self.backend not in {"nccl", "gloo", "hccl"}:
-            raise ValueError(
-                f"backend must be one of {{nccl, gloo, hccl}}, got {self.backend}"
-            )
-
-    def non_dp_degrees(self) -> int:
-        """Product of the non-data-parallel degrees (dp is carved out of the rest)."""
-        return self.tp * self.pp * self.cp * self.ep
-
-    def derive_dp(self, world_size: int) -> int:
-        """Resolve the data-parallel degree against world_size."""
-        denom = self.non_dp_degrees()
-        if self.dp == -1:
-            if world_size % denom != 0:
-                raise ValueError(
-                    f"world_size={world_size} not divisible by tp*pp*cp*ep={denom}"
-                )
-            return world_size // denom
-        if self.dp * denom != world_size:
-            raise ValueError(
-                f"dp*tp*pp*cp*ep = {self.dp * denom} != world_size={world_size}"
-            )
-        return self.dp
-
-
 @dataclass(kw_only=True, slots=True)
 class ParallelismConfig:
     data_parallel_replicate_degree: int = 1
@@ -254,7 +206,68 @@ class ParallelismConfig:
     load balancer with dict-valued attention masks; ignored otherwise.
     """
 
+    expert_parallel_degree: int = 1
+    """
+    Expert parallelism degree. 1 means disabled. No effect for non-MoE models.
+
+    Mesh constraint: the dense region (dp_shard * cp * tp) and sparse region
+    (efsdp * ep) cover the same ranks, so dp_shard * cp * tp == efsdp * ep.
+    EP borrows ranks from FSDP and TP: efsdp = dp_shard * cp * tp / ep.
+    pp and dp_replicate are outer dimensions unaffected by this constraint.
+    """
+
+    def non_dp_degrees(self) -> int:
+        """Product of the fixed (non-derivable) degrees: dp_replicate*tp*pp*cp*ep."""
+        return (
+            self.data_parallel_replicate_degree
+            * self.tensor_parallel_degree
+            * self.pipeline_parallel_degree
+            * self.context_parallel_degree
+            * self.expert_parallel_degree
+        )
+
+    def derive_dp(self, world_size: int) -> int:
+        """Resolve ``data_parallel_shard_degree`` against world_size.
+
+        ``-1`` means "derive from world_size": the leftover ranks after
+        dp_replicate / tp / pp / cp / ep, matching ``ParallelDims``'s
+        interpretation. Mirrors ``ParallelDims._validate``'s divisibility
+        check so a mis-sized launch fails here with a config-level message
+        rather than deep inside mesh construction.
+        """
+        fixed = self.non_dp_degrees()
+        if self.data_parallel_shard_degree == -1:
+            if world_size % fixed != 0:
+                raise ValueError(
+                    f"world_size={world_size} not divisible by "
+                    f"dp_replicate*tp*pp*cp*ep={fixed}"
+                )
+            return world_size // fixed
+        dp_shard = self.data_parallel_shard_degree
+        if dp_shard * fixed != world_size:
+            raise ValueError(
+                f"dp_shard*dp_replicate*tp*pp*cp*ep = {dp_shard * fixed} "
+                f"!= world_size={world_size}"
+            )
+        return dp_shard
+
     def __post_init__(self):
+        for name in (
+            "tensor_parallel_degree",
+            "pipeline_parallel_degree",
+            "context_parallel_degree",
+            "expert_parallel_degree",
+        ):
+            if getattr(self, name) < 1:
+                raise ValueError(f"{name} must be >= 1, got {getattr(self, name)}")
+        if (
+            self.data_parallel_shard_degree < 1
+            and self.data_parallel_shard_degree != -1
+        ):
+            raise ValueError(
+                "data_parallel_shard_degree must be >= 1 or -1 (derive), got "
+                f"{self.data_parallel_shard_degree}"
+            )
         if self.context_parallel_load_balancer == "":
             raise ValueError(
                 "context_parallel_load_balancer cannot be an empty string. "
@@ -289,15 +302,54 @@ class ParallelismConfig:
                 f"{self.pipeline_parallel_schedule!r}: {e}"
             ) from e
 
-    expert_parallel_degree: int = 1
-    """
-    Expert parallelism degree. 1 means disabled. No effect for non-MoE models.
 
-    Mesh constraint: the dense region (dp_shard * cp * tp) and sparse region
-    (efsdp * ep) cover the same ranks, so dp_shard * cp * tp == efsdp * ep.
-    EP borrows ranks from FSDP and TP: efsdp = dp_shard * cp * tp / ep.
-    pp and dp_replicate are outer dimensions unaffected by this constraint.
+@dataclass(kw_only=True, slots=True)
+class ParallelArguments(ParallelismConfig):
+    """CLI-facing view of ``ParallelismConfig``.
+
+    Subclasses the shared config (rather than re-declaring the same degrees) so
+    hpmesh has ONE source of truth for parallelism: ``ParallelDims.from_config``
+    reads the inherited ``*_degree`` fields directly, which is what the torchtitan
+    mesh builder expects. On top of that the trainer CLI needs a distributed
+    ``backend``.
+
+    Short aliases (``tp`` / ``pp`` / ``cp`` / ``ep`` / ``dp``) are exposed as
+    properties so callers and tests can use the same names as ``HybridMeshConfig``
+    without going through the long ``*_degree`` spelling.
     """
+
+    backend: str = "nccl"
+    """Distributed backend: nccl (CUDA), gloo (CPU), or hccl (Ascend)."""
+
+    def __post_init__(self) -> None:
+        # Explicit two-arg super(): ``slots=True`` rebuilds the class, so the
+        # zero-arg form's ``__class__`` cell would point at the discarded one.
+        super(ParallelArguments, self).__post_init__()
+        if self.backend not in {"nccl", "gloo", "hccl"}:
+            raise ValueError(
+                f"backend must be one of {{nccl, gloo, hccl}}, got {self.backend}"
+            )
+
+    # Short aliases for the torchtitan-spelled degree fields.
+    @property
+    def dp(self) -> int:
+        return self.data_parallel_shard_degree
+
+    @property
+    def tp(self) -> int:
+        return self.tensor_parallel_degree
+
+    @property
+    def pp(self) -> int:
+        return self.pipeline_parallel_degree
+
+    @property
+    def cp(self) -> int:
+        return self.context_parallel_degree
+
+    @property
+    def ep(self) -> int:
+        return self.expert_parallel_degree
 
 
 @dataclass
@@ -389,23 +441,23 @@ class HybridMeshConfig:
 
     @property
     def dp(self) -> int:
-        return self.parallel.dp
+        return self.parallel.data_parallel_shard_degree
 
     @property
     def tp(self) -> int:
-        return self.parallel.tp
+        return self.parallel.tensor_parallel_degree
 
     @property
     def pp(self) -> int:
-        return self.parallel.pp
+        return self.parallel.pipeline_parallel_degree
 
     @property
     def cp(self) -> int:
-        return self.parallel.cp
+        return self.parallel.context_parallel_degree
 
     @property
     def ep(self) -> int:
-        return self.parallel.ep
+        return self.parallel.expert_parallel_degree
 
     @property
     def lr(self) -> float:

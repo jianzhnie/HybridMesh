@@ -8,7 +8,7 @@ Two abstractions only:
   * a ``ModelBundle``                (hpmesh.bundle)
 
 Parallelism dimensions are added one at a time; each ``apply_*`` in
-``hpmesh.parallelism`` is a no-op when its degree is 1, so the same training loop
+``hpmesh.parallel`` is a no-op when its degree is 1, so the same training loop
 runs from a single device up to full hybrid parallelism.
 """
 

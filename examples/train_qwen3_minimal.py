@@ -38,7 +38,9 @@ def qwen3_minimal_config() -> HybridMeshConfig:
             num_attention_heads=4,
             num_key_value_heads=4,  # GQA; set < num_attention_heads to see it
         ),
-        parallel=ParallelArguments(dp=-1, tp=1, pp=1, cp=1, ep=1),
+        # Parallelism uses the torchtitan-spelled degree fields; -1 on the shard
+        # degree means "derive from world_size" (all remaining ranks are DP).
+        parallel=ParallelArguments(data_parallel_shard_degree=-1),
         optimizer=OptimizerArguments(learning_rate=3e-4, weight_decay=0.0),
         training=TrainingArguments(
             global_batch_size=8,
