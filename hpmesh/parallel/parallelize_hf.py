@@ -11,10 +11,11 @@ deliberately does not do, and dropping them is a decision, not an oversight:
 
 * **Untying ``tok_embeddings`` from ``lm_head``.** torchtitan un-ties them
   because its FSDP cannot shard a parameter shared by two FSDP groups. hpmesh
-  instead detects the tie (``fsdp_wrap`` sets ``enable_weight_tying``) and shards
-  the embedding, norm and head as one unit -- so untying here would silently
-  train an un-tied model that no longer matches its HF checkpoint. Models with
-  ``tie_word_embeddings=False`` (llama, qwen) are unaffected either way.
+  instead detects the tie (``HFTransformerModel.enable_weight_tying``) and
+  shards the embedding, norm and head as one unit -- so untying here would
+  silently train an un-tied model that no longer matches its HF checkpoint.
+  Models with ``tie_word_embeddings=False`` (llama, qwen) are unaffected either
+  way.
 * **Converting modules to a ``Module`` protocol.** hpmesh has none; see
   ``hf_sharding``'s module docstring for why its declarations are currently inert.
 * **Swapping in a native MoE.** hpmesh ships no MoE implementation; the probing

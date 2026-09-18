@@ -5,6 +5,7 @@
 # LICENSE file in the root directory of this source tree.
 
 import logging
+from collections.abc import Iterator
 from typing import Any
 
 import torch
@@ -18,6 +19,7 @@ from torch.distributed.fsdp import (
     fully_shard,
 )
 from torch.distributed.tensor import Shard
+from torch.nn import ModuleDict
 
 from .parallel_dims import ParallelDims
 
@@ -25,6 +27,18 @@ logger = logging.getLogger(__name__)
 
 _DENSE_STORAGE_AXES = ["dp_replicate", "dp_shard", "cp", "tp"]
 _SPARSE_STORAGE_AXES = ["dp_replicate", "efsdp", "ep"]
+
+
+def iter_transformer_layers(layers: nn.Module) -> Iterator[tuple[Any, nn.Module]]:
+    """Yield ``(index, block)`` for the transformer block container.
+
+    torchtitan's ``Decoder.layers`` is a ``ModuleDict`` keyed by index, so it
+    iterates with ``.items()``; HF's ``PreTrainedModel`` stores a ``ModuleList``,
+    which iterates by position. Both yield the same pairs.
+    """
+    if isinstance(layers, ModuleDict):
+        return iter(layers.items())
+    return iter(enumerate(layers))
 
 
 def resolve_fsdp_mesh(
@@ -266,7 +280,7 @@ def apply_fsdp_to_decoder(
                 reshard_after_forward=reshard_after_forward_policy == "always",
             )
 
-    for _layer_id, transformer_block in model.layers.items():
+    for _layer_id, transformer_block in iter_transformer_layers(model.layers):
         # NOTE: In an MoE layer, we use shard_placement_fn to apply different
         # FSDP mesh and shard placement to different parameters:
         # - When EP > 1: routed experts use edp_mesh, other params use dp_mesh
@@ -389,10 +403,10 @@ def apply_fsdp_to_decoder(
         return
 
     # set up explicit prefetching when EP is enabled for forward
-    transformer_blocks = list(model.layers.values())
+    transformer_blocks = [block for _, block in iter_transformer_layers(model.layers)]
     next_transformer_blocks = transformer_blocks[1:] + [None]
 
-    if model.tok_embeddings is not None and len(model.layers) > 0:
+    if model.tok_embeddings is not None and transformer_blocks:
         model.tok_embeddings.set_modules_to_forward_prefetch([transformer_blocks[0]])
 
     for transformer_block, next_transformer_block in zip(
@@ -409,10 +423,10 @@ def apply_fsdp_to_decoder(
 
     # set up explicit prefetching when EP is enabled for backward
     # pyrefly: ignore [no-matching-overload]
-    reversed_transformer_blocks = list(reversed(model.layers.values()))
+    reversed_transformer_blocks = list(reversed(transformer_blocks))
     prev_transformer_blocks = reversed_transformer_blocks[1:] + [None]
 
-    if model.norm is not None and model.lm_head is not None and len(model.layers) > 0:
+    if model.norm is not None and model.lm_head is not None and transformer_blocks:
         model.lm_head.set_modules_to_backward_prefetch([reversed_transformer_blocks[0]])
 
     for transformer_block, prev_transformer_block in zip(

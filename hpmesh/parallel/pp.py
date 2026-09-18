@@ -1,8 +1,13 @@
 """Step 3: pipeline parallelism (micro-batches + point-to-point).
 
 Core idea: split the layers across PP stages; each step runs several micro-batches
-through a schedule (start with 1F1B) so stages stay busy. TODO(learning): use
-torch.distributed.pipelining to build stages + a ScheduleGPipe/1F1B schedule.
+through a schedule (start with 1F1B) so stages stay busy.
+
+The stage-splitting half is done -- ``pipeline.py`` decides the layer assignment
+(``generate_llm_fqn_per_model_part``) and builds this rank's stages
+(``split_model_into_stages``). What remains here is the schedule: build it from
+the stages and drive it from the training loop, which also has to pass
+micro-batches and only send ``input_ids``/``labels`` to the stages that want them.
 """
 
 from __future__ import annotations
