@@ -11,12 +11,12 @@ the nested ``Config`` is gone: hpmesh constructs the module directly, so there i
 nothing to build from. The forward is unchanged.
 
 Why it exists at all: when the TP axis shards the embedding weight on its vocab
-dim (the ``Shard(0)`` that ``hf_sharding`` declares for ``tok_embeddings``), HF's
-plain ``nn.Embedding.forward`` would index into a *local* weight with *global*
-token ids. This override applies the vocab offset ``tp_rank * chunk_size`` and
-masks the ids outside the local range, so each rank gathers its own shard and the
-partial results sum to the full embedding (the mask zeroes the ranks that hold no
-matching row). On a mesh with no TP group it falls back to plain ``F.embedding``.
+dim (``Shard(0)`` on ``tok_embeddings``), HF's plain ``nn.Embedding.forward``
+would index into a *local* weight with *global* token ids. This override applies
+the vocab offset ``tp_rank * chunk_size`` and masks the ids outside the local
+range, so each rank gathers its own shard and the partial results sum to the full
+embedding (the mask zeroes the ranks that hold no matching row). On a mesh with no
+TP group it falls back to plain ``F.embedding``.
 
 TODO(pianpwk): rename to VocabParallelEmbedding
 """
@@ -37,10 +37,10 @@ class Embedding(nn.Embedding):
     """nn.Embedding with optional local vocab-parallel execution.
 
     NOTE: currently unused. It pairs with a TP-sharded embedding weight (the
-    ``Shard(0)`` that ``parallel/hf_sharding.py`` declares for ``tok_embeddings``),
-    but the TP path is not wired up, so nothing constructs it and the plain HF
-    embedding is what runs. Whoever wires TP needs to swap it in, or the local
-    weight will be indexed with global token ids.
+    ``Shard(0)`` on ``tok_embeddings``), but the TP path is not wired up, so
+    nothing constructs it and the plain HF embedding is what runs. Whoever wires
+    TP needs to swap it in, or the local weight will be indexed with global token
+    ids.
     """
 
     def forward(self, input: torch.Tensor) -> torch.Tensor:

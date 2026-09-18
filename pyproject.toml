@@ -25,8 +25,6 @@ dependencies = [
     # Lower bound from the oldest API actually used: the
     # `transformers.integrations.flex_attention` / `modeling_utils.AttentionInterface`
     # attention-registration path (models/hf_wrapper.py, models/common/flex_kernel.py).
-    # No upper bound -- the swap in models/moe_swap.py reads both the 4.x
-    # per-expert ModuleList layout and the 5.x fused `gate_up_proj` one.
     "transformers>=4.53",
     # Direct import in utils/logger_utils.py (reached from trainer/config.py) --
     # undeclared until now, and pulled in only transitively by transformers.
