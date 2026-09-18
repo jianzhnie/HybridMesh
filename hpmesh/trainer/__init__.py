@@ -1,0 +1,22 @@
+"""Trainer subpackage: configuration dataclasses (and the training loop/CLI).
+
+Only the config is re-exported here. ``Trainer`` and the CLI entry point live in
+``hpmesh.trainer.trainer`` / ``hpmesh.trainer.train`` and are imported lazily to
+avoid a circular import with ``hpmesh.bundle``.
+"""
+
+from .config import (
+    HybridMeshConfig,
+    ModelArguments,
+    OptimizerArguments,
+    ParallelArguments,
+    TrainingArguments,
+)
+
+__all__ = [
+    "HybridMeshConfig",
+    "ModelArguments",
+    "OptimizerArguments",
+    "ParallelArguments",
+    "TrainingArguments",
+]
