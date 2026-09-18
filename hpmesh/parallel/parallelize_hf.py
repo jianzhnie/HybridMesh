@@ -16,10 +16,10 @@ deliberately does not do, and dropping them is a decision, not an oversight:
   silently train an un-tied model that no longer matches its HF checkpoint.
   Models with ``tie_word_embeddings=False`` (llama, qwen) are unaffected either
   way.
-* **Converting modules to a ``Module`` protocol.** hpmesh has none; see
-  ``hf_sharding``'s module docstring for why its declarations are currently inert.
-* **Swapping in a native MoE.** hpmesh ships no MoE implementation; the probing
-  half that is standalone lives in ``..models.moe_probe``.
+* **Converting modules to a ``Module`` protocol.** hpmesh has none, and no
+  on-the-fly sharding-config declarations either -- the TP plan lives as plain
+  data in the model registry instead (see docs/hybridmesh_design.md, SEAM 1).
+* **Swapping in a native MoE.** hpmesh ships no MoE implementation.
 """
 
 from __future__ import annotations
