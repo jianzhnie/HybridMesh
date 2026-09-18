@@ -367,7 +367,7 @@ def spmd_validate_redistributions(sharding_config: Any) -> None:
                 "explicit collective when the value semantics are unclear."
             )
 
-        # 2) If neither has PartitionSpec, comparing per_axis_spmd_types() is sufficient.
+        # 2) With no PartitionSpec on either side, per-axis types suffice.
         if src.partition_spec is None and dst.partition_spec is None:
             return
 

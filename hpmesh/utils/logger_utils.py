@@ -48,7 +48,8 @@ def get_logger(
     file_mode: str = "w",
     force_main_process: bool = False,
 ) -> logging.Logger:
-    """Create or retrieve a logger with optional file output and distributed-aware log levels."""
+    """Create or retrieve a logger with optional file output and
+    distributed-aware log levels."""
     if file_mode not in ("w", "a"):
         raise ValueError("file_mode must be either 'w' or 'a'")
 
@@ -86,7 +87,10 @@ def get_logger(
 
         # Configure formatter with rank information
         if is_main_process:
-            fmt = "%(asctime)s - [Rank %(rank)d] - %(name)s.%(funcName)s:%(lineno)d - %(levelname)s - %(message)s"
+            fmt = (
+                "%(asctime)s - [Rank %(rank)d] - "
+                "%(name)s.%(funcName)s:%(lineno)d - %(levelname)s - %(message)s"
+            )
         else:
             fmt = (
                 "%(asctime)s - [Rank %(rank)d] - %(name)s - %(levelname)s - %(message)s"
@@ -135,7 +139,8 @@ def _get_distributed_rank() -> int:
 
 
 def get_outdir(path: str, *paths, inc: bool = False) -> str:
-    """Create and return an output directory. If inc=True, append an incrementing suffix to avoid collisions."""
+    """Create and return an output directory. If inc=True, append an
+    incrementing suffix to avoid collisions."""
     outdir = os.path.join(path, *paths)
     os.makedirs(outdir, exist_ok=True)
     if not inc:
