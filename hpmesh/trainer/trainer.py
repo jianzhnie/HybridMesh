@@ -46,6 +46,7 @@ from ..datasets.random_data import (
 from ..mesh import build_mesh, build_parallel_dims, init_distributed
 from ..models.hf_wrapper import HFTransformerModel, build_model_config_for
 from ..parallel.collectives import clip_grad_norm_, dist_max, dist_sum, dist_sum_tensor
+from ..parallel.spmd_types import spmd_context
 from ..utils.logger_utils import get_logger
 from .config import HybridMeshConfig
 
@@ -193,7 +194,13 @@ class Trainer:
 
     def _forward_backward_body(self, batch: Batch) -> tuple[torch.Tensor, int]:
         input_ids, labels = self._flatten(batch)
-        with self._param_context():
+        # ``spmd_context`` is what makes a process group answerable *by name*
+        # (``spmd_mesh_group("tp")`` and friends) for the duration of the body.
+        # It is entered here, around the forward/backward only, because that is
+        # the region whose components read the ambient mesh -- the optimizer and
+        # the checkpointers take their groups as arguments. On a single process
+        # it is a no-op, so the same code runs from one device to a full mesh.
+        with self._param_context(), spmd_context(self.parallel_dims):
             logits = self.model(input_ids)
             loss_sum, num_valid_tokens = self._loss_sum(logits, labels)
             del logits

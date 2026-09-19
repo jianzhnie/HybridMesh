@@ -24,7 +24,32 @@ hpmesh 拿掉了 TorchTitan 的 `Configurable` 与 `Module` 两个抽象层，�
 - **SEAM 2（作用域）**：一个线程局部的分布式上下文，取代沿调用链传 mesh / group。
 
 两个缝的分工刻意不对称：**一个显式传参，一个隐式作用域**（理由见 §4.3）。
-收敛之后删掉被取代的死代码，把两套并存的模型包装归一。
+
+### 一个必须先厘清的边界：哪些是 TorchTitan，哪些不是
+
+"拿掉 TorchTitan 的抽象"**不等于**要重写整个并行层。hpmesh 依赖的底层里有三样东西
+与 TorchTitan 无关，它们照用即可：
+
+| 依赖 | 归属 | 它提供什么 |
+|---|---|---|
+| `torch.distributed` | PyTorch | `DeviceMesh` / `ProcessGroup` / FSDP2 / `pipelining` |
+| **`spmd_types`** | **独立 Meta pip 包**（`spmd_types==0.2.5`，~11.5k 行，零依赖） | SPMD 类型系统：`SpmdType` / `TensorSharding` / `MeshAxis` / `assert_type` / `local_map` / `redistribute`，**以及 mesh 作用域 `set_current_mesh`** |
+| `transformers` | HuggingFace | `AutoModelForCausalLM` / `tp_plan` / `AttentionInterface` |
+
+hpmesh 的 `parallel/spmd_types.py`（529 行）**不是** TorchTitan 的抽象，而是套在
+`spmd_types` 包外面的一层 **glue shim**（`MeshAxisName` 映射、TLS mesh 栈、
+state-dict 转换、redistribute 校验）。
+
+这直接影响 §3 的设计：`spmd_types` 包**已经实现了 SEAM 2 的状态机**
+（`set_current_mesh` 是个真正的 context manager，维护 `mesh_stack`，并且
+**size-1 轴自动被当作"该维度关闭"**——与 §4.2 的设计判断完全一致）。所以
+SEAM 2 在 hpmesh 侧真正要做的只有两件事：**补上窄的命名查询**
+（`tp_group()` 这类），以及**把"进入上下文"从从未被调用的 `set_spmd_meshes()`
+改成 trainer 显式进入**。
+
+> 真正需要重写的，是 TorchTitan 在**这些依赖之上的编排层**：mesh 构建、sharding
+> 应用引擎、FSDP/PP/AC 编排、训练循环、配置系统。本文的两个缝只针对其中
+> **"模块如何声明并行"**这一件事。
 
 ---
 
@@ -147,7 +172,13 @@ if isinstance(module, nn.Linear):
 |---|---|
 | 死文件 | `parallel/sharding.py`（125 行），唯一引用者是 `spmd_types.py:74` 的**函数内 import**，而那个调用者自己也是死的 |
 | 同名类 | `ShardingConfig` 在 `sharding.py:32`（DTensor placement 声明，死）与 `tensor_parallel/tp.py:128`（TP 切分 kind，活）各有一份 —— 任何 grep 都会得到两个答案 |
-| 死 API | `spmd_types.py`（529 行）的 17 个导出里 **11 个代码使用数为 0**，全部是「类型检查 / state-dict 转换」家族，服务于**已被删除的 `Module.parallelize()` 抽象** |
+| 死 API | `spmd_types.py`（529 行）的 17 个导出里 **11 个代码使用数为 0**，全部是「自动注解 / state-dict 转换」家族（`annotate_input_spmd_types`、`annotate_replicated_parameters`、`plain_tensor_to_dtensor_state_dict`、`dtensor_to_plain_tensor_state_dict`、`spmd_distribute_tensor`、`spmd_redistribute_per_axis`、`spmd_validate_redistributions`、`spmd_local_context`、`set_spmd_meshes`、`maybe_set_sparse_mesh`、`spmd_mesh_size`），服务于**已被删除的 `Module.parallelize()` 抽象** |
+
+> 注意**不要**把这一条读成"hpmesh 不用 SPMD 类型系统"。`spmd_types` 包本身是被
+> **实际使用**的：`tensor_parallel/linear.py` 有 7 处 `spmd.assert_type` 断言分片布局，
+> `cp_ep.py` 用 `spmd.redistribute` 做 CP 集合通信。死掉的只是 `spmd_types.py` 里
+> **替每个模块自动加注解**的那一层包装 —— 它服务于 torchtitan 的 `Module` 协议，
+> 而 hpmesh 选择让每个算子自己声明（见 §4.1）。
 
 ---
 
@@ -305,58 +336,64 @@ qkv"，模型直接说了。而这份声明可以用 HF 自己的 `_tp_plan` 自
 
 ### 4.2 SEAM 2：分布式运行时上下文
 
+**先说清楚这个缝不需要新造什么。** `spmd_types` 包（§0）**已经实现了整套状态机**：
+
+| SEAM 2 需要的能力 | `spmd_types` 已有 | 位置 |
+|---|---|---|
+| 进入 / 离开作用域 | `set_current_mesh(mesh)` —— 真正的 context manager | `_mesh.py:25` |
+| 嵌套与恢复 | `_push_mesh` / `_pop_mesh` 维护 `_tls.mesh_stack` | `_state.py` |
+| "该维度关闭"的语义 | **size-1 轴自动从 `axes` 剔除**，但保留在 `all_names` 的查表里 | `_push_mesh` |
+| 轴 -> 进程组 | `MeshEntry.pgs: dict[MeshAxis, ProcessGroup]` | `_axes_to_pgs` |
+| 读取当前 axis 集 | `current_mesh()` / `current_mesh_names()` | `_state.py` |
+
+注意第三行：`spmd_types` 把 "singleton 轴 = 该维度关闭" 写进了它的实现
+（`assert all(ax.size() > 1 for ax in resolved)`），与本节下面要做的判断**完全一致**。
+这不是巧合 —— hpmesh 的 `spmd_mesh_group` / `spmd_mesh_size` 当初就是照着这个语义写的。
+
+所以 hpmesh 侧真正要做的只有两件事：
+
+**其一，补一层窄的命名查询。** 下面这些今天是散落的（`spmd_mesh_group(axis)` /
+`spmd_mesh_size(axis)` 在 `parallel/spmd_types.py`，`cp_group()` 在 `parallel/cp_ep.py`）：
+
 ```python
-# hpmesh/parallel/context.py
+# hpmesh/parallel/context.py   -- 薄包装, 不是新状态机
 
-from __future__ import annotations
 from contextlib import contextmanager
-from threading import local
 
-import torch.distributed as dist
-from torch.distributed.device_mesh import DeviceMesh
-
-_TLS = local()
-_OFF = object()
+from spmd_types import current_mesh_all_names, set_current_mesh
 
 
 @contextmanager
-def dist_context(mesh: DeviceMesh | None):
-    """Make the current mesh answerable for the duration of the block.
+def dist_context(mesh):
+    """Make ``mesh`` answerable for the duration of the block.
 
-    Nestable and restorable: a nested ``dist_context(None)`` (e.g. a single-rank
-    reference pass inside a distributed test) hides the outer mesh, and the
-    outer one comes back on exit. Without the save/restore, that reference pass
-    would silently keep using the outer mesh's groups.
+    A thin alias over ``spmd_types.set_current_mesh`` so the entry point reads in
+    hpmesh's vocabulary -- the stack, the nesting and the singleton-axis rule are
+    all spmd_types'. ``None`` means "no mesh": callers below read that as every
+    axis being off.
     """
-    prev = getattr(_TLS, "mesh", _OFF)
-    _TLS.mesh = mesh
-    try:
+    if mesh is None:
         yield
-    finally:
-        _TLS.mesh = prev
+        return
+    with set_current_mesh(mesh):
+        yield
 
 
-def _group(name: str) -> dist.ProcessGroup | None:
+def _group(name: str):
     """The multi-rank process group for `name`, or None when inactive/absent.
 
     None (rather than a size-1 group) keeps every caller's "not active" branch
     honest: a collective on a size-1 group is a silent no-op, so a missing mesh
     would otherwise hide behind a run that merely computes the wrong answer.
     """
-    mesh = getattr(_TLS, "mesh", None)
-    if mesh is None or name not in (mesh.mesh_dim_names or ()):
-        return None
-    group = mesh.get_group(name)
-    return group if group.size() > 1 else None
+    entry = _current_mesh_group(name)     # spmd_types' MeshEntry.pgs
+    ...
 
 
 def _size(name: str) -> int:
     """Mesh axis size, or 1 when the axis is absent -- so `size() == 1` is the
     same question as "is this dimension off", and I5's no-op guard is free."""
-    mesh = getattr(_TLS, "mesh", None)
-    if mesh is None or name not in (mesh.mesh_dim_names or ()):
-        return 1
-    return mesh.size(name)
+    ...
 
 
 def tp_group():  return _group("tp")
@@ -370,13 +407,24 @@ def ep_size():   return _size("ep")
 def pp_size():   return _size("pp")
 ```
 
-这个接口**基本已经存在了**，只是散落在两处：`parallel/spmd_types.py` 的
-`spmd_mesh_group(axis)` / `spmd_mesh_size(axis)`，和 `parallel/cp_ep.py` 的
-`cp_group()`。本设计做的是**把它们提到一个地方并统一命名**，同时把"进入上下文"从
-**从未被调用的** `set_spmd_meshes()` 改成 trainer 显式包一层。
+> 今天 `dist_gemm.py` 调 `current_spmd_mesh()` 永远拿到 `None`，于是永远走
+> **未融合的回退路径** —— 这是**静默的**，正是这个缝要修的东西。
 
-> 今天 `dist_gemm.py` 调 `current_spmd_mesh()` 永远拿到 `None`，于是永远走未融合的
-> 回退路径 —— 这是**静默的**，正是这个缝要修的东西。
+**其二，把"进入上下文"接上。** 今天没有任何代码调用 `set_current_spmd_mesh()`
+（`tests/test_aux_loss.py:450` 自己就记着这个事实），所以上面那套状态机从未被激活。
+改动是把 trainer 里加一次显式进入，而不是新建机制。
+
+实现上有一步**必须做对**：`dist_gemm.py` 读的是 hpmesh shim 的
+`current_spmd_mesh()`，而它读的是 **shim 自己的** `_spmd_mesh_stack`，不是包的
+`mesh_stack`。所以只调包的 `set_current_mesh()` 是**不够的** —— `dist_gemm` 依然
+会返回 `None`、继续走回退路径。好在现成的 `set_current_spmd_mesh()` 两者都做：
+它既压自己的栈，又进入 `spmd.set_current_mesh(mesh)`。所以阶段 2 最小可行的改动就是
+**让 trainer 调这个已有的函数**（顺带把名字改成 `dist_context`），而不是新写一个只用
+包状态机的包装。
+
+**由此，阶段 2 的工作量与 §0 的边界一致**：不是"写一个分布式上下文"，而是
+"把一个沉睡的上下文**唤醒**，并给它起 hpmesh 的名字"。这也解释了为什么这一阶段
+的风险低、而对拍要求高 —— 代码路径第一次真的会跑起来（见 §8 R3）。
 
 ### 4.3 为什么是两个缝，而不是两个抽象层
 
@@ -487,9 +535,13 @@ def apply_tp(model, *, plan: ParallelPlan):
 
 ### 阶段 2：SEAM 2 — 分布式上下文
 
-- 新建 `parallel/context.py`；`spmd_mesh_group` 与 `cp_ep.cp_group` 统一到它。
-- trainer 在 `train_step` 里包一层 `dist_context`。
-- 删掉从未被调用的 `set_spmd_meshes()`。
+- **不新建状态机** —— 复用 `spmd_types` 已有的 `set_current_mesh`（§4.2）。
+- 新建 `parallel/context.py`，把 `spmd_mesh_group` / `spmd_mesh_size` 与
+  `cp_ep.cp_group` 统一成 `tp_group()` / `tp_size()` 这套窄命名查询。
+- trainer 在 `train_step` 里包一层 `dist_context`，**进入时必须同时压 shim 的栈和
+  包的栈** —— 直接调现成的 `set_current_spmd_mesh()` 就两者都做了（只调包的
+  `set_current_mesh()` 不够，`dist_gemm` 读的是 shim 的栈）。
+- 删掉从未被调用的 `set_spmd_meshes()`（配套 `dist_gemm.py` 改读 `current_spmd_mesh`）。
 - **验收**：新增单测 —— 无上下文时 `tp_group() is None`，有上下文时返回对应 pg。
 - **对拍**：EP/CP 等价脚本结果**不变**（`3.271e-07` / `2.384e-07`）。
   注意此时 `dist_gemm` 会**第一次真的走到融合路径**，所以这条对拍必须有 TP>1 的配置。
@@ -618,7 +670,7 @@ def test_every_apply_is_a_noop_when_its_axis_is_off():
 | `Module.parallelize()` | 模块如何声明自己的并行方式 | **`ParallelPlan` 纯数据**（SEAM 1） |
 | `Module.remat_region_name()` | 激活重算的切分点 | `torch.utils.checkpoint` 参数，或不做 |
 | `Module._init_self_buffers()` | 元设备上的 buffer 初始化 | 不存在 —— HF 模型自带 buffer |
-| `spmd.local_map` / `assert_type` | DTensor 的运行时类型检查 | `dist_context()` 的作用域 + `None` 语义（SEAM 2） |
+| `spmd.local_map` / `assert_type` | 在 SPMD 类型系统上做运行时布局检查 | **继续用** —— 这是独立包，不是 torchtitan 抽象（见 §0）。`tensor_parallel/linear.py` 用它断言分片布局，`cp_ep.py` 用它做 redistribute。hpmesh 只是不再像 torchtitan 那样替每个模块加 `annotate_*` 包装 |
 | `ModelSpec.traverse` | 让 override 树能到达模型配置 | `ModelSpec.plan`（同样是一份数据，但不需继承） |
 
 **一句话**：torchtitan 用"让模块自己描述自己"解决耦合；hpmesh 用"让模型交出声明、
@@ -637,6 +689,7 @@ def test_every_apply_is_a_noop_when_its_axis_is_off():
 | R2 | 阶段 3 会触碰权重切分路径 | 必须以 TP 等价逐位为准入 |
 | R3 | 阶段 2 会让 `dist_gemm` 首次真的生效 | 之前它一直走回退路径，**没测过的代码会被点亮**，必须有 TP>1 的对拍覆盖 |
 | R4 | `models/common/` 有 64% 不可达 | 删掉它等于把后续阶段的工作量翻倍。它的问题是**接线**，不是布局 |
+| R5 | 容易把"删 torchtitan 抽象"扩大成"重写并行底层" | `torch.distributed` / `spmd_types` / `transformers` 都独立于 torchtitan，照用即可（§0）。越界重写会凭空引入大量已在别处测过的代码 |
 
 **明确不做**
 
