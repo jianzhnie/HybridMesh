@@ -63,7 +63,7 @@ hpmesh 拿掉了 TorchTitan 的 `Configurable` 与 `Module` 两个抽象层，�
 50 个模块, 8310 行
 
 trainer     4 模块, 1025 行   config / trainer / train / __init__
-models     17 模块, 3404 行   hf_wrapper + common/{16 modules, ~2900 行}
+models     17 模块, 3404 行   hf_wrapper (495) + common/{15 模块, 2909 行} + __init__
 parallel   17 模块, 3030 行   tensor_parallel/ fsdp2/ pepeline_parallel/ cp_ep
                               context_parallel/ deepep/ + parallel_dims 等
 components  3 模块,  419 行   loss / checkpointer
