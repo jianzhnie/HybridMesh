@@ -1,10 +1,18 @@
 """Training-loop machinery: reductions, the data iterator, and checkpointing.
 
-All three run without a process group, which is the point -- the parts of the
-loop that are easy to get wrong are the ones that do not need a cluster to
-exercise. The collectives are checked in their single-rank form (where the
-reduction is the identity) and their clip semantics, which is where the real
-bug risk lives: clipping is easy to write such that it silently does nothing.
+The reductions and the iterator run without a process group, which is the point
+-- the parts of the loop that are easy to get wrong are the ones that do not need
+a cluster to exercise. The collectives are checked in their single-rank form
+(where the reduction is the identity) and their clip semantics, which is where
+the real bug risk lives: clipping is easy to write such that it silently does
+nothing.
+
+Checkpointing is exercised through the real ``CheckpointManager``, which runs
+single-process as long as no process group is initialized -- so the tests cover
+the DCP path the trainer actually uses rather than a substitute. The optimizer
+cases are deliberately built on *fresh* objects: restoring into an optimizer that
+has already taken a step hides the bug this suite exists to catch, because a
+cold Adam has no ``exp_avg`` tensors for DCP to write into.
 """
 
 from __future__ import annotations
@@ -12,7 +20,10 @@ from __future__ import annotations
 import torch
 import torch.nn as nn
 
-from hpmesh.components.checkpointer.checkpoint import Checkpointer
+from hpmesh.components.checkpointer import (
+    TRAIN_STATE,
+    CheckpointManager,
+)
 from hpmesh.components.loss import (
     IGNORE_INDEX,
     cross_entropy_loss,
@@ -84,9 +95,7 @@ def test_cross_entropy_selects_the_local_path_by_shape() -> None:
     logits = torch.randn(3, 5)
     targets = torch.tensor([0, 1, 2])
 
-    full = cross_entropy_loss(
-        logits, targets, tp_group=object(), global_vocab_size=5
-    )
+    full = cross_entropy_loss(logits, targets, tp_group=object(), global_vocab_size=5)
 
     assert torch.allclose(full, cross_entropy_loss(logits, targets), atol=1e-6)
 
@@ -230,48 +239,172 @@ def _model_and_optimizer() -> tuple[nn.Module, torch.optim.Optimizer]:
     return model, torch.optim.AdamW(model.parameters(), lr=0.1)
 
 
-def test_checkpoint_round_trips_model_optimizer_and_counters(tmp_path) -> None:
-    model, optimizer = _model_and_optimizer()
-    counter = Checkpointer(str(tmp_path), rank=0, device=torch.device("cpu"))
+class _TrainState:
+    """Stand-in for the two counters the Trainer contributes to a checkpoint."""
 
-    for _ in range(2):
+    def __init__(self) -> None:
+        self.step = 0
+        self.ntokens_seen = 0
+
+    def state_dict(self) -> dict[str, int]:
+        return {"step": self.step, "ntokens_seen": self.ntokens_seen}
+
+    def load_state_dict(self, state_dict: dict[str, int]) -> None:
+        self.step = state_dict["step"]
+        self.ntokens_seen = state_dict["ntokens_seen"]
+
+
+def _manager(
+    folder: str, model: nn.Module, optimizer, state: _TrainState, **overrides
+) -> CheckpointManager:
+    # keep_latest_k=0 keeps the default runs unbounded, so a test that asserts on
+    # what is on disk is describing the save path rather than the purge thread.
+    # Tests about retention pass keep_latest_k explicitly.
+    config = {"keep_latest_k": 0, **overrides}
+    return CheckpointManager(
+        CheckpointManager.Config(enable=True, folder="checkpoint", **config),
+        model_parts=[model],
+        optimizer=optimizer,
+        states={TRAIN_STATE: state},
+        folder=folder,
+    )
+
+
+def _step(model: nn.Module, optimizer: torch.optim.Optimizer, times: int = 2) -> None:
+    for _ in range(times):
         optimizer.zero_grad()
         model(torch.ones(2, 4)).sum().backward()
         optimizer.step()
 
-    counter.save(7, model=model, optimizer=optimizer, counters={"ntokens_seen": 99})
+
+def _optimizer_state(optimizer) -> dict:
+    return {
+        param_id: {k: v.clone() for k, v in state.items()}
+        for param_id, state in optimizer.state_dict()["state"].items()
+    }
+
+
+def test_checkpoint_round_trips_model_optimizer_and_counters(tmp_path) -> None:
+    """The three things a resume needs, restored into brand-new objects."""
+    model, optimizer = _model_and_optimizer()
+    state = _TrainState()
+    state.step, state.ntokens_seen = 7, 99
+    _step(model, optimizer)
+
     saved_weights = model.weight.detach().clone()
+    saved_optim = _optimizer_state(optimizer)
 
-    # Wreck the state, then prove the load restores it.
+    manager = _manager(str(tmp_path), model, optimizer, state, interval=1)
+    assert manager.save(7) is True
+    manager.close()
+
+    torch.manual_seed(0)
+    fresh_model, fresh_optimizer = _model_and_optimizer()
     with torch.no_grad():
-        model.weight.zero_()
-    restored = counter.load(model=model, optimizer=optimizer)
+        fresh_model.weight.zero_()
+    fresh_state = _TrainState()
 
-    assert restored == {"step": 7, "ntokens_seen": 99}
-    assert torch.equal(model.weight.detach(), saved_weights)
+    resumed = _manager(str(tmp_path), fresh_model, fresh_optimizer, fresh_state)
+    assert resumed.load(-1) is True
+    resumed.close()
+
+    assert (fresh_state.step, fresh_state.ntokens_seen) == (7, 99)
+    assert torch.equal(fresh_model.weight.detach(), saved_weights)
+
+    # The load-bearing case. A fresh Adam has no exp_avg to write into, so a
+    # manager that did not materialize the state first would report success
+    # while leaving the optimizer cold.
+    restored_optim = fresh_optimizer.state_dict()["state"]
+    assert restored_optim.keys() == saved_optim.keys()
+    for param_id, saved in saved_optim.items():
+        for key, value in saved.items():
+            assert torch.equal(restored_optim[param_id][key], value)
 
 
-def test_load_returns_none_when_there_is_no_checkpoint(tmp_path) -> None:
-    """A first run is not an error: ``None`` lets resume be the same code path."""
+def test_checkpoint_save_includes_optimizer_state_without_a_prior_step(
+    tmp_path,
+) -> None:
+    """A save at step 1 must carry optimizer state, not just the weights.
+
+    The first checkpoint of a run is taken by an optimizer that has just stepped
+    for the first time -- but any save before that would have written a model-only
+    file, which restores cleanly and silently resumes from a cold optimizer.
+    """
+    folder = tmp_path / "checkpoint"
     model, optimizer = _model_and_optimizer()
-    counter = Checkpointer(str(tmp_path), rank=0, device=torch.device("cpu"))
+    state = _TrainState()
 
-    assert counter.load(model=model, optimizer=optimizer) is None
+    manager = _manager(str(tmp_path), model, optimizer, state, interval=1)
+    manager.save(1)
+    manager.close()
+
+    assert (folder / "step-1" / ".metadata").is_file()
+
+    fresh_model, fresh_optimizer = _model_and_optimizer()
+    fresh_state = _TrainState()
+    resumed = _manager(str(tmp_path), fresh_model, fresh_optimizer, fresh_state)
+    resumed.load(-1)
+    resumed.close()
+
+    assert _optimizer_state(fresh_optimizer) != {}
 
 
-def test_checkpoint_files_are_per_rank(tmp_path) -> None:
-    """Each rank owns a file; they must not collide."""
-    a = Checkpointer(str(tmp_path), rank=0, device=torch.device("cpu"))
-    b = Checkpointer(str(tmp_path), rank=3, device=torch.device("cpu"))
-
-    assert a.path != b.path
-
-
-def test_save_is_atomic_leaving_no_temp_file(tmp_path) -> None:
-    """A crash mid-write must not leave a truncated file where the real one was."""
+def test_load_returns_false_when_there_is_no_checkpoint(tmp_path) -> None:
+    """A first run is not an error: ``False`` lets resume be the same code path."""
     model, optimizer = _model_and_optimizer()
-    counter = Checkpointer(str(tmp_path), rank=0, device=torch.device("cpu"))
+    manager = _manager(str(tmp_path), model, optimizer, _TrainState())
+    assert manager.load(-1) is False
+    manager.close()
 
-    counter.save(1, model=model, optimizer=optimizer, counters={"ntokens_seen": 1})
 
-    assert sorted(p.name for p in tmp_path.iterdir()) == ["rank00.pt"]
+def test_checkpoint_is_sharded_over_steps_not_over_ranks(tmp_path) -> None:
+    """Every rank writes into one shared step directory; DCP records the layout.
+
+    The old per-rank files (``rank00.pt``) could not express a sharded tensor:
+    they worked only while one rank owned the whole parameter.
+    """
+    model, optimizer = _model_and_optimizer()
+    manager = _manager(str(tmp_path), model, optimizer, _TrainState(), interval=1)
+
+    manager.save(1)
+    manager.save(3)
+    manager.close()
+
+    steps = sorted(p.name for p in (tmp_path / "checkpoint").iterdir())
+    assert steps == ["step-1", "step-3"]
+    # ``.metadata`` is what marks a step directory resumable; it is written per
+    # step, not per rank, so its presence proves nothing collided.
+    assert (tmp_path / "checkpoint" / "step-3" / ".metadata").is_file()
+
+
+def test_retention_keeps_the_latest_k_and_deletes_the_rest(tmp_path) -> None:
+    model, optimizer = _model_and_optimizer()
+    manager = _manager(
+        str(tmp_path), model, optimizer, _TrainState(), interval=1, keep_latest_k=2
+    )
+
+    for step in (1, 2, 3, 4):
+        manager.save(step)
+    manager.close()
+
+    remaining = sorted(p.name for p in (tmp_path / "checkpoint").iterdir())
+    # keep_latest_k counts the checkpoint the next save is about to take, so 2
+    # retained slots leave the two most recent on disk.
+    assert remaining == ["step-3", "step-4"]
+
+
+def test_step_discovery_ignores_unparseable_directory_names(tmp_path) -> None:
+    """A stray name must not be parsed into a step the loader would then pick."""
+    model, optimizer = _model_and_optimizer()
+    manager = _manager(str(tmp_path), model, optimizer, _TrainState(), interval=1)
+    manager.save(4)
+    manager.close()
+
+    checkpoint_folder = tmp_path / "checkpoint"
+    (checkpoint_folder / "step-007").mkdir()
+    (checkpoint_folder / "notes").mkdir()
+
+    fresh_model, fresh_optimizer = _model_and_optimizer()
+    resumed = _manager(str(tmp_path), fresh_model, fresh_optimizer, _TrainState())
+    assert resumed.load(-1) is True
+    resumed.close()
