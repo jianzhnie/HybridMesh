@@ -53,7 +53,7 @@ torchrun --nproc_per_node=2 -m hpmesh --data_parallel_shard_degree 2
 | `hpmesh/parallel/fsdp2/fsdp.py` | 数据并行（FSDP2 `fully_shard`） | 已实现 |
 | `hpmesh/parallel/tensor_parallel/linear.py` | async-TP 融合原语（`AllGatherLinear` / `LinearReduceScatter`） | 已实现（CUDA） |
 | `hpmesh/parallel/tensor_parallel/tp.py` | 张量并行（声明式 sharding -> 融合原语） | 已实现（CUDA） |
-| `hpmesh/parallel/pepeline_parallel/pipeline.py` | PP 的 stage 切分（**缺 schedule，`pp>1` 会报错**） | 一半 |
+| `hpmesh/parallel/pipeline_parallel/pipeline.py` | PP 的 stage 切分（**缺 schedule，`pp>1` 会报错**） | 一半 |
 | `hpmesh/parallel/cp_ep.py` | 上下文并行 / 专家并行 | 学习练习 |
 | `hpmesh/trainer/train.py` | 入口：`HfArgumentParser` 解析 config -> `Trainer(cfg).train()` | 可运行 |
 
@@ -67,7 +67,7 @@ torchrun --nproc_per_node=2 -m hpmesh --data_parallel_shard_degree 2
 第 0 步  单设备纯训练      已实现   python -m hpmesh --steps 20
 第 1 步  +FSDP 数据并行    已实现   torchrun --nproc_per_node=2 -m hpmesh --data_parallel_shard_degree 2
 第 2 步  +TP 张量并行      已实现   parallel/tensor_parallel/ (声明式 -> 融合 GEMM)
-第 3 步  +PP 流水线并行    练习     parallel/pepeline_parallel/ (缺 1F1B 调度)
+第 3 步  +PP 流水线并行    练习     parallel/pipeline_parallel/ (缺 1F1B 调度)
 第 4 步  +CP 或 EP         练习     parallel/cp_ep.py (KV all-gather / all-to-all)
 ```
 

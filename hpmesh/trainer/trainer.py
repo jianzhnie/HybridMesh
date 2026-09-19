@@ -222,7 +222,7 @@ class Trainer:
         what catches the gap.
 
         What stage 4 has to fill in, in order:
-          1. ``pepeline_parallel/pipeline.py`` splits the layers into this
+          1. ``pipeline_parallel/pipeline.py`` splits the layers into this
              rank's stages; a new ``pp.py`` builds the schedule over them.
           2. Each stage needs its own ``DeviceMesh`` axis, and the model must be
              cut into ``model_parts`` rather than kept whole.
@@ -235,7 +235,7 @@ class Trainer:
              unchanged from the non-PP path.
         """
         raise NotImplementedError(
-            "Pipeline parallelism is not wired: pepeline_parallel/pipeline.py "
+            "Pipeline parallelism is not wired: pipeline_parallel/pipeline.py "
             "splits the model into stages but no schedule drives them. "
             "See docs/hybridmesh_design.md, stage 4."
         )

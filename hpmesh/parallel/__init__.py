@@ -10,7 +10,7 @@ trainer code run from step 0 (single device) through step 4 (full hybrid
 parallelism) without an ``if degree > 1`` at any call site -- and it is why
 ``parallelize_hf_transformers`` can apply all of them unconditionally.
 
-Not here: pipeline parallelism. ``pepeline_parallel/pipeline.py`` computes the
+Not here: pipeline parallelism. ``pipeline_parallel/pipeline.py`` computes the
 stage split, but nothing builds a schedule over it, so ``pp > 1`` raises rather
 than quietly training every rank on the whole model.
 """
