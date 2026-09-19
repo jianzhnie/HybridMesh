@@ -524,6 +524,17 @@ class BaseCheckpointManager(ABC):
     purge_thread: threading.Thread | None
     purge_queue: queue.Queue[str | None]
     _storage: CheckpointStorage
+    _initialized: bool = False
+    """Whether ``__init__`` ran to completion.
+
+    Set last, by each subclass. A subclass that raises partway through leaves
+    the object uninitialized, and its ``__del__`` then calls ``close`` -- so
+    every public method has to be prepared for attributes that were never
+    assigned, and this flag is how it knows. ``enable`` cannot serve: it is
+    assigned first, so a manager that failed later still reads as enabled. That
+    partial state is not hypothetical: it is exactly what the HF-options
+    rejection in ``dcp.CheckpointManager.__init__`` produces.
+    """
 
     _STEP_DIR_PATTERN = r"step-(0|[1-9]\d*)"
     """The canonical checkpoint directory name, e.g. ``step-100``.
@@ -533,14 +544,19 @@ class BaseCheckpointManager(ABC):
     parsed into something that would then collide with ``step-7``.
     """
 
-    # A disabled manager returns early from ``__init__`` without setting up any
-    # state, so none of its attributes exist. Public entry points must perform
-    # this check before accessing manager state; overrides must preserve it.
+    # A disabled manager returns early from ``__init__``, and a failed manager
+    # raises partway through it, so in neither case do the attributes below
+    # exist. Public entry points must check before touching manager state; the
+    # overrides keep the check by calling ``super()``.
+    #
+    # The check must come first in each method -- reading ``self.enable`` on an
+    # object that never assigned it raises the very AttributeError it guards
+    # against.
 
     @torch.no_grad()
     def load(self, step: int = -1) -> bool:
         """Restore state from ``step``, or the latest checkpoint when ``-1``."""
-        if not self.enable:
+        if not getattr(self, "_initialized", False) or not self.enable:
             return False
 
         model_only = False
@@ -629,22 +645,25 @@ class BaseCheckpointManager(ABC):
     @torch.no_grad()
     def save(self, curr_step: int, last_step: bool = False) -> bool:
         """Persist state for ``curr_step``."""
-        if not self.enable:
+        if not getattr(self, "_initialized", False) or not self.enable:
             return False
         return self._save(curr_step, last_step)
 
     def maybe_wait_for_staging(self) -> None:
         """Block until asynchronous staging for the last save completes."""
-        if not self.enable:
+        if not getattr(self, "_initialized", False) or not self.enable:
             return
         self._maybe_wait_for_staging()
 
     def close(self) -> None:
-        """Release background threads and other resources."""
-        # getattr rather than a plain attribute read: ``__del__`` calls close(),
-        # and it can run on a partially constructed object whose ``__init__``
-        # raised before assigning ``enable``.
-        if not getattr(self, "enable", False):
+        """Release background threads and other resources.
+
+        Safe to call at any point in the object's life: ``__del__`` routes here,
+        and it can run on a partially constructed object whose ``__init__``
+        raised. ``_close`` is a no-op when that happened, so implementations of
+        it may assume their own attributes exist.
+        """
+        if not getattr(self, "_initialized", False):
             return
         try:
             self.maybe_wait_for_staging()
@@ -658,7 +677,9 @@ class BaseCheckpointManager(ABC):
         A manager with no asynchronous save in flight leaves ``save_future`` at
         ``None`` and never reaches ``_wait_for_saving``.
         """
-        if not self.enable or getattr(self, "save_future", None) is None:
+        if not getattr(self, "_initialized", False) or not self.enable:
+            return
+        if getattr(self, "save_future", None) is None:
             return
         self._wait_for_saving()
 
@@ -729,7 +750,11 @@ class BaseCheckpointManager(ABC):
         """
         return (
             self.keep_latest_k > 0
-            and (not dist.is_initialized() or dist.get_rank() == 0)
+            and (
+                not dist.is_available()
+                or not dist.is_initialized()
+                or dist.get_rank() == 0
+            )
             and self._storage.isdir(self.folder)
         )
 

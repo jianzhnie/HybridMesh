@@ -18,7 +18,11 @@ What the migration added, and why each earned its place:
   step: training continued and every later number was garbage. This stops at the
   first bad step instead, and does it with an on-device check so it neither
   synchronizes (unlike ``.item()``) nor becomes a CUDA-graph break.
-* **Checkpoints**, so a run can be resumed rather than restarted.
+* **Checkpoints**, so a run can be resumed rather than restarted. The loop only
+  drives the manager (``components/checkpointer``) -- it decides *when* to save
+  and load; the manager owns *how*, including the interval and retention
+  policies. ``Trainer.state_dict``/``load_state_dict`` are what make the step
+  and token counters part of the checkpoint.
 
 What was NOT ported: the component system (``Configurable``, ``model_spec``,
 metrics processor, ``sdc_replayer``, profiler, validator, CUDA graphs). Those are
@@ -30,13 +34,14 @@ from __future__ import annotations
 
 from collections.abc import Iterator
 from contextlib import nullcontext
+from typing import Any
 
 import torch
 import torch.distributed as dist
 import torch.nn.functional as F
 
 from .. import parallel
-from ..components.checkpointer.checkpoint import Checkpointer
+from ..components.checkpointer import TRAIN_STATE, CheckpointManager
 from ..datasets.random_data import (
     Batch,
     DataLoaderExhausted,
@@ -90,6 +95,22 @@ class Trainer:
 
         self.optimizer = torch.optim.AdamW(
             self.model.parameters(), lr=cfg.lr, weight_decay=cfg.weight_decay
+        )
+
+        # 4. checkpointing, last because it needs the model and optimizer it is
+        #    going to serialize, and because a checkpoint is meaningless until
+        #    there is something shaped like a training state to save.
+        #
+        #    ``self`` rides along as TRAIN_STATE: the manager saves ``states``
+        #    wholesale, and the step/token counters are not reachable from either
+        #    the model or the optimizer, so a resumed run would otherwise restart
+        #    its schedule from zero with weights that are already trained.
+        self.checkpointer = CheckpointManager(
+            cfg.checkpoint,
+            model_parts=[self.model],
+            optimizer=self.optimizer,
+            states={TRAIN_STATE: self},
+            folder=cfg.dump_folder,
         )
 
         # Counters the checkpoint carries. Kept as plain ints so a resumed run
@@ -348,52 +369,56 @@ class Trainer:
     def should_continue_training(self) -> bool:
         return self.step < self.cfg.steps
 
-    def _checkpoint_period(self) -> bool:
-        """Whether this step should be checkpointed.
+    # -- checkpoint state -------------------------------------------------------
+    # The manager serializes ``states[TRAIN_STATE]`` (this object) alongside the
+    # model and optimizer. These two counters are the whole of that state, and
+    # they are here rather than in the checkpoint dict because the running
+    # trainer is what has to be mutated back into a resumed step.
 
-        ``interval == 0`` disables checkpointing; returns ``False`` so no
-        directory is created for a run that never asked for one.
-        """
-        interval = self.cfg.checkpoint_interval
-        return interval > 0 and self.step % interval == 0
+    def state_dict(self) -> dict[str, Any]:
+        return {"step": self.step, "ntokens_seen": self.ntokens_seen}
+
+    def load_state_dict(self, state_dict: dict[str, Any]) -> None:
+        self.step = state_dict["step"]
+        self.ntokens_seen = state_dict["ntokens_seen"]
+
+    # -- the loop ---------------------------------------------------------------
 
     def train(self) -> None:
-        checkpointer = Checkpointer(
-            self.cfg.checkpoint_folder, rank=self.rank, device=self.device
-        )
+        try:
+            if self.checkpointer.load(self.cfg.checkpoint.load_step):
+                logger.info(f"Resuming from step {self.step}")
 
-        restored = checkpointer.load(model=self.model, optimizer=self.optimizer)
-        if restored is not None:
-            self.step = restored["step"]
-            self.ntokens_seen = restored["ntokens_seen"]
-            logger.info(f"Resuming from step {self.step}")
+            data_iterator = self._data_iterator()
+            while self.should_continue_training():
+                self.step += 1
 
-        data_iterator = self._data_iterator()
-        while self.should_continue_training():
-            self.step += 1
+                try:
+                    metrics = self.train_step(data_iterator)
+                except DataLoaderExhausted:
+                    logger.warning("Ran out of data; the last step was canceled.")
+                    break
 
-            try:
-                metrics = self.train_step(data_iterator)
-            except DataLoaderExhausted:
-                logger.warning("Ran out of data; the last step was canceled.")
-                break
+                if metrics is not None:
+                    logger.info(
+                        f"step {self.step:4d} | loss {metrics['loss']:.6f} "
+                        f"| max {metrics['max_loss']:.6f} "
+                        f"| grad_norm {metrics['grad_norm']:.4f} "
+                        f"| tokens {self.ntokens_seen}"
+                    )
 
-            if metrics is not None:
-                logger.info(
-                    f"step {self.step:4d} | loss {metrics['loss']:.6f} "
-                    f"| max {metrics['max_loss']:.6f} "
-                    f"| grad_norm {metrics['grad_norm']:.4f} "
-                    f"| tokens {self.ntokens_seen}"
-                )
-
-            if self._checkpoint_period():
-                path = checkpointer.save(
-                    self.step,
-                    model=self.model,
-                    optimizer=self.optimizer,
-                    counters={"ntokens_seen": self.ntokens_seen},
-                )
-                logger.info(f"Saved checkpoint to {path}")
+                # The manager owns the interval policy: ``save`` decides for
+                # itself whether this step is a checkpointing step. The final
+                # step is forced so a run that ends off-interval still leaves a
+                # resumable artifact rather than only a mid-run one.
+                last_step = self.step == self.cfg.steps
+                if self.checkpointer.save(self.step, last_step=last_step):
+                    logger.info(f"Saved checkpoint for step {self.step}")
+        finally:
+            # Drain any async save still in flight and stop the purge thread.
+            # In a ``finally`` so a run that dies mid-loop still finishes the
+            # checkpoint it had already started writing.
+            self.checkpointer.close()
 
         if dist.is_initialized():
             dist.destroy_process_group()
