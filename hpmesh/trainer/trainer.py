@@ -36,13 +36,18 @@ import torch.distributed as dist
 import torch.nn.functional as F
 
 from .. import parallel
+from ..components.checkpointer.checkpoint import Checkpointer
+from ..datasets.random_data import (
+    Batch,
+    DataLoaderExhausted,
+    RandomTokenSource,
+    batch_iterator,
+)
 from ..mesh import build_mesh, build_parallel_dims, init_distributed
 from ..models.hf_wrapper import HFTransformerModel, build_model_config_for
 from ..parallel.collectives import clip_grad_norm_, dist_max, dist_sum, dist_sum_tensor
 from ..utils.logger_utils import get_logger
-from .checkpoint import Checkpointer
 from .config import HybridMeshConfig
-from .data import Batch, DataLoaderExhausted, RandomTokenSource, batch_iterator
 
 # Rank-aware: the helper installs a handler on rank 0 only, so a torchrun run
 # logs one line per step instead of one per rank.
@@ -202,30 +207,30 @@ class Trainer:
         single-rank body -- which would silently train every stage on the whole
         model, and look like a working run.
 
-        NOTE: unreachable today. ``parallelize_hf_transformers`` calls
-        ``apply_pp`` during ``__init__``, and that raises first, so no Trainer
-        with ``pp > 1`` is ever constructed. It stays because it is the second
-        half of the contract, and the two halves get wired separately: stage 4
-        can make ``apply_pp`` return real stages before the loop knows how to
-        drive them. At that moment this is what catches the gap.
+        NOTE: unreachable today. ``parallelize_hf_transformers`` rejects ``pp > 1``
+        during ``__init__``, so no Trainer with ``pp > 1`` is ever constructed.
+        It stays because it is the second half of the contract, and the two
+        halves get wired separately: stage 4 can make ``apply_pp`` return real
+        stages before the loop knows how to drive them. At that moment this is
+        what catches the gap.
 
         What stage 4 has to fill in, in order:
-          1. ``parallel/pipeline.py`` splits the layers into this rank's stages;
-             ``pp.py`` builds the schedule over them.
+          1. ``pepeline_parallel/pipeline.py`` splits the layers into this
+             rank's stages; a new ``pp.py`` builds the schedule over them.
           2. Each stage needs its own ``DeviceMesh`` axis, and the model must be
              cut into ``model_parts`` rather than kept whole.
           3. Only the first stage receives ``input_ids`` and only the last
              produces labels -- the middle stages take activations. That is the
              "send ``input_ids``/``labels`` only to the stages that want them"
-             note in ``parallel/pp.py``.
+             note in ``parallelize_hf.py``.
           4. The returned loss is the sum over the last stage's micro-batches,
              paired with a token count, so the caller's normalization is
              unchanged from the non-PP path.
         """
         raise NotImplementedError(
-            "Pipeline parallelism is not wired: parallel/pp.py is still a stub "
-            "and the stage split in parallel/pipeline.py has no schedule over "
-            "it. See docs/hybridmesh_design.md, stage 4."
+            "Pipeline parallelism is not wired: pepeline_parallel/pipeline.py "
+            "splits the model into stages but no schedule drives them. "
+            "See docs/hybridmesh_design.md, stage 4."
         )
 
     def _param_context(self):

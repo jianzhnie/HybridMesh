@@ -1,203 +1,159 @@
-# Hybrid Parallel training over a Torch DeviceMesh
+# HP 并行训练框架设计：两个缝
 
-## 设计原则
-
-hpmesh 在设计时拿掉 TorchTitan 的抽象, 希望能直接对接 HuggingFace 的 API, 适配
-HuggingFace 的模型. 拿掉的抽象层包括:
-
-- `configurable.py` 的配置抽象 —— 全套 `Configurable` 类
-- `module.py` 的模块抽象 —— 全套 `Module` 类
-
-拿掉这两个抽象层后, hpmesh 直接使用非常简单直观的 `config.py` 类来传递参数,
-所有的函数和类都变得更加简单直观, 不再需要复杂的配置类和模块类.
-
-本文结合 `/Users/robin/work_dir/torchtitan/torchtitan` 与当前已完成的 hpmesh
-框架, 给出更优的原型设计. 结论先放在这里:
-
-> **拿掉 `Configurable` / `Module` 只是把复杂度搬走了, 没有消灭它.**
-> torchtitan 用两个显式抽象换来了两样东西 —— "配置如何到达模块" 和
-> "模块如何描述自己的并行方式". 这个框架目前把前者转嫁给了配置对象本身
-> (`parallel/` 下每个 `apply_*` 都接收整个 `HybridMeshConfig`, 尽管最多只用 2 个字段),
-> 把后者转嫁给了**模块类的身份** (`parallel/tp.py` 靠 `isinstance(module, nn.Linear)`
-> 扫描模型来猜哪些投影该切).
+> 本文只谈**设计**：现在缺什么、补什么、怎么验收。
+> 结构审计（哪些代码该删、目录怎么分）见 `hpmesh_structure.md`。
 >
-> 后者是真正的技术债: 它是"框架反向依赖具体模型内部结构", 而这个仓库
-> (`models/common/` 里 21 个模块的移植 + `moe_swap.py` + `moe_probe.py` +
-> 两个并存且互相冲突的 `HFModelWrapper`) 正在真实地支付这笔债.
->
-> 本文主张一次**收敛 (convergence)**: 不引入任何新抽象层, 只引入**两个缝 (seam)**
-> —— 模型侧用一份数据 (而非类身份) 声明如何切分, 运行时侧用一个线程局部的
-> 分布式上下文取代到处传递 mesh / group. 收敛后删除被取代的死代码,
-> 把两套模型包装归一.
+> 所有数字都是对 `hpmesh/**/*.py` 的 AST 实测，不是估计。
 
 ---
 
-## 1. 现状画像
+## 0. 结论
 
-### 1.1 已经建成的部分 (实测)
+hpmesh 拿掉了 TorchTitan 的 `Configurable` 与 `Module` 两个抽象层，换来了一个
+明显更短的框架。但那两个抽象**原本承担的两件事**没有被替代，它们以更隐晦的形式
+重新长了出来：
 
-| 维度 | 状态 | 证据 |
+| torchtitan 用抽象解决的 | hpmesh 今天用什么顶 | 长成了什么形状 |
 |---|---|---|
-| 配置 | 分组 dataclass, 无 `Configurable` | `trainer/config.py` |
-| 拓扑 | `ParallelDims` + 4 维 `DeviceMesh` | `mesh.py`, `parallel/parallel_dims.py` |
-| FSDP2 | torchtitan `fsdp.py` 原样 vendored | `parallel/fsdp.py` + `fsdp_wrap.py` |
-| TP | 声明式 plan + 融合 GEMM | `parallel/tp.py`, `parallel/linear.py` |
-| CP | 两个 redistribute 策略 | `parallel/cp_ep.py` |
-| EP | all-to-all dispatcher + MoE | `models/common/{moe,token_dispatcher,grouped_experts}.py` |
-| 模型组件 | 21 个 torchtitan 模块中 10 个已落地 | `models/common/*.py` |
-| PP | **stage 切分已完成 (未接线), 缺 schedule** | `parallel/pipeline.py` (保留), `parallel/pp.py` (stub) |
-| 验证 | **206 个 CPU 单测通过**; EP 等价 rel `3.271e-07`; CP 等价 `2.384e-07`, Ulysses 往返 `0` | `tests/` |
+| 配置如何到达模块 | 到处传整个 `HybridMeshConfig` | `parallel/` 反向依赖 `trainer/` |
+| 模块如何声明自己的并行方式 | **模块类的身份**（`isinstance` 扫描） | 框架反向依赖具体模型内部结构 |
 
-这套骨架是健康的. 下面的问题不是"没做完", 而是"做完了的部分正在被自身的形状反噬".
+**本文主张一次收敛：不引入任何新抽象层，只引入两个缝。**
 
-### 1.2 一个可以量化的诊断
+- **SEAM 1（数据）**：模型用一份纯数据声明"哪些投影该怎么切"，取代 `isinstance` 扫描。
+- **SEAM 2（作用域）**：一个线程局部的分布式上下文，取代沿调用链传 mesh / group。
 
-统计每个 `apply_*` 实际读了多少配置字段:
-
-```
-apply_tp        cfg.tp                                      -> 1 个字段
-apply_cp_ep     cfg.cp, cfg.ep                              -> 2 个字段
-apply_pp        cfg.pp                                      -> 1 个字段
-apply_fsdp      cfg.parallel.enable_fsdp_symm_mem,
-                cfg.parallel.fsdp_reshard_after_forward     -> 2 个字段
-```
-
-**没有任何一个函数需要超过 2 个字段, 但每一个都接收整个 `HybridMeshConfig`.**
-
-代价是具体的、可验证的 —— 实测 `trainer/config.py` 的反向依赖方:
-
-```
-mesh.py                        from .trainer.config import HybridMeshConfig
-bundle.py                      from .trainer.config import HybridMeshConfig
-parallel/parallelize_hf.py     from ..trainer.config import HybridMeshConfig
-parallel/tp.py                 from ..trainer.config import HybridMeshConfig
-parallel/fsdp_wrap.py          from ..trainer.config import HybridMeshConfig
-parallel/pp.py                 from ..trainer.config import HybridMeshConfig
-parallel/cp_ep.py              from ..trainer.config import HybridMeshConfig
-```
-
-底层的并行模块反向依赖 trainer 层. 一个用来承载 CLI 参数的 god-object,
-成了整个框架的类型中枢 —— 结果是**为了给 `apply_tp` 传一个整数, 整个配置对象
-都必须被构造出来**, 单元测试也因此必须伪造一个 `HybridMeshConfig`.
-
-> 诚实地说: `models/common/` 目前**没有**这个问题 (它只 import `torch` / `spmd_types`
-> 与同目录模块, 对 trainer 的引用仅存在于文档字符串). 但它的签名是
-> `register_aux_loss_zero_hook(optimizer, model_parts, parallel_dims)` 这种形状,
-> 意味着"配置 + 运行时"已经在往模型组件里渗. 本设计的 I1 是把**当前恰好成立的
-> 事实固化成不变量**, 而不是在描述一个已存在的缺陷.
-
-看起来像是文件组织问题, 实质是"传参"这种最朴素的机制撑不住 5 个并行维度之后,
-必然会退化成的形状.
-
-### 1.3 第二个诊断: 框架在识别具体模型
-
-移植 `qkv.py` 时我给 `QKVLinear` 加了一个 `_project` 接缝, 理由是让
-`AllGatherFusedQKVLinear` 能只替换 matmul. 这个接缝本身是对的, 但它暴露了一个
-更深的问题 —— **框架必须知道某个 `nn.Linear` 到底是 qkv 还是普通投影, 只能靠猜**:
-
-```python
-# 现存的猜测方式 (实测位置)
-if isinstance(module, nn.Linear): ...              # parallel/tp.py:229      [活, 要解决]
-("embed_tokens", "wte") / ("norm", "ln_f")         # bundle.py:73,81         [活, 要归并]
-if hasattr(experts, "gate_up_proj"): ...           # moe_probe.py:231,269    [删]
-if hasattr(block, "experts"): ...                  # moe_probe.py, moe_swap.py [删]
-"model.layers" / "model.model.layers" / "layers"   # _utils.py:10, moe_swap.py:280 [删]
-```
-
-每一条都是在**反推 HF 模型的内部结构**. 而且它们同时是 hpmesh 的**价值**
-(这就是"对接 HF"的本体) 和它的**脆弱点** —— 所以处理方式不是消灭它们, 而是
-**把它们收敛到一处**: 名字解析归 `HFTransformerModel` (§5.1), 切分目标归
-`ParallelPlan` (§4 SEAM 1).
-
-分布很说明问题: **5 处里有 3 处落在 §1.4 判定要删的被取代代码里**
-(`moe_probe` / `moe_swap` / `_utils`). 所以阶段 0 的删除是"免费的减债".
-剩下两处里, `tp.py:229` 是唯一一处"框架主动扫描模型来找切分目标"的地方 ——
-那正是 SEAM 1 要解决的.
-
-### 1.4 第三个诊断: 不可达的代码
-
-按"从 trainer 出发能否到达"做的精确可达性分析 (AST 解析相对导入, 非子串匹配):
-
-> 本节是**迁移前**的画像. 阶段 0 / 阶段 1 之后, 表里的条目除
-> `pipeline.py` 与 `models/common/embedding.py` 外都已按"处理"列落地, 详见 §7.
-> 表里两处需要勘误: `_utils.py` 从未在树里 (也从未提交), 无需删除;
-> `spec.py` 的真实引用者只有 `rope.py` 的文档字符串, "被 `registry.py` 取代"
-> 是超前表述 —— `registry.py` 要到阶段 3 才存在.
-
-| 模块 | 可达 | 原因 | 处理 |
-|---|---|---|---|
-| `models/hf_wrapper.py` | 否 | 只有 `tests/test_hf_wrapper.py` 引用 | 保留 (§1.5 要升级它) |
-| `models/spec.py` (`HPModelSpec`) | 否 | 仅 `rope.py` 文档字符串提了一句 | **删除** (被 `registry.py` 取代) |
-| `models/moe_swap.py` + `moe_probe.py` | 否 | `moe_swap` -> `moe_probe`, 无外部入口 | **删除** |
-| `parallel/hf_sharding.py` + `placements.py` | 否 | 无 hpmesh 内部引用 | **删除** |
-| `parallel/pipeline.py` | 否 | `pp.py` 只提了名字, 没 import | **保留** —— 它是 PP 的前半段 (§1.6) |
-| `models/common/embedding.py` | 否 | 自身 docstring 写明 "currently unused" | **保留** —— 待 TP 接上 `Shard(0)` |
-| `protocols/` | —— | 空目录 | **删除** |
-
-按项目规则「Deprecated files should be removed, not updated」, **被取代的**应当删除.
-但"不可达"不等于"可删除" —— 见下.
-
-### 1.5 诊断: 两套模型包装并存
-
-```
-bundle.py:HFModelWrapper                 <- 活的 (trainer -> bundle -> build_bundle)
-models/hf_wrapper.py:HFTransformerModel  <- 死的 (只有 tests/test_hf_wrapper.py)
-```
-
-两个类**职责重叠、互不引用**, 一个活着一个死了. 而活着的那个能力更弱
-(无 flex attention 装配、无 CP 支持、无 logits 转储), 死掉的那个恰好是设计更好的一份.
-
-> 这不是"还没合并", 这是**两条设计路线在同一个仓库里并行生长**. 设计文档的第一件事
-> 就是裁决它们 (§5.1). 阶段 1 之后本节描述的状态已不存在: 活的那个被换成
-> `HFTransformerModel`, `bundle.py` 整体删除.
-
-### 1.6 一句重要的区分: "不可达" != "可删除"
-
-§1.4 那张表按"从 trainer 是否可达"分类, 但**不可达有两种, 处理方式相反**:
-
-| 不可达的原因 | 例子 | 处理 |
-|---|---|---|
-| 被取代 (superseded) | `hf_sharding`/`placements` 被 `spmd_types` 取代; `spec.py`/`moe_swap.py`/`moe_probe.py` 无任何接续者 | **删除** (阶段 0 已执行) |
-| 还没接线 (not yet wired) | `pipeline.py` (PP stage 切分, 296 行, 完整可用); `models/common/embedding.py` (vocab-parallel embedding) | **保留**, 由对应阶段接上 |
-
-`pipeline.py` 尤其容易被误判: 它可独立使用, 只依赖 torch 的
-`distributed.pipelining`, 甚至已经带着 `ScheduleDualPipeV` /
-`ScheduleZBVZeroBubble` / `get_schedule_class` 的导入和一个 `get_mesh` 回调.
-缺的只是 `pp.py` 把它接进 `apply_pp`. **删掉它等于把阶段 4 的工作量翻倍.**
-
-> 这条区分是本设计里唯一的"读代码时要小心"的地方 —— 只按可达性做删除判断,
-> 会把未接线的能力一起埋掉.
+两个缝的分工刻意不对称：**一个显式传参，一个隐式作用域**（理由见 §4.3）。
+收敛之后删掉被取代的死代码，把两套并存的模型包装归一。
 
 ---
 
-## 2. 设计目标与不变量
+## 1. 设计原则
 
-在给出结构之前, 先把"什么算更好"写死, 否则无法验收.
+拿掉抽象不等于拿掉复杂度，只等于**把复杂度换成另一种形式**。hpmesh 选择的形式是：
 
 **目标 (Go)**
 
-- G1 **一个模型**: 任意 HF `AutoModelForCausalLM` 可训练, 不改模型代码即可并行.
-- G2 **一条数据通路**: 配置只沿一个方向流动 (`CLI -> Config -> 顶层显式传参`).
-- G3 **每个 `apply_*` 只依赖它的契约**, 不依赖 `trainer` 层, 也不依赖具体模型类.
-- G4 **一次加一个维度**: 每个维度是独立文件 + 独立单测 + 独立对拍脚本.
-- G5 **可对拍**: 任何非计算改动必须逐位一致 (本仓库已有的标准).
+| | 目标 | 为什么它值得写死 |
+|---|---|---|
+| G1 | 任意 HF `AutoModelForCausalLM` 不改模型代码即可并行 | 这是"直接对接 HuggingFace"的全部内容 |
+| G2 | 配置只沿一个方向流动（`CLI -> Config -> 顶层显式传参`） | 单向才不会出现"改 A 要动 B" |
+| G3 | 每个 `apply_*` 只依赖它的契约 | 不依赖 `trainer` 层，也不依赖具体模型类 |
+| G4 | 一次加一个维度，每个维度独立文件 + 独立单测 + 独立对拍脚本 | 五维并行无法一次想清楚 |
+| G5 | 任何非计算改动必须逐位一致 | 已有标准，见 `CLAUDE.md` 的验证要求 |
 
-**不变量 (Invariants) —— 这些是"不许再退化回去"的红线**
+**不变量 (Invariants) —— 不许再退化回去的红线**
 
-- I1 `models/common/` 不得 import `trainer/`. (当前只差一步就破了)
-- I2 任意并行模块不得 import 具体模型模块 (`qkv`, `moe`, ...); 只能 import
-  `torch` / `nn` / `parallel/*` / 协议.
-- I3 模型侧向框架暴露的信息, 只能是**数据** (dict / dataclass / 张量),
-  不能是"调用框架的内部函数".
-- I4 新增/重写的注释与文档字符串只用 ASCII.
-- I5 `apply_X` 在对应 degree == 1 时必须是 no-op, 且**不改变返回类型**.
-- I6 每个维度必须有: CPU 单测 (逻辑) + 多卡等价脚本 (数值).
+| | 不变量 |
+|---|---|
+| I1 | `models/common/` 不得 import `trainer/` |
+| I2 | 任意并行模块不得 import 具体模型模块（`qkv` / `moe` / `rope` / ...） |
+| I3 | 模型侧向框架暴露的信息只能是**数据**，不能是"调用框架的内部函数" |
+| I4 | 新增/重写的注释与文档字符串只用 ASCII |
+| I5 | `apply_X` 在对应 degree == 1 时必须是 no-op，且不改变返回类型 |
+| I6 | 每个维度必须有：CPU 单测（逻辑）+ 多卡等价脚本（数值） |
+
+---
+
+## 2. 现状实测
+
+### 2.1 规模与分层
+
+```
+50 个模块, 8310 行
+
+trainer     4 模块, 1025 行   config / trainer / train / __init__
+models     17 模块, 3404 行   hf_wrapper + common/{16 modules, ~2900 行}
+parallel   17 模块, 3030 行   tensor_parallel/ fsdp2/ pepeline_parallel/ cp_ep
+                              context_parallel/ deepep/ + parallel_dims 等
+components  3 模块,  419 行   loss / checkpointer
+datasets    2 模块,   97 行
+utils       4 模块,  209 行
+mesh.py     1 模块,   90 行   <-- 悬在包的根上
+```
+
+**分层方向已经是对的**：`trainer -> parallel -> models` 单向，反向零依赖。
+问题不在方向，在**层内没有边界**。
+
+### 2.2 诊断一：64% 的包体从 trainer 不可达
+
+从真实入口（`hpmesh/__main__.py` + `hpmesh/trainer/train.py`）做 AST 可达性分析：
+
+```
+可达    16/50 模块
+不可达  34 模块 / 5308 行 = 64%
+```
+
+按目录拆开看，问题集中在两个地方：
+
+| 目录 | 模块 | 行数 | 可达模块 | 可达行数 |
+|---|---|---|---|---|
+| `models/` | 17 | 3404 | 2 | 793 |
+| `parallel/` | 17 | 3030 | 2 | 658 |
+| `trainer/` | 4 | 1025 | 4 | 1025 |
+| `components/` | 3 | 419 | 1 | 94 |
+| `utils/` | 4 | 209 | 3 | 209 |
+
+**这 64% 不是废弃代码，是"已完成但未接线"的能力**：`models/common/` 有 25 个
+rope 测试、28 个 aux_loss 测试、逐位对拍过的 EP/CP 等价脚本。删掉它们等于把
+后续阶段的工作量翻倍。**它们的问题不是布局，是接线。**
+
+> 判别"不可达"的两种含义，是读这份代码时唯一需要小心的点：
+>
+> | 不可达的原因 | 例子 | 处理 |
+> |---|---|---|
+> | **被取代** (superseded) | `hf_sharding` / `placements` / `moe_probe` / `moe_swap` | **删除** |
+> | **还没接线** (not yet wired) | `pepeline_parallel/pipeline.py`（296 行，完整可用）；`models/common/embedding.py`（vocab-parallel embedding） | **保留**，由对应阶段接上 |
+
+### 2.3 诊断二：并行模块反向依赖 trainer
+
+实测 `parallel/` 里读配置字段的位置：
+
+```
+parallel/cp_ep.py:208                   cfg.cp
+parallel/tensor_parallel/tp.py:218      cfg.tp
+parallel/fsdp2/fsdp_wrap.py:98          cfg.parallel.fsdp_reshard_after_forward
+parallel/parallelize_hf.py:78           cfg.compile
+```
+
+**没有任何一个函数需要超过 1 个字段，但每一个都接收整个 `HybridMeshConfig`。**
+后果是具体的：
+
+- `parallel/` 无法脱离 `trainer/` 单独测试；
+- `apply_tp(model, mesh, cfg)` 这种**本就该是纯函数**的东西被迫收一个大对象；
+- 单元测试必须伪造一个 `HybridMeshConfig` 才能测一行权重切分。
+
+而 `tp` / `cp` 这些数字，`parallel_dims`（它自己就是从 config 派生的）**已经算好了**。
+同一个事实存了两份。
+
+### 2.4 诊断三：框架靠 `isinstance` 猜模型结构
+
+```python
+# parallel/tensor_parallel/tp.py:229
+if isinstance(module, nn.Linear):
+    spec = _match(sharding_plan, module_path)
+```
+
+这是**唯一一处"框架主动扫描模型来找切分目标"**，也恰好是 HP 对接价值的本体与
+脆弱点的交汇处：框架必须知道某个 `nn.Linear` 到底是 qkv 还是普通投影，只能靠
+"它匹配了哪个 glob 模式"来猜。
+
+注意 `_match` 用的是 HF 自己的 `_tp_plan`（一份纯数据）作为默认 plan —— **方向是对的**，
+缺的是让模型侧明确声明、并让"没命中"可报错（见 §5 阶段 5）。
+
+### 2.5 诊断四：`torchtitan` 遗产与同名冲突
+
+| 问题 | 实测 |
+|---|---|
+| 死文件 | `parallel/sharding.py`（125 行），唯一引用者是 `spmd_types.py:74` 的**函数内 import**，而那个调用者自己也是死的 |
+| 同名类 | `ShardingConfig` 在 `sharding.py:32`（DTensor placement 声明，死）与 `tensor_parallel/tp.py:128`（TP 切分 kind，活）各有一份 —— 任何 grep 都会得到两个答案 |
+| 死 API | `spmd_types.py`（529 行）的 17 个导出里 **11 个代码使用数为 0**，全部是「类型检查 / state-dict 转换」家族，服务于**已被删除的 `Module.parallelize()` 抽象** |
 
 ---
 
 ## 3. 目标结构
 
-不新增抽象层, 只新增两个**缝**:
+不新增抽象层，只新增两个缝：
 
 ```
 +---------------------------------------------------------------+
@@ -209,7 +165,7 @@ models/hf_wrapper.py:HFTransformerModel  <- 死的 (只有 tests/test_hf_wrapper
         |                     |                     |
         v                     v                     v
 +---------------+   +-------------------+   +-----------------+
-| parallel/tp   |   | parallel/cp_ep    |   | parallel/pp     |
+| tensor_paralle|   | cp_ep             |   |  pp (待建)      |
 | apply_tp(m,   |   | apply_cp_ep(m,    |   | apply_pp(m,     |
 |  *, plan)     |   |  *, plan)         |   |  *, plan)       |
 +---------------+   +-------------------+   +-----------------+
@@ -251,24 +207,11 @@ models/hf_wrapper.py:HFTransformerModel  <- 死的 (只有 tests/test_hf_wrapper
 +---------------------------------------------------------------+
 ```
 
-### 3.1 为什么是两个缝而不是两个抽象层
-
-`Configurable` / `Module` 是**继承型**抽象: 你要用框架, 就必须继承它、注册它、
-让它能 `traverse()` 你. 两个缝是**数据型 + 作用域型**:
-
-- SEAM 1 是**一份数据**. 模型说"我这些 module path 按 colwise 切", 框架负责切.
-  模型不需要 import 框架的任何东西, 也不需要继承任何基类.
-- SEAM 2 是**一个作用域**. 进入 `dist_context` 之后, `tp_group()` 自然可答;
-  离开后是 `None`. 不需要把 mesh 沿调用链传 8 层, 也不需要模块持有 group 状态.
-
-这正好回答了最初的设计原则: 拿掉抽象之后, 应该用**数据 + 作用域**去补位,
-而不是放任复杂度以"到处传参"和"靠类身份猜"的形式重新长出来.
-
 ---
 
-## 4. 核心接口
+## 4. 两个缝
 
-### SEAM 1: 模型的并行声明
+### 4.1 SEAM 1：模型的并行声明
 
 ```python
 # hpmesh/parallel/plan.py
@@ -291,9 +234,8 @@ def _cut(t: torch.Tensor, dim: int, *, size: int, rank: int) -> torch.Tensor:
 @dataclass(frozen=True)
 class Colwise:
     """Output features split. The transpose is NOT cosmetic: the realizer stores
-    [in, out/tp] because that is what the fused all-gather GEMM consumes, and
-    that is exactly what ColwiseLinear does today. `cut` keeps that contract, so
-    swapping the realizer does not change the weight layout."""
+    [in, out/tp] because that is what the fused all-gather GEMM consumes. `cut`
+    keeps that contract, so swapping the realizer does not change the layout."""
     def cut(self, weight, *, size, rank):    # [out, in] -> [in, out/tp]
         return _cut(weight.t().contiguous(), 1, size=size, rank=rank)
 
@@ -320,7 +262,7 @@ class ParallelPlan:
     tp: dict[str, Colwise | Rowwise | Fused] = field(default_factory=dict)
     """module path pattern -> how to cut it. Glob patterns, matched deepest-first."""
 
-    ep: set[str] = field(default_factory=dict)
+    ep: set[str] = field(default_factory=set)
     """module paths holding expert weights that EP should shard."""
 
     pp_split: list[list[str]] = field(default_factory=list)
@@ -329,12 +271,10 @@ class ParallelPlan:
     cp: Literal["ulysses", "kv_all_gather"] | None = None
 ```
 
-关键点: `ParallelPlan` **不是抽象基类** —— 它是一份数据. 模型侧**不 import 它**,
-只是在 `ModelSpec.plan` 里放一个 dict 形状的声明:
+关键点：`ParallelPlan` **不是抽象基类** —— 它是一份数据。模型侧**不 import 它**，
+只是在 `ModelSpec.plan` 里放一个 dict 形状的声明：
 
 ```python
-# 模型作者 (或 HP 适配层) 只需要写这个:
-
 def hf_tp_plan(*, fused_qkv: bool = False) -> ParallelPlan:
     """The projections every HF llama-family decoder shares. Derived from HF's own
     ``model._tp_plan`` when present; this is the fallback for when it is not.
@@ -359,11 +299,11 @@ def hf_tp_plan(*, fused_qkv: bool = False) -> ParallelPlan:
     )
 ```
 
-**这就是那四个 `hasattr` / `isinstance` 的替代品.** 框架不再猜"这个 `nn.Linear`
-是不是 qkv", 模型直接说了. 而这份声明可以用 HF 自己的 `model._tp_plan` 自动生成,
-所以对接新模型仍然是一行.
+**这就是 `tp.py:229` 那个 `isinstance` 的替代品**：框架不再猜"这个 `nn.Linear` 是不是
+qkv"，模型直接说了。而这份声明可以用 HF 自己的 `_tp_plan` 自动生成，所以对接新模型
+仍然是一行。
 
-### SEAM 2: 分布式运行时上下文
+### 4.2 SEAM 2：分布式运行时上下文
 
 ```python
 # hpmesh/parallel/context.py
@@ -412,7 +352,7 @@ def _group(name: str) -> dist.ProcessGroup | None:
 
 def _size(name: str) -> int:
     """Mesh axis size, or 1 when the axis is absent -- so `size() == 1` is the
-    same question as "is this dimension off", and §6's no-op guard is free."""
+    same question as "is this dimension off", and I5's no-op guard is free."""
     mesh = getattr(_TLS, "mesh", None)
     if mesh is None or name not in (mesh.mesh_dim_names or ()):
         return 1
@@ -430,162 +370,55 @@ def ep_size():   return _size("ep")
 def pp_size():   return _size("pp")
 ```
 
-> 这个接口**基本已经存在了**, 只是散落在两处: `parallel/spmd_types.py` 的
-> `spmd_mesh_group(axis)` / `spmd_mesh_size(axis)` 和 `parallel/cp_ep.py` 的
-> `cp_group()`. 本设计做的是**把它们提到一个地方并统一命名**, 同时把"进入上下文"
-> 从**从未被调用的** `set_spmd_meshes()` 改成 trainer 显式包一层. 今天
-> `dist_gemm.py` 调 `current_spmd_mesh()` 永远拿到 `None`, 于是永远走未融合的
-> 回退路径 —— 这是**静默的**, 正是这个 seam 要修的东西.
+这个接口**基本已经存在了**，只是散落在两处：`parallel/spmd_types.py` 的
+`spmd_mesh_group(axis)` / `spmd_mesh_size(axis)`，和 `parallel/cp_ep.py` 的
+`cp_group()`。本设计做的是**把它们提到一个地方并统一命名**，同时把"进入上下文"从
+**从未被调用的** `set_spmd_meshes()` 改成 trainer 显式包一层。
 
----
+> 今天 `dist_gemm.py` 调 `current_spmd_mesh()` 永远拿到 `None`，于是永远走未融合的
+> 回退路径 —— 这是**静默的**，正是这个缝要修的东西。
 
-## 5. 收敛点: 模型层
+### 4.3 为什么是两个缝，而不是两个抽象层
 
-### 5.1 裁决: 保留 `models/hf_wrapper.py`, 删除 `bundle.py` 的 wrapper
+`Configurable` / `Module` 是**继承型**抽象：你要用框架，就必须继承它、注册它、
+让它能 `traverse()` 你。两个缝是**数据型 + 作用域型**：
 
-| | `bundle.py:HFModelWrapper` | `models/hf_wrapper.py:HFTransformerModel` |
+- SEAM 1 是**一份数据**。模型说"我这些 module path 按 colwise 切"，框架负责切。
+  模型不需要 import 框架的任何东西，也不需要继承任何基类。
+- SEAM 2 是**一个作用域**。进入 `dist_context` 之后，`tp_group()` 自然可答；
+  离开后是 `None`。不需要把 mesh 沿调用链传 8 层。
+
+两个缝的分工**刻意不对称**：
+
+| | 谁传给谁 | 为什么 |
 |---|---|---|
-| 存活 | **活** (trainer 在用) | **死** (只有测试) |
-| 名字解析 | 每次调用 `_resolve()` 线性扫 | `__init__` 里解析一次存名字 |
-| 层列表 | `.layers` 直通 | `.layers` + property setter (PP 可原地换 stage) |
-| flex attention | 无 | `get_attention_masks()` (causal / block_causal) |
-| CP 支持 | 无 | `set_cp_mesh()` 坐标标记 |
-| 数值对拍 | 无 | `HF_BACKEND_LOGIT_DUMP` |
-| logits 返回 | **返回 loss** | **返回 logits** |
+| SEAM 1 (`plan`) | **调用方显式传参** | 它是**意图**："我声明这些投影这么切"。必须能被测试直接构造（`apply_tp(m, plan={...})`），也必须能与上下文不一致（例如测一条单 rank 路径） |
+| SEAM 2 (`context`) | **隐式作用域** | 它是**环境**："此刻有哪些进程组"。它沿调用链穿透到底层 `models/common/*`，显式传递会让每个函数都多三个参数 |
 
-**裁决: 取后者为唯一实现.** 理由不是"它功能多", 而是**返回类型决定分层**:
+把 `plan` 也做成上下文 = 丢失显式性；把 context 也做成参数 = 丢失穿透性。
+所以是**一个显式 + 一个隐式**，不是"两个都隐式"。
 
-- 返回 `logits` 是正确的边界. loss 是训练策略 (是否 shift、是否 z-loss、
-  是否带 aux loss 加权), 属于 trainer; 塞进 wrapper 会把 trainer 的一半逻辑
-  搬进模型层. **阶段 1 已实测**: `Trainer._loss` 与 HF 自己的 `.loss` 逐位相等
-  (abs diff 0.0), 所以这条分层没有付出任何数值代价.
-- `get_attention_masks` 是 CP 与 packed-document 训练**必需**的, 而 CP 已经建好了
-  (`parallel/cp_ep.py`), 没有 mask 装配它的等价脚本就跑不起来.
-- PP 需要 property setter 来原地替换 stage.
-
-**执行结果 (阶段 1)**: `bundle.py` 整个删除, 不走"只留 `build_bundle`"的中间态 ——
-`build_bundle` 的全部内容就是 `AutoModelForCausalLM.from_config` + `to(device)`,
-而 `HFTransformerModel.__init__` 自己就能从 config 构建. 保留一个只剩三行的
-`bundle.py` 只会让"模型层在哪"这个问题重新出现两个答案, 正是 §1.5 那个诊断
-要消掉的东西. 配置映射 (`hf_model` -> HF config, 含离线 arch overrides)
-并入 `models/hf_wrapper.py:build_model_config_for`. `HFModelWrapper` 这个名字
-从仓库消失.
-
-### 5.2 归一后的接口
-
-```python
-# hpmesh/models/hf_wrapper.py
-
-class HFTransformerModel(nn.Module):
-    """One HF causal LM, presented under the names the parallel layer reads.
-
-    Two jobs, both about translation:
-
-    1. INPUT: HF nests the decoder under ``model.model`` and spells its parts
-       differently across families (``embed_tokens``/``wte``, ``norm``/``ln_f``).
-       The parallel layer wants flat names. Resolving once here -- instead of at
-       every call site -- is what keeps that translation in ONE place.
-    2. OUTPUT: return raw logits. Loss is the trainer's business.
-    """
-
-    def __init__(self, config: PretrainedConfig) -> None: ...
-    # 传入的是 HF config, 不是已构建的模型: 构建职责也在这一层
-    # (build_model_config_for 负责 cfg -> config 的映射, 见阶段 1)
-
-    # -- 平行层读取的五个名字 ------------------------------------------------
-    @property
-    def tok_embeddings(self) -> nn.Module: ...
-    @property
-    def layers(self) -> nn.ModuleList: ...
-    @layers.setter
-    def layers(self, value) -> None: ...          # PP 原地换 stage
-    @property
-    def norm(self) -> nn.Module: ...
-    @property
-    def lm_head(self) -> nn.Module | None: ...
-    @property
-    def enable_weight_tying(self) -> bool: ...    # 按 identity 判, 不按 config 标志
-
-    def get_attention_masks(self, positions: torch.Tensor): ...   # -> BlockMask
-
-    def _apply_attention(
-        self, positions: torch.Tensor, attention_masks
-    ) -> dict[str, Any]:
-        """ROLE-IN / CONVENTION-OUT 的缝: 决定交给 decoder 什么.
-
-        角色固定: 永远经某个 attention 实现, 且永远有一个 mask 描述可注意范围.
-        而"某个后端想要什么形状的 mask" (flex 要 BlockMask, sdpa 要 bool 张量
-        且靠 mask 是否存在推因果) 全部收敛在这里, 其他任何地方都不判断后端.
-        """
-
-    def forward(self, input_ids, *, positions=None, attention_masks=None) -> Tensor:
-        """Return logits (T, V). Deliberately NOT the loss: shifting labels and
-        choosing an objective is training policy, and it belongs to the trainer.
-        Once the wrapper returns logits, the parallel layer never has to know
-        which loss is in use."""
-```
-
-### 5.3 并行声明的位置
-
-`ParallelPlan` 由**模型注册表**提供, 与模型一起注册:
-
-```python
-# hpmesh/models/registry.py
-
-@dataclass(frozen=True)
-class ModelSpec:
-    name: str
-    config_cls: type
-    plan: ParallelPlan           # <-- SEAM 1
-    attn_mask_type: str = "causal"
-    state_dict_adapter: type | None = None
-
-
-MODELS = {
-    "llama":  ModelSpec("llama",  LlamaConfig,  plan=hf_tp_plan, ...),
-    "qwen3":  ModelSpec("qwen3",  Qwen3Config,  plan=hf_tp_plan, ...),
-    "gpt_oss": ModelSpec("gpt_oss", ..., plan=hf_tp_plan, ...),
-}
-```
-
-这里顺手收掉了 `models/spec.py` 里那个死的 `HPModelSpec` (它带着
-`pipelining_fn` / `post_optimizer_build_fn` 两个 hpmesh 用不上的 torchtitan 残留).
-
----
-
-## 6. 一个 step 的完整分层视图
-
-把上面的东西拼起来, 训练循环应该长这样 (注意配置的流动方向是**单向且显式**的):
+### 4.4 一个 step 的完整分层视图
 
 ```python
 class Trainer:
     def __init__(self, cfg: HybridMeshConfig):
-        self.rank, self.local_rank, self.world_size = init_distributed()
-        self._seed_everything(cfg.seed, deterministic=cfg.deterministic)
-        self.device = ...
-
-        self.parallel_dims = ParallelDims.from_config(cfg.parallel, self.world_size)
+        self.parallel_dims = build_parallel_dims(cfg, self.world_size)
         self.mesh = build_mesh(self.parallel_dims)
 
         spec = MODELS[cfg.model_name]
-        self.model = HFTransformerModel(build_hf_model(spec, cfg, device=self.device))
+        self.model = HFTransformerModel(build_model_config_for(cfg))
 
         # ---- SEAM 2 建立一次: 之后每个 apply_* 自己从上下文里读度数 ----
         with dist_context(self.mesh):
             self.model = apply_tp(self.model, plan=spec.plan)
             self.model = apply_cp_ep(self.model, plan=spec.plan)
-            self.model = apply_pp(self.model, plan=spec.plan)
             if cfg.compile:
                 self.model = torch.compile(self.model)
             # FSDP 是唯一的例外: 它要构造 dp_replicate x dp_shard x cp x tp 的
             # 多维 storage mesh, 单靠一个 dp_group() 表达不了, 所以它仍然接收
             # parallel_dims. 这是真实需求, 不是没收拾干净.
-            self.model = apply_fsdp(
-                self.model,
-                self.parallel_dims,
-                reshard=cfg.parallel.fsdp_reshard_after_forward,
-                symm_mem=cfg.parallel.enable_fsdp_symm_mem,
-            )
+            self.model = apply_fsdp(self.model, self.parallel_dims, ...)
 
         self.optimizer = torch.optim.AdamW(self.model.parameters(), lr=cfg.lr, ...)
 
@@ -594,15 +427,15 @@ class Trainer:
         self.optimizer.zero_grad(set_to_none=True)
         with dist_context(self.mesh):                          # <-- SEAM 2
             logits = self.model(batch.input_ids, positions=batch.positions)
-            loss = cross_entropy(logits, batch.labels)          # 训练策略留在 trainer
+            loss = cross_entropy_loss(logits, batch.labels)     # 训练策略留在 trainer
         loss.backward()
         self.optimizer.step()
         return float(loss.detach())
 ```
 
-**关键简化: `apply_*` 连度数参数都不需要了.** 因为 `tp_size()` 在没有 tp 轴时
-返回 `1`, "这个维度开没开"和"这个维度多大"是同一个查询 —— I5 (degree==1 时 no-op)
-从一条需要人工遵守的纪律, 变成**从上下文里读出来的事实**:
+**关键简化：`apply_*` 连度数参数都不需要了。** 因为 `tp_size()` 在没有 tp 轴时返回
+`1`，"这个维度开没开"和"这个维度多大"变成**同一个查询** —— I5（degree==1 时 no-op）
+从一条需要人工遵守的纪律，变成**从上下文里读出来的事实**：
 
 ```python
 def apply_tp(model, *, plan: ParallelPlan):
@@ -612,141 +445,86 @@ def apply_tp(model, *, plan: ParallelPlan):
         ...
 ```
 
-每个 `apply_*` 接收**同一个** `ParallelPlan`, 但只读自己那一片 (`plan.tp` /
-`plan.cp` / `plan.pp_split`). 这比"每个函数收一个不同的子对象"更简单:
-调用方不必记住谁要哪一片, 而"这个函数只看这一片"由实现本身保证 ——
-一个只读 `plan.tp` 的函数无法偷偷依赖 `plan.ep`.
-
-注意这两个缝的**分工不是对称的**, 这是刻意设计:
-
-| | 谁传给谁 | 为什么 |
-|---|---|---|
-| SEAM 1 (`plan`) | **调用方显式传参** | 它是**意图** "我声明这些投影这么切", 必须能被测试直接构造 (`apply_tp(m, plan={...})`), 也必须能与上下文不一致 (例如测一条单 rank 路径) |
-| SEAM 2 (`context`) | **隐式作用域** | 它是**环境** "此刻有哪些进程组", 沿调用链穿透到底层 `models/common/*`, 显式传递会让每个函数都多三个参数 |
-
-把 `plan` 也做成上下文 = 丢失显式性; 把 context 也做成参数 = 丢失穿透性.
-所以是**一个显式 + 一个隐式**, 不是"两个都隐式".
-
-对比现状的三点改进:
-
-1. `parallel/*` 不再反向 import `trainer/config.py` (I1) ——
-   `parallel/` 下现有的 5 个 (`parallelize_hf`, `tp`, `fsdp_wrap`, `pp`, `cp_ep`)
-   全部消失. (`mesh.py` 与 `bundle.py` 仍然接收 config —— 它们本来就是组装层,
-   不在 I1 的约束范围内.)
-2. `apply_tp` 不再 `isinstance(nn.Linear)` 扫模型猜目标, 而是读 `plan.tp` (I2).
-3. `dist_context` 让 `dist_gemm` / `aux_loss` / `moe` 在没有 mesh 时**明确**退化,
-   在有 mesh 时**真的生效** —— 今天第二条永远不成立.
+每个 `apply_*` 接收**同一个** `ParallelPlan`，但只读自己那一片。这比"每个函数收一个
+不同的子对象"更简单：调用方不必记住谁要哪一片，而"这个函数只看这一片"由实现本身保证
+—— 一个只读 `plan.tp` 的函数无法偷偷依赖 `plan.ep`。
 
 ---
 
-## 7. 迁移路线
+## 5. 迁移路线
 
-每一阶段独立可跑、可对拍. **不允许**跨阶段混做 —— 这是唯一的节奏约束.
+每一阶段独立可跑、可对拍。**不允许跨阶段混做 —— 这是唯一的节奏约束。**
 
-### 阶段 0: 收敛与删除 (零风险, 先做)
+### 阶段 0：收敛与删除（零风险，先做）
 
-- 删除 §1.4 表中**被取代**的死模块 (`hf_sharding`, `placements`, `spec.py`,
-  `moe_swap.py`, `moe_probe.py`, 空的 `protocols/`).
-- 修掉指向它们的文档字符串引用 (`parallelize_hf.py`, `models/common/embedding.py`,
-  `models/common/rope.py`, `pyproject.toml` 的注释, `README.md` 的代码地图).
-- **保留** `pipeline.py` (PP 的第一半, 见 §1.6) 与 `models/common/embedding.py`.
-- **不动** `hf_wrapper.py` / `trainer.py` / `bundle.py` / 任何测试 —— 阶段 0 是纯删除.
-  (所以原计划里"把 `test_hf_wrapper.py` 并入 `test_core.py`"挪到阶段 1: 那一步的前提是
-  CPU 上能真的跑 `HFTransformerModel`, 那要等阶段 1 的 attention 回退.)
-- **验收**: `pytest tests/` 由 206 降到 181 —— 差值 25 恰好等于被删的
-  `test_hf_sharding`(5) + `test_moe_probe`(6) + `test_moe_swap`(14); 其余 6 个文件
-  逐测试点名一一对应, `ruff` 干净, 行数净减 (实测 -2014 / +11).
-- **对拍**: 无数值变化. 单设备 `--steps 2` 与删除前逐位相同
-  (`4.858892` / `4.855443`).
-- **勘误**: §1.4 表里的 `_utils.py` 实际不在树里 (也从未提交过), 无需删除;
-  `models/spec.py` 的真实引用者只有 `rope.py` 的文档字符串, 写成"被 `registry.py` 取代"
-  是超前表述 —— `registry.py` 要到阶段 3 才存在.
+- 删除被取代的死模块：`parallel/sharding.py`、`parallel/hf_sharding.py`、
+  `parallel/placements.py`、`models/spec.py`、`models/moe_swap.py`、
+  `models/moe_probe.py`、空的 `protocols/`。
+- 切掉 `spmd_types.py` 的 11 个零使用导出（§2.5），一并消灭同名 `ShardingConfig`。
+- 修掉指向它们的文档字符串引用（`moe.py:380`、`test_aux_loss.py:450` 都还在提
+  `set_spmd_meshes`）。
+- **保留** `pepeline_parallel/pipeline.py`（PP 的前半段）与 `models/common/embedding.py`。
+- **验收**：`ruff` 干净；pytest 通过数只减少被删测试的数量；行数净减。
+- **对拍**：无数值变化。单设备 `--steps 2` 与删除前**逐位相同**。
 
-### 阶段 1: 统一模型层 (收敛 §5.1) — 已完成
+### 阶段 1：统一模型层 — 已完成
 
-- `HFTransformerModel` 成为唯一 wrapper; `forward` 返回 logits.
-- trainer 承担 loss 计算 (`_loss`: 丢弃最后一个 logit / 第一个 label, float32 交叉熵).
-- `bundle.py` 删除 (构建职责并入 `trainer` 的 `build_model_config_for`),
-  `tests/test_hf_wrapper.py` 并入 `tests/test_core.py`.
-- **必须解决的前置**: 阶段 0 实测 `HFTransformerModel` 在**无 CUDA 的机器上直接跑不起来**:
+- `HFTransformerModel` 成为唯一 wrapper；`forward` 返回 logits（loss 归 trainer）。
+- `bundle.py` 删除，构建职责并入 `build_model_config_for`。
+- **必须解决的前置**：`HFTransformerModel` 在**无 CUDA 的机器上跑不起来** —— flex
+  attention 走 inductor，而 inductor 没有 CPU 后端。解法是 `_flex_supported()`：
+  无 CUDA 时把 `_attn_implementation` 设为 `"sdpa"`。
+- **回退不是"算术降级"**，真相比这微妙：HF 的 sdpa 包装器**只要 mask 存在就忽略
+  `is_causal`，改从 mask 推因果**。所以把 `BlockMask` 传下去会静默关掉 mask。正确做法
+  是**什么都不传**，让 HF 走它自己的路径。这段逻辑被收进一个显式的缝：
+  `HFTransformerModel._apply_attention(positions, masks)` —— 角色固定（永远经某个
+  attention 实现，永远喂它一个描述可注意范围的 mask），而"某个后端想要什么形状的 mask"
+  在这里被隔离。真正失去的能力只有 **packed-document masking**，且这个缺口不静默：
+  位置出现回退时 `_apply_attention` 直接 `ValueError`。
+- **验收**：trainer 的 `_loss` 与 HF 自己的 `.loss` **逐位相等**（`abs diff = 0.0`）；
+  固定一个 batch 过拟合 200 步 `4.8516 -> 0.9474`。
+- **欠账**：CUDA 上补 flex 逐位对拍（本机无 CUDA）。
 
-  ```
-  InductorError: NotImplementedError: torch.compile on current platform is
-  not supported for CPU.  target: flex_attention
-  ```
+### 阶段 2：SEAM 2 — 分布式上下文
 
-  (flex attention 走 inductor, inductor 没有 CPU 后端.) 解法是 `_flex_supported()`:
-  无 CUDA 时把 `_attn_implementation` 设为 `"sdpa"`. 这也解释了为什么原计划里
-  "阶段 0 就把 `test_hf_wrapper.py` 并入 `test_core.py`"走不通 —— 那次合并必然
-  顺带把回退带进来.
+- 新建 `parallel/context.py`；`spmd_mesh_group` 与 `cp_ep.cp_group` 统一到它。
+- trainer 在 `train_step` 里包一层 `dist_context`。
+- 删掉从未被调用的 `set_spmd_meshes()`。
+- **验收**：新增单测 —— 无上下文时 `tp_group() is None`，有上下文时返回对应 pg。
+- **对拍**：EP/CP 等价脚本结果**不变**（`3.271e-07` / `2.384e-07`）。
+  注意此时 `dist_gemm` 会**第一次真的走到融合路径**，所以这条对拍必须有 TP>1 的配置。
 
-- **回退不是"算术降级", 真相比原计划的担心更微妙.** 两条路本来可以给出同一个数,
-  但有个陷阱: HF 的 sdpa 包装器**只要 mask 存在就忽略 `is_causal`, 改从 mask 推因果**.
-  所以把 `BlockMask` 传下去会静默关掉 mask (或直接崩, `BlockMask` 没有 `.ndim`).
-  正确做法是**什么都不传**, 让 HF 走它自己的路径 —— 它只在必须时才物化 4D mask
-  (滑窗层、padding), 否则返回 `None`, 并据此决定 `is_causal`.
-  (`is_causal=True` 显式传下去反而会与 HF 自己物化的 mask 撞车: sdpa 拒绝
-  `attn_mask` 与 `is_causal=True` 同时出现.)
+### 阶段 3：SEAM 1 — 并行声明
 
-  这段逻辑被收进一个显式的**缝**——`HFTransformerModel._apply_attention(positions, masks)`:
-  角色固定 ("永远经某个 attention 实现, 永远喂它一个描述可注意范围的 mask"),
-  而"某个后端想要什么形状的 mask"在这里被隔离. 于是 mask **无条件构建**,
-  即使最后被丢弃 —— 不建会让两条路差的就不只是后端了.
-  真正失去的能力只有 **packed-document masking**: `get_attention_masks` 仍能造出
-  正确的 `BlockMask`, 只是没有 flex kernel 去跑它. 这个缺口不静默: 位置出现回退
-  (即 packed 序列) 时 `_apply_attention` 直接 `ValueError`.
+- 新建 `parallel/plan.py` + `models/registry.py`。
+- `apply_tp` 改为读 `plan`，移除 `tensor_parallel/tp.py:229` 的 `isinstance(nn.Linear)` 扫描。
+- `parallel/{tp,cp_ep,pp,fsdp_wrap}.py` 逐个去掉 `from ..trainer.config import`。
+- **验收**：I1 / I2 用 import 图断言钉死（§6）。
+- **对拍**：TP 等价脚本，逐位一致。
 
-- **验收 (已修正)**: 原计划的"loss 逐位一致"**不成立**, 因为回退把 attention 从
-  flex 换成 sdpa, 数值必然变. 阶段 1 实际的门禁与结果:
-  1. CPU 上前向跑通 —— 通过.
-  2. **trainer 的 `_loss` 与 HF 自己的 `.loss` 逐位相等** —— 通过, `abs diff = 0.0`,
-     `torch.equal(...) is True`. 这条比"收敛"强得多: 它把"接口重构"这一半单独锁死.
-  3. **真的能学**: 固定一个 batch 过拟合 200 步, `4.8516 -> 0.7588`
-     (最后 50 步均值 `1.0133`). 用固定 batch 而不是"loss 下降", 因为随机 token 的
-     下界就是 `ln(vocab) = 4.852`, 在它附近的抖动不含信息.
-  4. **CUDA 上补 flex 逐位对拍** —— 仍未做 (本机无 CUDA), 是阶段 1 唯一的欠账.
-- **理由**: 把"接口重构"和"attention 后端切换"混在一次对拍里, 会得到一个
-  既无法归因、又必然失败的验收标准; 拆开后, 不变量 (2) 在 CPU 上就能钉死.
+### 阶段 4：PP
 
-### 阶段 2: SEAM 2 — 分布式上下文
+- 唯一还缺的维度。`pepeline_parallel/pipeline.py` 的 stage 切分已经可用，缺的是
+  schedule（今天 `parallelize_hf_transformers` 对 `pp > 1` 直接 raise）。
+- 先做最简单的 1F1B，用"每 rank 必须进入"的纪律对齐 loss。
+- **验收**：PP=2 等价脚本，对比 PP=1。
 
-- 新建 `parallel/context.py`; `spmd_mesh_group` 与 `cp_ep.cp_group` 统一到它.
-- trainer 在 `train_step` 里包一层 `dist_context`.
-- 删掉从未被调用的 `set_spmd_meshes()`.
-- **验收**: 新增单测 —— 无上下文时 `tp_group() is None`, 有上下文时返回对应 pg.
-- **对拍**: EP/CP 等价脚本结果**不变** (`3.271e-07` / `2.384e-07`).
-  注意此时 `dist_gemm` 会**第一次真的走到融合路径**, 所以这条对拍必须有 TP>1 的配置.
+### 阶段 5：让声明式适配可验证
 
-### 阶段 3: SEAM 1 — 并行声明
-
-- 新建 `parallel/plan.py` + `models/registry.py`.
-- `apply_tp` 改为读 `plan`; 移除 `isinstance(nn.Linear)` 扫描.
-- `parallel/{tp,cp_ep,pp,fsdp_wrap}.py` 逐个去掉 `from ..trainer.config import`.
-- **验收**: I1 / I2 用一条单测钉死 (import 图断言, 见 §8).
-- **对拍**: TP 等价脚本, 逐位一致.
-
-### 阶段 4: PP
-
-- 唯一还缺的维度. `pipeline.py` 的 stage 切分已在 `pp.py` 里描述, 缺的是 schedule.
-- 先做最简单的 1F1B, 用 `_all_reduce_loss` 同款的"每 rank 必须进入"纪律.
-- **验收**: PP=2 等价脚本, 对比 PP=1.
-
-### 阶段 5: 把声明式 model 适配变成可验证的
-
-- `ParallelPlan` 增加 `validate(model)`, 在 `apply_tp` 前检查每个 pattern **恰好命中**
-  预期数量的 module; 未命中 = 报错, 不是静默跳过.
-- **理由**: 今天 `_match` 没命中就什么都不做, 于是"TP 没生效"和"TP 生效了"
-  在日志上无法区分. 这是本项目里最危险的一类静默失败.
+- `ParallelPlan` 增加 `validate(model)`，在 `apply_tp` 前检查每个 pattern **恰好命中**
+  预期数量的 module；未命中 = 报错，不是静默跳过。
+- **理由**：今天 `_match` 没命中就什么都不做，于是"TP 没生效"和"TP 生效了"在日志上
+  无法区分。这是本项目里最危险的一类静默失败。
 
 ---
 
-## 8. 不变式如何被机器守住
+## 6. 不变量如何被机器守住
 
-不变量写在文档里等于没写. 三条可执行的断言:
+不变量写在文档里等于没写。四条可执行的断言：
 
 ```python
 # tests/test_layering.py
-"""Architecture tests: the rules in §2 that nothing else would catch.
+"""Architecture tests: the rules in §1 that nothing else would catch.
 
 These do not test behaviour. They test that the LAYERING still holds, because a
 reverse dependency compiles, imports and runs perfectly -- it only hurts later,
@@ -760,12 +538,13 @@ from pathlib import Path
 
 
 def _imports(path: Path) -> list[str]:
-    """Absolute-ish module strings this file imports."""
+    """Absolute-ish module strings this file imports. AST, not grep: a docstring
+    mentioning a module name is not a dependency."""
     out = []
     for node in ast.walk(ast.parse(path.read_text())):
         if isinstance(node, ast.Import):
             out += [a.name for a in node.names]
-        elif isinstance(node, ast.ImportFrom):        # import ... / from ... import
+        elif isinstance(node, ast.ImportFrom):
             out.append(node.module or "")
     return out
 
@@ -792,10 +571,10 @@ def test_models_do_not_import_the_framework():
     project. This is the property that makes "directly wrap HuggingFace" work,
     so it is worth pinning rather than assuming.
     """
-    allowed = ("torch", "spmd_types", "hpmesh.models")   # same layer is fine
+    allowed = ("torch", "hpmesh.models")   # same layer is fine
     for path in Path("hpmesh/models").rglob("*.py"):
         for mod in _imports(path):
-            if mod.startswith("hpmesh.") or mod in ("hpmesh",):
+            if mod.startswith("hpmesh."):
                 assert mod.startswith(allowed), f"{path} imports {mod}"
 
 
@@ -812,69 +591,68 @@ def test_every_apply_is_a_noop_when_its_axis_is_off():
         assert apply_cp_ep(model, plan=ParallelPlan()) is model
 ```
 
-> 注意 `test_models_do_not_import_the_framework` 的意义: 它把 §3.1 的那句
-> "模型不需要 import 框架的任何东西" 从主张变成了可执行的断言. 如果哪天
-> `qkv.py` 开始 `from hpmesh.parallel import tp_group`, 这条测试会变红 ——
-> 而那正意味着 SEAM 2 被用错了地方 (模型组件不该依赖运行时上下文, 只该依赖
-> 传给它的张量和 group).
+> `test_models_do_not_import_the_framework` 的意义：它把 §4.3 那句"模型不需要 import
+> 框架的任何东西"从主张变成了可执行的断言。如果哪天 `qkv.py` 开始
+> `from hpmesh.parallel import tp_group`，这条测试会变红 —— 而那正意味着 SEAM 2 被
+> 用错了地方（模型组件不该依赖运行时上下文，只该依赖传给它的张量和 group）。
 
-配合已有的数值门禁 (EP / CP 等价脚本 + loss 逐位对拍), 形成三层:
+配合已有的数值门禁，形成三层：
 
 | 层 | 门禁 | 抓住什么 |
 |---|---|---|
-| 结构 | `test_layering.py` | 分层退化 (反向依赖) |
-| 逻辑 | 206 个 CPU 单测 | 组件正确性 |
+| 结构 | `tests/test_layering.py` | 分层退化（反向依赖） |
+| 逻辑 | 204 个 CPU 单测 | 组件正确性 |
 | 数值 | `ep_equivalence.py` / `cp_equivalence.py` / loss 对拍 | 分布式正确性 |
 
 ---
 
-## 9. 与 torchtitan 的对照
+## 7. 与 torchtitan 的对照
 
-最后回答"拿掉抽象之后, 我们用什么补位".
+最后回答"拿掉抽象之后，我们用什么补位"。
 
 | torchtitan 的机制 | 它真正解决的问题 | hpmesh 的替代 |
 |---|---|---|
-| `Configurable` + `Config.build()` | 配置如何到达被构造的模块 | **dataclass 显式传参** (已做) + `ModelSpec.plan` (数据) |
+| `Configurable` + `Config.build()` | 配置如何到达被构造的模块 | **dataclass 显式传参**（已做）+ `ModelSpec.plan`（数据） |
 | `Configurable.traverse()` | 从顶层配置找到嵌套的模型配置 | 不需要 —— 模型配置本就是普通 dataclass |
-| `config_utils` (448 行) | 配置的解析/覆盖/校验管线 | `HfArgumentParser` + dataclass `__post_init__` |
-| `Module.parallelize()` | 模块如何声明自己的并行方式 | **`ParallelPlan` 纯数据** (SEAM 1) |
-| `Module.remat_region_name()` | 激活重算的切分点 | `torch.utils.checkpoint` 参数, 或不做 |
+| `config_utils`（448 行） | 配置的解析/覆盖/校验管线 | `HfArgumentParser` + dataclass `__post_init__` |
+| `Module.parallelize()` | 模块如何声明自己的并行方式 | **`ParallelPlan` 纯数据**（SEAM 1） |
+| `Module.remat_region_name()` | 激活重算的切分点 | `torch.utils.checkpoint` 参数，或不做 |
 | `Module._init_self_buffers()` | 元设备上的 buffer 初始化 | 不存在 —— HF 模型自带 buffer |
-| `spmd.local_map` / `assert_type` | DTensor 的运行时类型检查 | `dist_context()` 的作用域 + `None` 语义 (SEAM 2) |
-| `ModelSpec.traverse` | 让 override 树能到达模型配置 | `ModelSpec.plan` (同样是一份数据, 但不需继承) |
+| `spmd.local_map` / `assert_type` | DTensor 的运行时类型检查 | `dist_context()` 的作用域 + `None` 语义（SEAM 2） |
+| `ModelSpec.traverse` | 让 override 树能到达模型配置 | `ModelSpec.plan`（同样是一份数据，但不需继承） |
 
-**一句话**: torchtitan 用"让模块自己描述自己"解决耦合; hpmesh 用"让模型交出声明,
-让框架持有作用域"解决同一问题. 前者要求模型继承框架, 后者不要求 —— 这正是
-"能直接对接 HuggingFace" 这个目标所要求的形状.
+**一句话**：torchtitan 用"让模块自己描述自己"解决耦合；hpmesh 用"让模型交出声明、
+让框架持有作用域"解决同一问题。前者要求模型继承框架，后者不要求 —— 这正是
+"能直接对接 HuggingFace"这个目标所要求的形状。
 
 ---
 
-## 10. 风险与不做的部分
+## 8. 风险与明确不做的部分
 
 **风险**
 
-- R1 **PP 是唯一真正的缺口**, 且是五维里最难的一维 (schedule + 微批 + P2P).
-  阶段 4 之前, `pp > 1` 会明确抛 `NotImplementedError`, 这是对的.
-- R2 阶段 1 (loss 搬到 trainer) 会触碰梯度路径. 必须以逐位 loss 为准入,
-  否则整个"HF 的 loss 就是我们的 loss"这一层保障会失效.
-- R3 阶段 2 会让 `dist_gemm` 首次真的生效 —— 之前它一直走回退路径.
-  这意味着**之前没有测过的代码路径会被点亮**, 必须有 TP>1 的对拍覆盖.
+| | 风险 | 说明 |
+|---|---|---|
+| R1 | **PP 是唯一真正的缺口**，且是五维里最难的一维 | schedule + 微批 + P2P。阶段 4 之前 `pp > 1` 明确抛异常，这是对的 |
+| R2 | 阶段 3 会触碰权重切分路径 | 必须以 TP 等价逐位为准入 |
+| R3 | 阶段 2 会让 `dist_gemm` 首次真的生效 | 之前它一直走回退路径，**没测过的代码会被点亮**，必须有 TP>1 的对拍覆盖 |
+| R4 | `models/common/` 有 64% 不可达 | 删掉它等于把后续阶段的工作量翻倍。它的问题是**接线**，不是布局 |
 
 **明确不做**
 
-- 不重新引入任何基类 / 注册表式继承 / `traverse()`.
-- 不移植 `config_utils.py` (448 行, 40 处 `Configurable`)。
-- 不做 `nn_modules.py` 那类零行为包装 (`class Conv1d(nn.Conv1d, Module)`).
-- 不为 HP 模型新建并行实现 —— 复用 HF 的 `_tp_plan` / `_pp_plan`, 只做翻译.
-- 不实现 torchao / DeepEP / HybridEP 后端 (需要 GPU-only 第三方库, 本机装不了也测不了;
-  它们改变的是"token 怎么跨 rank", 不是路由契约).
+- 不重新引入任何基类 / 注册表式继承 / `traverse()`。
+- 不移植 `config_utils.py`（448 行，40 处 `Configurable`）。
+- 不做 `nn_modules.py` 那类零行为包装（`class Conv1d(nn.Conv1d, Module)`）。
+- 不为 HF 模型新建并行实现 —— 复用 HF 的 `_tp_plan` / `_pp_plan`，只做翻译。
+- 不实现 torchao / DeepEP / HybridEP 后端（需要 GPU-only 第三方库，本机装不了也
+  测不了；它们改变的是"token 怎么跨 rank"，不是路由契约）。
 
 ---
 
-## 附: 一句话总结
+## 附：一句话总结
 
-> hpmesh 已经证明了"拿掉 `Configurable` 和 `Module` 之后, 分布式训练框架可以更简单"。
-> 但它还没解决这两个抽象**原本承担的那两个问题**: 配置如何到达模块, 模块如何声明并行。
-> 本设计用**一份数据 (`ParallelPlan`)** 和**一个作用域 (`dist_context`)** 补位,
-> 不引入新的继承层次。补完之后, `models/common/` 才真正独立于 trainer,
-> `apply_*` 才真正不认识具体模型 —— 而这正是让框架能"直接对接 HF"的前提。
+> hpmesh 已经证明了"拿掉 `Configurable` 和 `Module` 之后，分布式训练框架可以更简单"。
+> 但它还没解决这两个抽象**原本承担的那两个问题**：配置如何到达模块，模块如何声明并行。
+> 本设计用**一份数据（`ParallelPlan`）**和**一个作用域（`dist_context`）**补位，
+> 不引入新的继承层次。补完之后，`models/common/` 才真正独立于 trainer，`apply_*` 才
+> 真正不认识具体模型 —— 而这正是让框架能"直接对接 HF"的前提。

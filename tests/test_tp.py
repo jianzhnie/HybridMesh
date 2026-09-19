@@ -12,7 +12,7 @@ from __future__ import annotations
 import torch
 import torch.nn as nn
 
-from hpmesh.parallel.tp import (
+from hpmesh.parallel.tensor_parallel.tp import (
     ColwiseLinear,
     RowwiseLinear,
     ShardingConfig,

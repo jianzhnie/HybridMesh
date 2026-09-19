@@ -3,8 +3,8 @@
 Vendored from torchtitan ``models/common/dist_gemm.py``. These are drop-in
 replacements for the stock QKV, output and SwiGLU projections: they move the TP
 collective inside the GEMM, over the autograd Functions in
-``hpmesh/parallel/linear.py`` (which holds the collective+GEMM math itself; this
-file is only the wiring and the fallbacks).
+``hpmesh/parallel/tensor_parallel/linear.py`` (which holds the collective+GEMM
+math itself; this file is only the wiring and the fallbacks).
 
 What changed from upstream:
 
@@ -34,8 +34,11 @@ import torch.nn as nn
 
 from hpmesh.models.common.activation import ActivationFn, SwiGLU
 from hpmesh.models.common.qkv import QKVLinear
-from hpmesh.parallel.linear import AllGatherLinear, LinearReduceScatter
 from hpmesh.parallel.spmd_types import current_spmd_mesh
+from hpmesh.parallel.tensor_parallel.linear import (
+    AllGatherLinear,
+    LinearReduceScatter,
+)
 
 logger = logging.getLogger(__name__)
 

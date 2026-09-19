@@ -21,7 +21,7 @@ from torch.distributed.fsdp import (
 from torch.distributed.tensor import Shard
 from torch.nn import ModuleDict
 
-from .parallel_dims import ParallelDims
+from ..parallel_dims import ParallelDims
 
 logger = logging.getLogger(__name__)
 
