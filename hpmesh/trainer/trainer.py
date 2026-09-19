@@ -1,15 +1,35 @@
 """Trainer -- the single training loop, shared by every learning step.
 
-Learning note: this is deliberately small and linear. The distributed complexity
-lives in parallel/ and mesh.py; the loop itself should stay readable end to end.
+Shape vendored from torchtitan ``trainer.py``: ``train`` -> ``train_step`` ->
+``forward_backward_step`` -> ``_forward_backward_body``, one function per level
+of the step, so each can be read and tested on its own. The distributed
+complexity still lives in ``parallel/``; the loop is meant to read end to end.
 
-Order of operations mirrors Titan (parallelize -> compile -> fsdp), but here each
-parallelism dimension is an explicit, individually-understandable call.
+What the migration added, and why each earned its place:
+
+* **Token-normalized loss.** The loss is a SUM over predicted tokens divided by
+  the token count reduced across DP. That makes the reported number independent
+  of how the batch was split across ranks, and it is the precondition for
+  gradient accumulation (in progress) to sum correctly.
+* **Gradient clipping + ``grad_norm`` reporting.** ``clip_grad_norm_`` reduces
+  the norm across PP stages before clipping, which ``torch.nn.utils`` cannot do
+  because each stage holds disjoint parameters.
+* **A finiteness check.** A NaN loss or gradient looked exactly like a healthy
+  step: training continued and every later number was garbage. This stops at the
+  first bad step instead, and does it with an on-device check so it neither
+  synchronizes (unlike ``.item()``) nor becomes a CUDA-graph break.
+* **Checkpoints**, so a run can be resumed rather than restarted.
+
+What was NOT ported: the component system (``Configurable``, ``model_spec``,
+metrics processor, ``sdc_replayer``, profiler, validator, CUDA graphs). Those are
+infrastructure the loop calls into, not loop logic, and hpmesh has no
+counterparts to call.
 """
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from collections.abc import Iterator
+from contextlib import nullcontext
 
 import torch
 import torch.distributed as dist
@@ -18,15 +38,17 @@ import torch.nn.functional as F
 from .. import parallel
 from ..mesh import build_mesh, build_parallel_dims, init_distributed
 from ..models.hf_wrapper import HFTransformerModel, build_model_config_for
+from ..parallel.collectives import clip_grad_norm_, dist_max, dist_sum, dist_sum_tensor
+from ..utils.logger_utils import get_logger
+from .checkpoint import Checkpointer
 from .config import HybridMeshConfig
+from .data import Batch, DataLoaderExhausted, RandomTokenSource, batch_iterator
 
+# Rank-aware: the helper installs a handler on rank 0 only, so a torchrun run
+# logs one line per step instead of one per rank.
+logger = get_logger(__name__)
 
-@dataclass
-class Batch:
-    """One micro-batch: input_ids/labels on the model's device."""
-
-    input_ids: torch.Tensor
-    labels: torch.Tensor
+__all__ = ["Trainer"]
 
 
 class Trainer:
@@ -64,6 +86,13 @@ class Trainer:
             self.model.parameters(), lr=cfg.lr, weight_decay=cfg.weight_decay
         )
 
+        # Counters the checkpoint carries. Kept as plain ints so a resumed run
+        # can log "step 61 (resumed at 60)" without re-deriving them.
+        self.step = 0
+        self.ntokens_seen = 0
+
+    # -- setup helpers ---------------------------------------------------------
+
     @staticmethod
     def _seed_everything(seed: int, *, deterministic: bool) -> None:
         torch.manual_seed(seed)
@@ -72,18 +101,21 @@ class Trainer:
         if deterministic:
             torch.use_deterministic_algorithms(True, warn_only=False)
 
-    def _make_batch(self, step: int) -> Batch:
-        """Synthetic random-token batch. The SAME generator seed on every rank yields
-        identical data; DP ranks then take disjoint slices (see _dp_slice)."""
-        g = torch.Generator(device="cpu").manual_seed(self.cfg.seed * 100_000 + step)
-        ids = torch.randint(
-            0,
-            self.cfg.vocab_size,
-            (self.cfg.global_batch_size, self.cfg.max_seq_len),
-            generator=g,
+    def _data_iterator(self) -> Iterator[Batch]:
+        """The micro-batch source.
+
+        A method rather than an attribute so a future real corpus is swapped in
+        by overriding one thing, and so tests can drive the loop with a fixed
+        batch without touching the loop itself.
+        """
+        return batch_iterator(
+            RandomTokenSource(
+                seed=self.cfg.seed,
+                vocab_size=self.cfg.vocab_size,
+                batch_size=self.cfg.global_batch_size,
+                seq_len=self.cfg.max_seq_len,
+            )
         )
-        labels = ids.clone()
-        return Batch(input_ids=ids, labels=labels)
 
     def _dp_slice(self, batch: Batch) -> Batch:
         """Give each DP rank its shard of the global batch (data parallel semantics)."""
@@ -104,6 +136,8 @@ class Trainer:
             labels=batch.labels[sl].to(self.device),
         )
 
+    # -- the step, one function per level --------------------------------------
+
     @staticmethod
     def _flatten(batch: Batch) -> tuple[torch.Tensor, torch.Tensor]:
         """Flatten ``(B, T)`` into the ``(B*T,)`` shape the wrapper takes.
@@ -116,44 +150,238 @@ class Trainer:
         """
         return batch.input_ids.reshape(-1), batch.labels.reshape(-1)
 
-    def train_step(self, step: int) -> float:
-        batch = self._dp_slice(self._make_batch(step))
-        input_ids, labels = self._flatten(batch)
-        self.optimizer.zero_grad(set_to_none=True)
-        loss = self._loss(self.model(input_ids), labels)
-        loss.backward()
-        self.optimizer.step()
-        return float(loss.detach())
-
     @staticmethod
-    def _loss(logits: torch.Tensor, labels: torch.Tensor) -> torch.Tensor:
-        """Next-token cross-entropy over the flattened sequence.
+    def _loss_sum(
+        logits: torch.Tensor, labels: torch.Tensor
+    ) -> tuple[torch.Tensor, int]:
+        """Summed next-token cross-entropy, plus the number of predictions made.
 
-        The same arithmetic HF's ``ForCausalLM`` performs when handed ``labels``:
-        cast to float32, drop the last logit and the first label, average. It
-        lives here rather than in the model because the objective is training
-        policy -- the wrapper returns logits and the trainer decides what they
-        mean.
+        Not normalized here: the denominator is a *global* token count, and it
+        is not knowable until the per-rank counts have been reduced. Returning
+        the pair keeps that reduction in the caller, where it belongs.
+
+        TODO: ``logits[:-1]`` pairs the last token of each row with the first
+        token of the next, so the loss crosses document boundaries even though
+        attention and RoPE do not. Harmless on the synthetic data (rows are
+        independent random tokens) and wrong on real packed sequences. Fixing it
+        changes the loss denominator and so is a computation change, not a
+        refactor -- it needs its own numerical check.
         """
-        return F.cross_entropy(logits[:-1].float(), labels[1:])
+        logits, targets = logits[:-1].float(), labels[1:]
+        return F.cross_entropy(logits, targets, reduction="sum"), targets.numel()
 
-    def _all_reduce_loss(self, loss: float) -> float:
-        """Average the loss across DP ranks so logging reflects the global batch."""
-        if self.world_size == 1:
-            return loss
-        t = torch.tensor([loss], device=self.device)
-        dist.all_reduce(t, op=dist.ReduceOp.AVG)
-        return float(t.item())
+    def forward_backward_step(self, batch: Batch) -> tuple[torch.Tensor, int]:
+        """Run one micro-batch forward and backward.
+
+        Two bodies, matching torchtitan's split: with pipeline parallelism the
+        step drives a *schedule* over several micro-batches rather than calling
+        the model once, so the two share nothing but the return shape.
+
+        Returns ``(summed_loss, num_valid_tokens)``: the loss reduced over every
+        predicted token rather than averaged, and the denominator that pairs
+        with it. Returning them together is what lets the caller normalize by a
+        *global* count once the per-rank counts have been reduced.
+        """
+        if self.parallel_dims is not None and self.parallel_dims.pp_enabled:
+            return self._pp_forward_backward_body(batch)
+        return self._forward_backward_body(batch)
+
+    def _forward_backward_body(self, batch: Batch) -> tuple[torch.Tensor, int]:
+        input_ids, labels = self._flatten(batch)
+        with self._param_context():
+            logits = self.model(input_ids)
+            loss_sum, num_valid_tokens = self._loss_sum(logits, labels)
+            del logits
+            loss_sum.backward()
+        return loss_sum.detach(), num_valid_tokens
+
+    def _pp_forward_backward_body(self, batch: Batch) -> tuple[torch.Tensor, int]:
+        """The pipeline-parallel body: drive the schedule instead of the model.
+
+        Not implemented, and it fails loudly rather than falling through to the
+        single-rank body -- which would silently train every stage on the whole
+        model, and look like a working run.
+
+        NOTE: unreachable today. ``parallelize_hf_transformers`` calls
+        ``apply_pp`` during ``__init__``, and that raises first, so no Trainer
+        with ``pp > 1`` is ever constructed. It stays because it is the second
+        half of the contract, and the two halves get wired separately: stage 4
+        can make ``apply_pp`` return real stages before the loop knows how to
+        drive them. At that moment this is what catches the gap.
+
+        What stage 4 has to fill in, in order:
+          1. ``parallel/pipeline.py`` splits the layers into this rank's stages;
+             ``pp.py`` builds the schedule over them.
+          2. Each stage needs its own ``DeviceMesh`` axis, and the model must be
+             cut into ``model_parts`` rather than kept whole.
+          3. Only the first stage receives ``input_ids`` and only the last
+             produces labels -- the middle stages take activations. That is the
+             "send ``input_ids``/``labels`` only to the stages that want them"
+             note in ``parallel/pp.py``.
+          4. The returned loss is the sum over the last stage's micro-batches,
+             paired with a token count, so the caller's normalization is
+             unchanged from the non-PP path.
+        """
+        raise NotImplementedError(
+            "Pipeline parallelism is not wired: parallel/pp.py is still a stub "
+            "and the stage split in parallel/pipeline.py has no schedule over "
+            "it. See docs/hybridmesh_design.md, stage 4."
+        )
+
+    def _param_context(self):
+        """The context a forward/backward runs inside.
+
+        Currently a placeholder: it is where activation checkpointing and the
+        no-typecheck region go, both of which torchtitan wraps around the body.
+        Returning ``nullcontext`` rather than inlining nothing keeps the seam
+        visible, so it is added by naming it -- not by threading a parameter
+        through a function that has since grown around its absence.
+        """
+        return nullcontext()
+
+    def train_step(self, data_iterator: Iterator[Batch]) -> dict[str, float] | None:
+        """One optimizer step. Returns the metrics to log, or ``None`` if not logging.
+
+        The ordering mirrors torchtitan's: take the data, compute the global token
+        count, run fwd/bwd, clip, check finiteness, step the optimizer, then (only
+        if logging) reduce the loss across DP.
+        """
+        self.optimizer.zero_grad(set_to_none=True)
+
+        # The reduced meshes are resolved once here rather than inline at each
+        # collective: under PP the loss and token count must go to the loss mesh
+        # (which spans PP, where the total only exists on the last stage), while
+        # everything else stays on the dense DP mesh.
+        dp_mesh = (
+            None
+            if self.parallel_dims is None
+            else self.parallel_dims.get_optional_mesh("dp")
+        )
+        pp_mesh = (
+            None
+            if self.parallel_dims is None
+            else self.parallel_dims.get_optional_mesh("pp")
+        )
+        loss_mesh = dp_mesh if pp_mesh is None else self.parallel_dims.get_mesh("loss")
+
+        batch = self._dp_slice(next(data_iterator))
+        loss_sum, local_valid_tokens = self.forward_backward_step(batch)
+        self.ntokens_seen += local_valid_tokens
+
+        # Keep the count on device so normalizing the loss adds no device sync
+        # to the training path.
+        local_valid_tokens_tensor = torch.tensor(
+            local_valid_tokens, dtype=torch.int64, device=self.device
+        )
+        global_valid_tokens = dist_sum_tensor(local_valid_tokens_tensor, dp_mesh)
+
+        grad_norm = clip_grad_norm_(
+            [p for p in self.model.parameters()],
+            max_norm=self.cfg.max_norm,
+            foreach=True,
+            pp_mesh=pp_mesh,
+        )
+
+        self._check_finite(loss_sum, grad_norm)
+
+        self.optimizer.step()
+
+        # Summed over tokens, divided by the global count: the loss is then
+        # independent of how the batch was split across DP ranks. Division by a
+        # tensor keeps the whole computation on device.
+        loss = loss_sum / global_valid_tokens
+
+        if not self.should_log():
+            return None
+
+        if loss_mesh is not None:
+            local_avg = loss_sum / local_valid_tokens_tensor
+            global_avg_loss = dist_sum(loss, loss_mesh)
+            global_max_loss = dist_max(local_avg, loss_mesh)
+        else:
+            # Single rank: the two are the same number by construction.
+            global_avg_loss = global_max_loss = float(loss)
+        return {
+            "loss": global_avg_loss,
+            "max_loss": global_max_loss,
+            "grad_norm": float(grad_norm),
+        }
+
+    def _check_finite(self, loss_sum: torch.Tensor, grad_norm: torch.Tensor) -> None:
+        """Stop before the optimizer update if anything went non-finite.
+
+        The check is entered by *every* rank on *every* step -- it is a
+        collective in torchtitan's version, and a rank that skipped it would
+        hang the others. Only the assertion's outcome is rank-dependent.
+
+        ``torch._assert_async`` is private, but it is the right tool: it queues
+        the check on the device instead of synchronizing the host, so it costs
+        nothing per step and does not break CUDA-graph capture. A failed CUDA
+        assertion invalidates the process, which is why the reference
+        implementation accepts it.
+        """
+        is_finite = torch.isfinite(loss_sum).all() & torch.isfinite(grad_norm).all()
+        torch._assert_async(
+            is_finite,
+            f"Loss or gradient norm is not finite at step {self.step}. "
+            "Stopping before the optimizer update, since every later number "
+            "would be garbage.",
+        )
+
+    # -- the loop ---------------------------------------------------------------
+
+    def should_log(self) -> bool:
+        return self.step % self.cfg.log_freq == 0
+
+    def should_continue_training(self) -> bool:
+        return self.step < self.cfg.steps
+
+    def _checkpoint_period(self) -> bool:
+        """Whether this step should be checkpointed.
+
+        ``interval == 0`` disables checkpointing; returns ``False`` so no
+        directory is created for a run that never asked for one.
+        """
+        interval = self.cfg.checkpoint_interval
+        return interval > 0 and self.step % interval == 0
 
     def train(self) -> None:
-        for step in range(self.cfg.steps):
-            loss = self.train_step(step)
-            if step % self.cfg.log_freq == 0:
-                # The reduction is a collective, so EVERY rank must enter it.
-                # Only the print is rank-gated -- putting the rank check first
-                # would leave rank 0 blocked in all_reduce forever.
-                global_loss = self._all_reduce_loss(loss)
-                if self.rank == 0:
-                    print(f"step {step:4d} | loss {global_loss:.6f}")
+        checkpointer = Checkpointer(
+            self.cfg.checkpoint_folder, rank=self.rank, device=self.device
+        )
+
+        restored = checkpointer.load(model=self.model, optimizer=self.optimizer)
+        if restored is not None:
+            self.step = restored["step"]
+            self.ntokens_seen = restored["ntokens_seen"]
+            logger.info(f"Resuming from step {self.step}")
+
+        data_iterator = self._data_iterator()
+        while self.should_continue_training():
+            self.step += 1
+
+            try:
+                metrics = self.train_step(data_iterator)
+            except DataLoaderExhausted:
+                logger.warning("Ran out of data; the last step was canceled.")
+                break
+
+            if metrics is not None:
+                logger.info(
+                    f"step {self.step:4d} | loss {metrics['loss']:.6f} "
+                    f"| max {metrics['max_loss']:.6f} "
+                    f"| grad_norm {metrics['grad_norm']:.4f} "
+                    f"| tokens {self.ntokens_seen}"
+                )
+
+            if self._checkpoint_period():
+                path = checkpointer.save(
+                    self.step,
+                    model=self.model,
+                    optimizer=self.optimizer,
+                    counters={"ntokens_seen": self.ntokens_seen},
+                )
+                logger.info(f"Saved checkpoint to {path}")
+
         if dist.is_initialized():
             dist.destroy_process_group()
