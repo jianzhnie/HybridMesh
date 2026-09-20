@@ -98,7 +98,20 @@ class GrainDataLoader(BaseDataLoader):
         max_context_length: int,
         num_tokens_per_batch: int,
     ) -> None:
-        # Validate the run policy.
+        # The graph is built before this loader exists and may already have been
+        # built for a different rank -- the trainer derives the policy from a
+        # config that is not handed here. Catch the mismatch rather than train
+        # on a slice that silently disagrees with the rest of the mesh.
+        expected_rank_id = f"dp_rank_{dp_rank}"
+        self._dp_world_size = dp_world_size
+        self._rank_id = expected_rank_id
+        self.max_num_documents = config.max_num_documents
+
+        # A finite dataset cannot be shared by several ranks: each one reaches
+        # the end at a different step, and the ranks that ran out first stop
+        # entering the next collective while the others block in it. Checked
+        # here rather than at the first short batch, which is the point -- by
+        # the time a rank notices, its peers are already waiting.
         # TODO(data-finite-dp): Support finite distributed datasets with a global
         # remainder policy. Simple map datasets can truncate or pad before DP
         # sharding; filtered, mixed, packed, and streaming datasets need
@@ -109,10 +122,6 @@ class GrainDataLoader(BaseDataLoader):
                 "steps and hang collectives; use repeat=True with a trainer-"
                 "controlled step count"
             )
-        self._dp_world_size = dp_world_size
-        self._rank_id = f"dp_rank_{dp_rank}"
-        self.max_num_documents = config.max_num_documents
-
         read_options = config.read_options
         context = DatasetBuildContext(
             tokenizer=tokenizer,

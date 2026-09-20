@@ -50,15 +50,12 @@ import torch.distributed as dist
 import torch.nn.functional as F
 
 from .. import parallel
-from ..components.checkpointer import TRAIN_STATE, CheckpointManager
+from ..components.checkpointer import DATALOADER, TRAIN_STATE, CheckpointManager
+from ..components.loss import IGNORE_INDEX, next_token_targets
 from ..components.metrics import MetricsProcessor
 from ..components.profiler import Profiler
-from ..datasets.random_data import (
-    Batch,
-    DataLoaderExhausted,
-    RandomTokenSource,
-    batch_iterator,
-)
+from ..datasets.loader import BaseDataLoader, DataloaderExhaustedError, TrainerBatch
+from ..datasets.random_data import Batch, DataLoaderExhausted, RandomTokenDataLoader
 from ..mesh import build_mesh, build_parallel_dims, init_distributed
 from ..models.common.aux_loss import (
     AuxLoss,
@@ -84,6 +81,12 @@ __all__ = ["Trainer"]
 
 
 class Trainer:
+    # Class-level default so a Trainer built with ``__new__`` -- which is how
+    # the tests exercise the pure helpers without a process group -- sees the
+    # same "source not built yet" state as an attribute would give, rather than
+    # an AttributeError. ``None`` means "fall back to the synthetic source".
+    dataloader: BaseDataLoader | None = None
+
     def __init__(self, cfg: HybridMeshConfig):
         self.cfg = cfg
         self.rank, self.local_rank, self.world_size = init_distributed()
@@ -124,7 +127,11 @@ class Trainer:
         # aux loss exists.
         register_aux_loss_zero_hook(self.optimizer, [self.model], self.parallel_dims)
 
-        # 4. checkpointing, last because it needs the model and optimizer it is
+        # 4. the micro-batch source. Built before the checkpointer, which
+        #    serializes its read position alongside the model.
+        self.dataloader = self._build_dataloader()
+
+        # 5. checkpointing, last because it needs the model and optimizer it is
         #    going to serialize, and because a checkpoint is meaningless until
         #    there is something shaped like a training state to save.
         #
@@ -132,11 +139,18 @@ class Trainer:
         #    wholesale, and the step/token counters are not reachable from either
         #    the model or the optimizer, so a resumed run would otherwise restart
         #    its schedule from zero with weights that are already trained.
+        #
+        #    A loadable dataloader rides along too: resuming without its read
+        #    position would resume the weights and restart the data, silently
+        #    training a second pass over the beginning of the corpus.
+        states: dict[str, Any] = {TRAIN_STATE: self}
+        if self.dataloader is not None:
+            states[DATALOADER] = self.dataloader
         self.checkpointer = CheckpointManager(
             cfg.checkpoint,
             model_parts=[self.model],
             optimizer=self.optimizer,
-            states={TRAIN_STATE: self},
+            states=states,
             folder=cfg.dump_folder,
         )
 
@@ -145,7 +159,7 @@ class Trainer:
         self.step = 0
         self.ntokens_seen = 0
 
-        # 5. metrics, last because it needs the mesh (for the throughput
+        # 6. metrics, last because it needs the mesh (for the throughput
         #    divisor and the metrics rank) and the model config (for FLOPs per
         #    token). It replaces the plain per-step ``logger.info`` the loop used
         #    to emit: the same loss and grad_norm, plus throughput, MFU and
@@ -173,81 +187,183 @@ class Trainer:
         if deterministic:
             torch.use_deterministic_algorithms(True, warn_only=False)
 
-    def _data_iterator(self) -> Iterator[Batch]:
+    def _dp_rank_world_size(self) -> tuple[int, int]:
+        """This rank's position and extent along the dense DP axis."""
+        # ``getattr``, not attribute access: a Trainer built with ``__new__``
+        # (the tests' way of exercising the pure helpers) has no mesh, and the
+        # only correct answer there is "one rank, no sharding".
+        if getattr(self, "parallel_dims", None) is None:
+            return 0, 1
+        # The dense DP group spans replicate * shard; unsplit on torchrun it is
+        # a plain 1-D mesh.
+        dp_mesh = self.parallel_dims.get_optional_mesh("dp", include_singleton_axes=True)
+        return dp_mesh.get_local_rank(), dp_mesh.size()
+
+    def _build_dataloader(self) -> BaseDataLoader | None:
+        """Build the micro-batch source the config names.
+
+        Returns ``None`` when the source cannot be checkpointed, which today
+        means the synthetic one: its position is derivable from the step
+        counter, so carrying it separately would only add a second copy of
+        state that could disagree with the first.
+        """
+        dp_rank, dp_world_size = self._dp_rank_world_size()
+        loader = self.cfg.dataloader.build(
+            seed=self.cfg.seed,
+            vocab_size=self.cfg.vocab_size,
+            batch_size=self.cfg.global_batch_size,
+            seq_len=self.cfg.max_seq_len,
+            dp_rank=dp_rank,
+            dp_world_size=dp_world_size,
+            max_context_length=self.cfg.max_seq_len,
+            # Per rank, not global: the Grain loader splits every dataset's
+            # rows across ``dp_world_size`` ranks itself, so this many tokens
+            # per rank is this many tokens per rank of the global batch.
+            num_tokens_per_batch=self.cfg.global_batch_size
+            // dp_world_size
+            * self.cfg.max_seq_len,
+        )
+        if isinstance(loader, RandomTokenDataLoader):
+            # The random positions ARE the step counter, already in the
+            # checkpoint -- a separate cursor would be a second copy of it.
+            return None
+        return loader
+
+    def _data_iterator(self) -> Iterator[Batch | TrainerBatch]:
         """The micro-batch source.
 
-        A method rather than an attribute so a future real corpus is swapped in
-        by overriding one thing, and so tests can drive the loop with a fixed
-        batch without touching the loop itself.
+        A method rather than an attribute so tests can drive the loop with a
+        fixed batch without touching the loop itself. The loader is a
+        :class:`~hpmesh.datasets.loader.BaseDataLoader` whenever there is one,
+        so both the synthetic and the Grain path arrive here the same way.
         """
-        return batch_iterator(
-            RandomTokenSource(
+        if self.dataloader is not None:
+            return iter(self.dataloader)
+        dp_rank, dp_world_size = self._dp_rank_world_size()
+        return iter(
+            RandomTokenDataLoader(
                 seed=self.cfg.seed,
                 vocab_size=self.cfg.vocab_size,
                 batch_size=self.cfg.global_batch_size,
                 seq_len=self.cfg.max_seq_len,
+                dp_rank=dp_rank,
+                dp_world_size=dp_world_size,
             )
         )
 
-    def _dp_slice(self, batch: Batch) -> Batch:
-        """Give each DP rank its shard of the global batch (data parallel semantics)."""
-        if self.parallel_dims is None:
-            dp, dp_rank = 1, 0
-        else:
-            # The dense DP group spans replicate * shard; unsplit on torchrun
-            # it is a plain 1-D mesh, so ``mesh["dp"]`` sizes the batch.
-            dp_mesh = self.parallel_dims.get_optional_mesh(
-                "dp", include_singleton_axes=True
-            )
-            dp = dp_mesh.size()
-            dp_rank = dp_mesh.get_local_rank()
-        per = self.cfg.global_batch_size // dp
-        sl = slice(dp_rank * per, (dp_rank + 1) * per)
-        return Batch(
-            input_ids=batch.input_ids[sl].to(self.device),
-            labels=batch.labels[sl].to(self.device),
-        )
+    def _as_batch(
+        self, batch: Batch | TrainerBatch
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor | None, int | None]:
+        """Normalize either loader's batch into the tensors the step consumes.
+
+        The two loaders disagree about what a batch is -- the synthetic one
+        yields ``(B, T)`` rows of one document each, the Grain one a flat
+        packed token stream -- so they are reconciled here, once, rather than
+        at every call site. Returns ``(input_ids, labels, positions,
+        num_valid_tokens)``, where the last two are ``None`` when the loader
+        did not supply them and the caller should fall back to its defaults.
+
+        Both paths leave here holding a flat token stream whose target at
+        position ``t`` is the token at ``t + 1`` *within the same document*,
+        which is the contract ``_loss_sum``'s plain shift assumes. The synthetic
+        path needs real work to reach it (its labels are unshifted, and its
+        rows are separate documents that must not be predicted across); the
+        Grain path arrives already shifted and already ``IGNORE_INDEX``-masked
+        at every document boundary, so for it this is a read.
+        """
+        if isinstance(batch, Batch):
+            # Rows are independent documents of length T, so the shift is
+            # within a row: the row-final position would predict the next
+            # document's first token, which the model had no context for, and
+            # comes back IGNORE_INDEX from ``next_token_targets``.
+            seq_len = batch.labels.shape[-1]
+            targets = next_token_targets(batch.labels.reshape(-1), seq_len=seq_len)
+            return batch.input_ids, targets, None, None
+
+        # ``num_valid_tokens`` is popped, not read: everything left in the dict
+        # becomes a model kwarg, and this one is a plain int the forward has no
+        # use for. The collator counted it while it already had the labels in
+        # hand, so it is exact -- the trainer does not rescore the batch.
+        num_valid_tokens = batch.pop("num_valid_tokens", None)
+        # ``padding_mask`` marks the collator's filler. It is implied by the
+        # IGNORE_INDEX labels and consumed by nothing on this path, so it is
+        # dropped rather than forwarded to a forward that would reject it.
+        batch.pop("padding_mask", None)
+        positions = batch.pop("positions", None)
+        return batch["input"], batch["labels"], positions, num_valid_tokens
 
     # -- the step, one function per level --------------------------------------
 
     @staticmethod
-    def _flatten(batch: Batch) -> tuple[torch.Tensor, torch.Tensor]:
+    def _flatten(
+        input_ids: torch.Tensor, labels: torch.Tensor
+    ) -> tuple[torch.Tensor, torch.Tensor]:
         """Flatten ``(B, T)`` into the ``(B*T,)`` shape the wrapper takes.
 
         The wrapper is a single-sequence entry point -- it adds and removes its
-        own batch dim around the decoder call. This micro-batch is one document
-        per row of length ``max_seq_len``, so the concatenation is exactly the
-        single causal document the fallback attention path expects; RoPE is
-        driven per row because positions restart at each row boundary.
+        own batch dim around the decoder call. The synthetic source yields one
+        document per row of length ``max_seq_len``, so the concatenation is
+        exactly the single causal document the fallback attention path expects;
+        RoPE is driven per row because positions restart at each row boundary.
+
+        The Grain source already hands over a flat token stream, so for it this
+        is the identity -- which is what makes the two sources one code path
+        from here on.
         """
-        return batch.input_ids.reshape(-1), batch.labels.reshape(-1)
+        return input_ids.reshape(-1), labels.reshape(-1)
 
     @staticmethod
     def _loss_sum(
-        logits: torch.Tensor, labels: torch.Tensor
+        logits: torch.Tensor,
+        labels: torch.Tensor,
+        *,
+        num_valid_tokens: int | None = None,
     ) -> tuple[torch.Tensor, int]:
         """Summed next-token cross-entropy, plus the number of predictions made.
 
-        Not normalized here: the denominator is a *global* token count, and it
-        is not knowable until the per-rank counts have been reduced. Returning
-        the pair keeps that reduction in the caller, where it belongs.
+        ``labels`` arrives already aligned with ``logits`` -- ``logits[t]``
+        predicts ``labels[t]``, both sources having done their shift upstream
+        (see ``_as_batch``). No shift happens here, which is what lets the two
+        sources share one loss: the synthetic path slots its rows together and
+        the Grain path arrives already packed, and both mark the positions that
+        must not be predicted with ``IGNORE_INDEX`` rather than dropping them.
+        Those positions are the row ends of the synthetic path and the document
+        boundaries and packing padding of the Grain one.
 
-        TODO: ``logits[:-1]`` pairs the last token of each row with the first
-        token of the next, so the loss crosses document boundaries even though
-        attention and RoPE do not. Harmless on the synthetic data (rows are
-        independent random tokens) and wrong on real packed sequences. Fixing it
-        changes the loss denominator and so is a computation change, not a
-        refactor -- it needs its own numerical check.
+        Not normalized: the denominator is a *global* token count, and it is
+        not knowable until the per-rank counts have been reduced. Returning the
+        pair keeps that reduction in the caller, where it belongs.
+
+        ``num_valid_tokens`` defaults to the count of predictable labels, which
+        is the same thing the collator computes. It only needs passing when the
+        caller has it already (the Grain path does, from the collator) so the
+        trainer does not rescan on the critical path.
         """
-        logits, targets = logits[:-1].float(), labels[1:]
-        return F.cross_entropy(logits, targets, reduction="sum"), targets.numel()
+        if num_valid_tokens is None:
+            num_valid_tokens = int((labels != IGNORE_INDEX).sum())
+        loss = F.cross_entropy(
+            logits.float(), labels, reduction="sum", ignore_index=IGNORE_INDEX
+        )
+        return loss, num_valid_tokens
 
-    def forward_backward_step(self, batch: Batch) -> tuple[torch.Tensor, int]:
+    def forward_backward_step(
+        self,
+        input_ids: torch.Tensor,
+        labels: torch.Tensor,
+        *,
+        positions: torch.Tensor | None = None,
+        num_valid_tokens: int | None = None,
+    ) -> tuple[torch.Tensor, int]:
         """Run one micro-batch forward and backward.
 
         Two bodies, matching torchtitan's split: with pipeline parallelism the
         step drives a *schedule* over several micro-batches rather than calling
         the model once, so the two share nothing but the return shape.
+
+        ``num_valid_tokens`` is the count of labels that actually contribute to
+        the loss, when the source knows it (the collator counts it there rather
+        than the trainer rescanning on the critical path). ``None`` means
+        "every label counts", which is true of the synthetic source.
 
         Returns ``(summed_loss, num_valid_tokens)``: the loss reduced over every
         predicted token rather than averaged, and the denominator that pairs
@@ -255,24 +371,40 @@ class Trainer:
         *global* count once the per-rank counts have been reduced.
         """
         if self.parallel_dims is not None and self.parallel_dims.pp_enabled:
-            return self._pp_forward_backward_body(batch)
-        return self._forward_backward_body(batch)
+            return self._pp_forward_backward_body(input_ids, labels)
+        return self._forward_backward_body(
+            input_ids, labels, positions=positions, num_valid_tokens=num_valid_tokens
+        )
 
-    def _forward_backward_body(self, batch: Batch) -> tuple[torch.Tensor, int]:
-        input_ids, labels = self._flatten(batch)
+    def _forward_backward_body(
+        self,
+        input_ids: torch.Tensor,
+        labels: torch.Tensor,
+        *,
+        positions: torch.Tensor | None = None,
+        num_valid_tokens: int | None = None,
+    ) -> tuple[torch.Tensor, int]:
+        input_ids, labels = self._flatten(input_ids, labels)
+        # To the device first: both the CP shard below and the forward expect
+        # it, and a shard of a CPU tensor placed on a device mesh would mix
+        # placements.
+        input_ids = input_ids.to(self.device)
+        labels = labels.to(self.device)
+        if positions is not None:
+            positions = positions.reshape(-1).to(self.device)
         cp_mesh = (
             None
             if self.parallel_dims is None
             else self.parallel_dims.get_optional_mesh("cp")
         )
-        positions = None
         if cp_mesh is not None:
             # CP shards the sequence: positions are generated explicitly (the
             # wrapper's arange default would restart at 0 on every rank) and
             # sharded alongside the tokens, so RoPE follows each token to its
             # rank. The loss sums over tokens, so the headtail rearrangement
             # needs no undoing here.
-            positions = torch.arange(input_ids.numel(), device=self.device)
+            if positions is None:
+                positions = torch.arange(input_ids.numel(), device=self.device)
             input_ids, labels, positions = shard_batch_for_cp(
                 input_ids,
                 labels,
@@ -283,9 +415,10 @@ class Trainer:
         # Aux losses normalize by the step's global valid-token count -- the
         # same denominator the main loss is normalized by in ``train_step``.
         # The forward consumes it (``AuxLoss.inject``), so it must be reduced
-        # here, before the forward: the count is derivable from the labels
-        # alone (``_loss_sum`` predicts every label but the first), and the
-        # reduction spans the same token mesh the main-loss count uses.
+        # here, before the forward, and it spans the same token mesh the
+        # main-loss count uses. The count itself is the collator's when the
+        # source supplies one (masked prompt tokens and packing padding do not
+        # count), and otherwise every label but the first.
         if AuxLoss._group_counts:
             if self.parallel_dims is None:
                 token_mesh = None
@@ -295,10 +428,15 @@ class Trainer:
                     if cp_mesh is None
                     else self.parallel_dims.get_mesh("loss")
                 )
+            local_count = (
+                labels.numel() - 1
+                if num_valid_tokens is None
+                else num_valid_tokens
+            )
             AuxLoss.set_step_denominator(
                 dist_sum_tensor(
                     torch.tensor(
-                        labels.numel() - 1, dtype=torch.float32, device=self.device
+                        local_count, dtype=torch.float32, device=self.device
                     ),
                     token_mesh,
                 )
@@ -311,12 +449,16 @@ class Trainer:
         # it is a no-op, so the same code runs from one device to a full mesh.
         with self._param_context(), spmd_context(self.parallel_dims):
             logits = self.model(input_ids, positions=positions)
-            loss_sum, num_valid_tokens = self._loss_sum(logits, labels)
+            loss_sum, num_valid_tokens = self._loss_sum(
+                logits, labels, num_valid_tokens=num_valid_tokens
+            )
             del logits
             loss_sum.backward()
         return loss_sum.detach(), num_valid_tokens
 
-    def _pp_forward_backward_body(self, batch: Batch) -> tuple[torch.Tensor, int]:
+    def _pp_forward_backward_body(
+        self, input_ids: torch.Tensor, labels: torch.Tensor
+    ) -> tuple[torch.Tensor, int]:
         """The pipeline-parallel body: drive the schedule instead of the model.
 
         Not implemented, and it fails loudly rather than falling through to the
@@ -360,7 +502,9 @@ class Trainer:
         """
         return nullcontext()
 
-    def train_step(self, data_iterator: Iterator[Batch]) -> dict[str, float] | None:
+    def train_step(
+        self, data_iterator: Iterator[Batch | TrainerBatch]
+    ) -> dict[str, float] | None:
         """One optimizer step. Returns the metrics to log, or ``None`` if not logging.
 
         The ordering mirrors torchtitan's: take the data, compute the global token
@@ -399,11 +543,18 @@ class Trainer:
         )
 
         data_load_start = perf_counter()
-        batch = self._dp_slice(next(data_iterator))
+        input_ids, labels, positions, num_valid_tokens = self._as_batch(
+            next(data_iterator)
+        )
         self.metrics.add_data_loading_time(perf_counter() - data_load_start)
-        self.metrics.add_tokens(batch.labels.numel())
+        self.metrics.add_tokens(labels.numel())
 
-        loss_sum, local_valid_tokens = self.forward_backward_step(batch)
+        loss_sum, local_valid_tokens = self.forward_backward_step(
+            input_ids,
+            labels,
+            positions=positions,
+            num_valid_tokens=num_valid_tokens,
+        )
         self.ntokens_seen += local_valid_tokens
 
         # Keep the count on device so normalizing the loss adds no device sync
@@ -524,7 +675,11 @@ class Trainer:
 
                     try:
                         step_metrics = self.train_step(data_iterator)
-                    except DataLoaderExhausted:
+                    except (DataLoaderExhausted, DataloaderExhaustedError):
+                        # Two spellings of one event: the synthetic source and
+                        # the Grain loader each raise their own. Treated
+                        # identically -- abandon the step rather than train on
+                        # a partial batch.
                         logger.warning("Ran out of data; the last step was canceled.")
                         break
 
@@ -559,6 +714,11 @@ class Trainer:
             # checkpoint it had already started writing.
             self.checkpointer.close()
             self.metrics.close()
+            # Releases the Grain prefetch thread. Without this the loader is
+            # only collected at interpreter shutdown, where its ``__del__``
+            # raises against an already-torn-down state.
+            if self.dataloader is not None:
+                self.dataloader.close()
 
         if dist.is_initialized():
             dist.destroy_process_group()

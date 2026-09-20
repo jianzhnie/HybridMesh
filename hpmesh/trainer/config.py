@@ -15,18 +15,29 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Literal
 
+import grain.python as grain
 import torch
 from transformers import AutoConfig
 
 from hpmesh.components.checkpointer.dcp import CheckpointManager
 from hpmesh.components.metrics import MetricsProcessor
 from hpmesh.components.profiler import Profiler
+from hpmesh.datasets.hf.text import DATASETS, make_local_jsonl
+from hpmesh.datasets.loader import (
+    BaseDataLoader,
+    GrainDataLoader,
+    build_dataset_iteration_policy,
+)
+from hpmesh.datasets.packing import ConcatThenSplitPackingConfig
+from hpmesh.datasets.random_data import RandomTokenDataLoader
+from hpmesh.datasets.types import DatasetBuildContext
 from hpmesh.utils.logger_utils import get_logger
 
 logger = get_logger(__name__)
 
 __all__ = [
     "CheckpointArguments",
+    "DataloaderArguments",
     "HybridMeshConfig",
     "MetricsArguments",
     "ModelArguments",
@@ -443,6 +454,155 @@ class ProfilerArguments(Profiler.Config):
 # but a dataclass field and the class it types cannot share a name.
 
 
+@dataclass(kw_only=True)
+class DataloaderArguments:
+    """Where the micro-batches come from.
+
+    ``random`` (the default) keeps the synthetic corpus and needs no assets, so
+    the default run is unchanged and reproducible offline. Any other value
+    names a recipe from ``datasets.hf.text.DATASETS``, or the built-in
+    ``local_jsonl`` -- which is deliberately NOT in that dict, because its
+    corpus path is a runtime argument rather than a constant.
+
+    Every non-``random`` dataset builds its graph on Grain, which needs a
+    tokenizer, so ``tokenizer_path`` is required there and unused otherwise.
+    """
+
+    dataset: str = field(
+        default="random",
+        metadata={
+            "help": "Corpus selector: 'random' (synthetic, no assets) | "
+            "'local_jsonl' | a key of datasets.hf.text.DATASETS"
+        },
+    )
+    tokenizer_path: str | None = field(
+        default=None,
+        metadata={
+            "help": "Directory holding the tokenizer. Required unless "
+            "--dataset random."
+        },
+    )
+    dataset_path: str | None = field(
+        default=None,
+        metadata={"help": "Corpus path. Required for --dataset local_jsonl."},
+    )
+    shuffle: bool = field(
+        default=True,
+        metadata={"help": "Globally shuffle before sharding across DP ranks"},
+    )
+    streaming_shuffle_buffer_size: int = field(
+        default=1_000,
+        metadata={"help": "Streaming rows retained per rank for approximate shuffle"},
+    )
+    num_prefetch_batches: int = field(
+        default=2,
+        metadata={"help": "Collated batches queued per rank for the trainer"},
+    )
+    max_num_documents: int | None = field(
+        default=None,
+        metadata={
+            "help": "Cap on documents packed into one row. None leaves the "
+            "frontier unconstrained."
+        },
+    )
+
+    def __post_init__(self) -> None:
+        if self.dataset != "random" and not self.tokenizer_path:
+            raise ValueError(
+                f"tokenizer_path is required for dataset '{self.dataset}'. "
+                "Only 'random' runs without a tokenizer."
+            )
+        if self.dataset == "local_jsonl" and not self.dataset_path:
+            raise ValueError("dataset_path is required for dataset 'local_jsonl'")
+        if self.dataset not in ("random", "local_jsonl") and (
+            self.dataset not in DATASETS
+        ):
+            raise ValueError(
+                f"unknown dataset {self.dataset!r}. Expected 'random', "
+                f"'local_jsonl', or one of: {sorted(DATASETS)}"
+            )
+        if self.max_num_documents is not None and self.max_num_documents <= 0:
+            raise ValueError("max_num_documents must be positive")
+
+    def build(
+        self,
+        *,
+        seed: int,
+        vocab_size: int,
+        batch_size: int,
+        seq_len: int,
+        dp_rank: int,
+        dp_world_size: int,
+        max_context_length: int,
+        num_tokens_per_batch: int,
+    ) -> BaseDataLoader:
+        """Build the loader this configuration describes.
+
+        ``num_tokens_per_batch`` is the per-rank token count, matching
+        torchtitan's ``num_tokens_per_microbatch_per_dp_rank``: the Grain
+        loader divides every dataset's rows among ``dp_world_size`` ranks and
+        hands each one exactly that many tokens, so the DP slice the trainer
+        used to perform no longer exists on this path.
+        """
+        if self.dataset == "random":
+            return RandomTokenDataLoader(
+                seed=seed,
+                vocab_size=vocab_size,
+                batch_size=batch_size,
+                seq_len=seq_len,
+                dp_rank=dp_rank,
+                dp_world_size=dp_world_size,
+            )
+
+        # Imported here, not at module scope: building the tokenizer pulls in
+        # ``tokenizers``/``jinja2``, and a random-token run should not have to
+        # have them installed.
+        from hpmesh.components.tokenizer import HuggingFaceTokenizer
+
+        tokenizer = HuggingFaceTokenizer(tokenizer_path=self.tokenizer_path)
+        recipe = (
+            make_local_jsonl(path=self.dataset_path)
+            if self.dataset == "local_jsonl"
+            else DATASETS[self.dataset]
+        )
+        context = DatasetBuildContext(
+            tokenizer=tokenizer,
+            max_context_length=max_context_length,
+            num_tokens_per_batch=num_tokens_per_batch,
+            read_options=grain.ReadOptions(),
+            max_num_documents=self.max_num_documents,
+        )
+        # The loader's config is built first and the graph filled in after,
+        # because ``build_dataset_iteration_policy`` derives the policy the
+        # graph is built with *from* that config -- restating the seed and
+        # shuffle flags here instead would let the two drift, and a shuffle
+        # flag the graph never sees is a silent no-op. ``dataset`` is the one
+        # field the policy does not read, so the placeholder cannot leak.
+        loader_config = GrainDataLoader.Config(
+            dataset=None,
+            seed=seed,
+            shuffle=self.shuffle,
+            streaming_shuffle_buffer_size=self.streaming_shuffle_buffer_size,
+            num_prefetch_batches=self.num_prefetch_batches,
+            max_num_documents=self.max_num_documents,
+        )
+        graph = ConcatThenSplitPackingConfig(dataset=recipe).build(
+            context=context,
+            dataset_iteration_policy=build_dataset_iteration_policy(
+                loader_config, dp_rank=dp_rank, dp_world_size=dp_world_size
+            ),
+        )
+        loader_config.dataset = graph
+        return GrainDataLoader(
+            loader_config,
+            dp_world_size=dp_world_size,
+            dp_rank=dp_rank,
+            tokenizer=tokenizer,
+            max_context_length=max_context_length,
+            num_tokens_per_batch=num_tokens_per_batch,
+        )
+
+
 @dataclass
 class TrainingArguments:
     """Training loop hyperparameters and reproducibility."""
@@ -478,6 +638,10 @@ class TrainingArguments:
         default_factory=CheckpointArguments,
         metadata={"help": "Checkpointing (see components/checkpointer)."},
     )
+    dataloader_config: DataloaderArguments = field(
+        default_factory=DataloaderArguments,
+        metadata={"help": "Micro-batch source (see datasets/)."},
+    )
     metrics_config: MetricsArguments = field(
         default_factory=MetricsArguments,
         metadata={"help": "Metrics reporting (see components/metrics)."},
@@ -502,6 +666,11 @@ class TrainingArguments:
     def metrics(self) -> MetricsArguments:
         """The metrics processor's config. See ``checkpoint`` for the shape."""
         return self.metrics_config
+
+    @property
+    def dataloader(self) -> DataloaderArguments:
+        """The micro-batch source's config. See ``checkpoint`` for the shape."""
+        return self.dataloader_config
 
     @property
     def profiler(self) -> ProfilerArguments:
@@ -647,6 +816,10 @@ class HybridMeshConfig:
     @property
     def metrics(self) -> MetricsArguments:
         return self.training.metrics
+
+    @property
+    def dataloader(self) -> DataloaderArguments:
+        return self.training.dataloader
 
     @property
     def profiler(self) -> ProfilerArguments:
