@@ -5,7 +5,7 @@ FIRST core concept. A DeviceMesh is an n-d array of ranks; each axis is one
 parallelism dimension. All collectives (all-gather, reduce-scatter, all-to-all, P2P)
 run along one mesh axis.
 
-The degrees come from ``ParallelismConfig`` (the torchtitan-shaped config hpmesh
+The degrees come from ``ParallelConfig`` (the torchtitan-shaped config hpmesh
 adopts) and are resolved/validated by ``ParallelDims.from_config`` -- the same
 class torchtitan uses -- so the ``world_size = dp * cp * tp * pp`` constraint is
 enforced in exactly one place.
@@ -30,7 +30,9 @@ from .trainer.config import HybridMeshConfig
 
 # Mesh axis names. `axis` names a specific DeviceMesh axis; `dim` is for shapes.
 # These are the axes of the dense mesh the parallel layer is handed; ``pp`` is
-# not among them because pipeline parallelism is not wired (see parallel/pp).
+# not among them because pipeline stages live on disjoint rank sets -- the PP
+# path resolves its own views off ParallelDims instead (see
+# parallel/pipeline_parallel/pp.py).
 MESH_AXES = ("dp", "cp", "tp")
 
 
@@ -66,8 +68,8 @@ def build_mesh(parallel_dims: ParallelDims | None):
             "parallel layer indexes these names directly"
         )
     # The dense mesh spans dp * cp * tp ranks. PP is not an axis of it, so a
-    # ``pp > 1`` run would be handed a mesh that silently covers only a fraction
-    # of the world. ``_reject_pp`` refuses those earlier; this is the backstop.
+    # ``pp > 1`` run must not be handed this mesh as if it covered the world:
+    # the trainer takes the per-stage dense view off ``parallel_dims`` instead.
     covered = (
         parallel_dims.dp_replicate
         * parallel_dims.dp_shard
