@@ -13,7 +13,9 @@ pipeline node.
 
 ``GrainDataLoaderConfig.dataset`` is the already-built Grain graph, not something
 this module constructs. The caller has the dataset registry, and building it
-there is what keeps ``loader.py`` free of a dependency on every concrete dataset.
+there is what keeps ``loader.py`` free of a dependency on every concrete dataset
+-- which is also why :func:`~hpmesh.datasets.build.build_dataloader`, which does
+own that registry, lives one level up.
 """
 
 from __future__ import annotations

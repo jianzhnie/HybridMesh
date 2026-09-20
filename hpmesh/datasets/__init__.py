@@ -6,12 +6,15 @@
 
 """The data pipeline: a Grain dataset graph plus the loaders that drive it.
 
-The public surface is the substrate below. The concrete dataset catalogs
+The public surface is the substrate below plus ``build_dataloader``, which
+assembles them from a ``trainer.config.DataloaderConfig``. The concrete dataset
+catalogs
 (``datasets.hf.text``, ``datasets.hf.multimodal``) are deliberately not
 re-exported: they pull in optional dependencies -- torchvision, and a video
 backend behind them -- that a run using none of them should not have to install.
 """
 
+from .build import build_dataloader
 from .collators import HAS_PIN_MEMORY, Collator, TextCollator, TrainerBatch
 from .dataset import (
     DatasetConcatConfig,
@@ -66,5 +69,6 @@ __all__ = [
     "TextSequence",
     "TrainerBatch",
     "WeightedDataset",
+    "build_dataloader",
     "build_dataset_iteration_policy",
 ]
