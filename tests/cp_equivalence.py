@@ -39,7 +39,7 @@ from hpmesh.parallel.context_parallel.primitives import (
     UlyssesContextParallel,
     cp_redistribute,
 )
-from hpmesh.parallel.spmd_types import set_current_spmd_mesh
+from hpmesh.utils.spmd_context import set_current_spmd_mesh
 
 SEQ = 16
 NUM_HEADS = 4

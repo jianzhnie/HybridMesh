@@ -25,7 +25,7 @@ from hpmesh.parallel.context_parallel import (
     cp_group,
     cp_redistribute,
 )
-from hpmesh.parallel.spmd_types import set_current_spmd_mesh
+from hpmesh.utils.spmd_context import set_current_spmd_mesh
 
 
 def _x() -> torch.Tensor:
