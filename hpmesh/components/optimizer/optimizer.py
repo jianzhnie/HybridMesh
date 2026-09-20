@@ -51,7 +51,7 @@ from __future__ import annotations
 import re
 from collections import defaultdict
 from collections.abc import Callable, Iterator
-from typing import Any, TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import torch
 import torch.nn as nn

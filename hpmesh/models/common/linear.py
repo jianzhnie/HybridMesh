@@ -29,7 +29,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torch.autograd.function import once_differentiable
 
-from hpmesh.parallel.spmd_types import spmd_mesh_group
+from hpmesh.utils.spmd_context import spmd_mesh_group
 
 __all__ = [
     "PartialBiasRowwiseLinear",

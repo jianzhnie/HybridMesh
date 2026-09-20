@@ -142,6 +142,18 @@ def build_model_config_for(cfg) -> PretrainedConfig:
     rather than a hub id ("org/name"). Offline, the explicit sizes in ``cfg`` are
     authoritative, so they become the overrides; otherwise the Hub's own config
     wins and the overrides are empty.
+
+    It also sets ``attn_mask_type``, which is derived rather than configured. Any
+    real corpus is packed -- ``datasets/build.py`` always runs the samples
+    through ``ConcatThenSplitPackingConfig`` -- so a row holds several documents
+    and attention must not cross a boundary between them. The synthetic random
+    corpus is one document per row, where the document mask is a no-op.
+
+    Left unset, ``attn_mask_type`` falls back to ``"causal"`` at the mask site.
+    That is correct on a CPU/sdpa run only because the wrapper's packed-sequence
+    guard raises first, and silently wrong on the flex path, where a causal-only
+    mod attends across document boundaries without complaint. Deriving it here
+    means the flag cannot disagree with the corpus the trainer loaded.
     """
     offline = cfg.hf_model.count("/") != 1
     overrides = (
@@ -156,9 +168,13 @@ def build_model_config_for(cfg) -> PretrainedConfig:
         if offline
         else None
     )
-    return build_model_config(
+    config = build_model_config(
         cfg.hf_model, seq_len=cfg.max_seq_len, arch_overrides=overrides
     )
+    config.attn_mask_type = (
+        "causal" if cfg.dataloader.dataset == "random" else "block_causal"
+    )
+    return config
 
 
 def num_flops_per_token(cfg) -> int:

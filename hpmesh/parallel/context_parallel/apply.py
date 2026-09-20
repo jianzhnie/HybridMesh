@@ -39,9 +39,11 @@ def apply_cp(
     if cfg.cp == 1:
         return model
 
-    # Lazy: parallel/ is imported before models/ in the trainer, and hf_wrapper
-    # itself imports the CP input sharding, so a module-level import here would
-    # close an import cycle.
+    # Lazy: ``models/hf_wrapper`` imports this package's ``__init__`` at module
+    # scope (for the CP input sharding), and the ``__init__`` eagerly
+    # re-exports ``apply_cp`` from this module -- a module-level import of
+    # hf_wrapper here would close that cycle whenever hf_wrapper is imported
+    # first. Keeping it at the call site is what lets both import orders work.
     from ...models.hf_wrapper import _ATTN_IMPLEMENTATION
 
     impl = getattr(getattr(model, "model", None), "config", None)

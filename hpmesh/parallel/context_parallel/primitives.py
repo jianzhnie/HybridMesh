@@ -46,7 +46,7 @@ import torch.distributed as dist
 import torch.nn as nn
 
 from ..parallel_dims import MeshAxisName
-from ..spmd_types import spmd_mesh_group
+from ...utils.spmd_context import spmd_mesh_group
 
 __all__ = [
     "HEAD_DIM",

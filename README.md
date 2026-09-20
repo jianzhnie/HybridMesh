@@ -51,18 +51,21 @@ torchrun --nproc_per_node=2 -m hpmesh --data_parallel_shard_degree 2
 | `hpmesh/datasets/hf/multimodal/` | 多模态语料（图/视频/文本处理器 + collator）——**尚未接线**：只有单测在调 | 已实现 |
 | `hpmesh/components/checkpointer/{base,dcp,torch_checkpointing}.py` | 每 rank 一份检查点，`step` / `ntokens_seen` / 模型 / 优化器，可续训；`base.py` 是共用骨架，两种后端各一个 manager | 可运行 |
 | `hpmesh/components/loss.py` | 交叉熵（含 vocab-parallel 形式）+ next-token 目标构造 | 已实现 |
-| `hpmesh/components/{lr_scheduler,metrics,profiler}.py` | WSD 学习率调度 + 训练指标 + profiler | 可运行 |
+| `hpmesh/components/{metrics,profiler}.py` | 训练指标 + profiler | 可运行 |
+| `hpmesh/components/optimizer/{optimizer,lr_scheduler,utils}.py` | 优化器容器（正则分组 + per-group lr/wd）、WSD 学习率调度、FQN-keyed checkout 状态序列化 | 可运行 |
 | `hpmesh/parallel/collectives.py` | mesh 感知的 `dist_sum` / `dist_max` / `clip_grad_norm_`（跨 PP stage 归约范数） | 可运行 |
-| `hpmesh/parallel/fsdp2/fsdp.py` | 数据并行（FSDP2 `fully_shard`） | 已实现 |
+| `hpmesh/parallel/fully_shard/fsdp.py` | 数据并行（FSDP2 `fully_shard`） | 已实现 |
 | `hpmesh/parallel/tensor_parallel/linear.py` | async-TP 融合原语（`AllGatherLinear` / `LinearReduceScatter`） | 已实现（CUDA） |
 | `hpmesh/parallel/tensor_parallel/tp.py` | 张量并行（声明式 sharding -> 融合原语） | 已实现（CUDA） |
 | `hpmesh/parallel/pipeline_parallel/{pipeline,pp}.py` | PP：stage 切分 + `apply_pp` / schedule 驱动（1F1B 闭环，pp+cp/ep 未接线） | 已实现 |
-| `hpmesh/parallel/cp_ep.py` + `context_parallel/` + `ep.py` | 上下文并行（KV all-gather 接线）/ 专家并行（Qwen3Moe MoE 替换 + all-to-all） | 已实现 |
+| `hpmesh/parallel/context_parallel/` + `expert_parallel/` | 上下文并行（KV all-gather 接线）/ 专家并行（Qwen3Moe MoE 替换 + all-to-all） | 已实现 |
 | `hpmesh/trainer/train.py` | 入口：`HfArgumentParser` 解析 config -> `Trainer(cfg).train()` | 可运行 |
 
 结构审计见 `docs/hpmesh_structure.md`；设计见 `docs/hybridmesh_design.md`
 （`docs/FRAMEWORK_DESIGN.md` 是**立项前的评估稿，已归档**，其中的 `hftrain/`
 目录骨架未落地，读之前先看它的抬头）。
+优化器 checkpoint 的磁盘格式在 `0fd6cbe` 变更过（改为扁平 FQN keying），
+旧 checkpoint 不再能加载，见 `docs/optimizer_checkpoint_format.md`。
 
 ## 学习路径
 
@@ -73,7 +76,7 @@ torchrun --nproc_per_node=2 -m hpmesh --data_parallel_shard_degree 2
 第 1 步  +FSDP 数据并行    已实现   torchrun --nproc_per_node=2 -m hpmesh --data_parallel_shard_degree 2
 第 2 步  +TP 张量并行      已实现   parallel/tensor_parallel/ (声明式 -> 融合 GEMM)
 第 3 步  +PP 流水线并行    已实现   parallel/pipeline_parallel/ (1F1B 闭环, pp_equivalence 对拍)
-第 4 步  +CP 或 EP         已实现   parallel/cp_ep.py + context_parallel/ + ep.py (KV all-gather / all-to-all)
+第 4 步  +CP 或 EP         已实现   parallel/context_parallel/ + expert_parallel/ (KV all-gather / all-to-all)
 ```
 
 ## 验证方法

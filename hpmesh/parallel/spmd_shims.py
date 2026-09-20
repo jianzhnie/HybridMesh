@@ -4,13 +4,28 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-"""Helpers for torchtitan's spmd_types backend."""
+"""SPMD glue shims used only inside the parallel layer.
+
+This is the upper half of what used to be ``hpmesh/parallel/spmd_types.py``.
+The ambient mesh context -- the half ``models/common`` and the trainer need --
+now lives in ``hpmesh/utils/spmd_context.py`` (the bottom layer, importable
+without a reverse dependency on ``hpmesh.parallel``). What remains here is
+the plumbing only the parallel layer touches: state-dict conversion between
+plain tensors and DTensors, input/parameter annotation against declared SPMD
+layouts, and redistribution validation/execution. Layout parsing
+(``spmd_axes`` / ``_per_axis_types``) lives in ``sharding.py`` next to
+``resolve_placements``, its only real consumer; importing it from there keeps
+this module's dependency on ``sharding`` one-directional, so the old
+function-body import of ``resolve_placements`` is gone.
+
+The rename also ends the collision with the PyPI ``spmd_types`` package:
+``import spmd_types as spmd`` and ``from .spmd_types import ...`` used to sit
+one import apart in ``sharding.py``.
+"""
 
 from __future__ import annotations
 
-import contextlib
-from collections.abc import Iterator, Mapping
-from threading import local
+from collections.abc import Mapping
 from typing import Any
 
 import spmd_types as spmd
@@ -18,51 +33,19 @@ import torch
 from torch.distributed.device_mesh import DeviceMesh
 from torch.distributed.tensor import DTensor
 
-from .parallel_dims import (
-    MeshAxisName,
-    ParallelDims,
-    unfold_dp_axes,
-)
-
-# TODO: Remove after spmd_types fixes deepcopy for its variadic tuple subclass.
-# PartitionSpec is immutable, so sharing it across a model deepcopy is safe.
-setattr(spmd.PartitionSpec, "__deepcopy__", lambda self, memo: self)  # noqa: B010
+from ..utils.spmd_context import set_current_spmd_mesh
+from .parallel_dims import MeshAxisName, ParallelDims, unfold_dp_axes
+from .sharding import _per_axis_types, resolve_placements, spmd_axes
 
 __all__ = [
     "annotate_input_spmd_types",
     "annotate_replicated_parameters",
-    "current_spmd_mesh",
     "dtensor_to_plain_tensor_state_dict",
-    "spmd_axes",
-    "spmd_local_context",
-    "maybe_set_sparse_mesh",
     "plain_tensor_to_dtensor_state_dict",
-    "spmd_dense_mesh",
-    "spmd_context",
-    "spmd_mesh_group",
-    "spmd_sparse_mesh",
-    "spmd_mesh_size",
     "spmd_distribute_tensor",
     "spmd_redistribute_per_axis",
     "spmd_validate_redistributions",
-    "set_current_spmd_mesh",
-    "set_spmd_meshes",
 ]
-
-
-_MESH_TLS = local()
-
-
-def spmd_axes(layout: spmd.SpmdType) -> tuple[MeshAxisName, ...]:
-    """Return and validate the named mesh axes used by an SPMD layout."""
-    axes = []
-    for axis in layout.local_type:
-        if not isinstance(axis, str):
-            raise TypeError(
-                f"TorchTitan SPMD layouts require named mesh axes, got {axis!r}"
-            )
-        axes.append(MeshAxisName(axis))
-    return tuple(axes)
 
 
 def plain_tensor_to_dtensor_state_dict(
@@ -72,8 +55,6 @@ def plain_tensor_to_dtensor_state_dict(
     parallel_dims: ParallelDims,
 ) -> dict[str, Any]:
     """Represent plain local state tensors as DTensors for state transfer."""
-    from .sharding import resolve_placements
-
     dtensor_state_dict = dict(state_dict)
     with torch.no_grad():
         for name, target in state_dict.items():
@@ -105,156 +86,6 @@ def dtensor_to_plain_tensor_state_dict(
         name: value.to_local() if isinstance(value, DTensor) else value
         for name, value in state_dict.items()
     }
-
-
-def set_spmd_meshes(
-    *,
-    dense_mesh: DeviceMesh,
-    sparse_mesh: DeviceMesh | None,
-) -> None:
-    """Register the SPMD meshes for dense and sparse runtime regions."""
-    _MESH_TLS.dense_mesh = dense_mesh
-    _MESH_TLS.sparse_mesh = sparse_mesh
-
-
-def spmd_dense_mesh() -> DeviceMesh:
-    """Return the registered dense SPMD mesh."""
-    mesh = getattr(_MESH_TLS, "dense_mesh", None)
-    assert mesh is not None, "SPMD dense mesh has not been registered"
-    return mesh
-
-
-def spmd_sparse_mesh() -> DeviceMesh | None:
-    """Return the registered sparse SPMD mesh, if EP is enabled."""
-    return getattr(_MESH_TLS, "sparse_mesh", None)
-
-
-def _spmd_mesh_stack() -> list[DeviceMesh | None]:
-    stack = getattr(_MESH_TLS, "mesh_stack", None)
-    if stack is None:
-        stack = []
-        _MESH_TLS.mesh_stack = stack
-    return stack
-
-
-def current_spmd_mesh() -> DeviceMesh | None:
-    """Return the current runtime mesh, or ``None`` if unset."""
-    stack = _spmd_mesh_stack()
-    if not stack:
-        return None
-    return stack[-1]
-
-
-def spmd_mesh_size(axis_name: str) -> int:
-    """Return the size of a mesh axis, or 1 if not active."""
-    mesh = current_spmd_mesh()
-    if mesh is None:
-        return 1
-    names = mesh.mesh_dim_names or ()
-    if axis_name not in names:
-        return 1
-    return mesh.size(names.index(axis_name))
-
-
-def spmd_mesh_group(axis_name: str) -> torch.distributed.ProcessGroup | None:
-    """Return a non-singleton process group from the current SPMD mesh."""
-    mesh = current_spmd_mesh()
-    if mesh is None:
-        return None
-    names = mesh.mesh_dim_names or ()
-    if axis_name not in names:
-        return None
-    group = mesh.get_group(axis_name)
-    return group if group.size() > 1 else None
-
-
-def spmd_local_context(
-    *local_axes: str,
-) -> contextlib.AbstractContextManager[None]:
-    """Context manager treating the named mesh axes as local axes.
-
-    Local axes retain per-coordinate SPMD semantics during global type
-    checking: each coordinate selects an independent tensor, and only the
-    remaining axes describe that tensor's global sharding. This is a no-op for
-    axes with size 1.
-    """
-    active_axes = tuple(
-        dict.fromkeys(axis for axis in local_axes if spmd_mesh_size(axis) > 1)
-    )
-    if not active_axes:
-        return contextlib.nullcontext()
-    return spmd.set_current_mesh(local_axes=active_axes)
-
-
-@contextlib.contextmanager
-def set_current_spmd_mesh(mesh: DeviceMesh | None) -> Iterator[None]:
-    """Set TorchTitan and spmd_types current mesh state for one runtime region."""
-    stack = _spmd_mesh_stack()
-    stack.append(mesh)
-    if mesh is None:
-        try:
-            yield
-        finally:
-            popped = stack.pop()
-            assert popped is mesh
-        return
-
-    with spmd.set_current_mesh(mesh):
-        try:
-            yield
-        finally:
-            popped = stack.pop()
-            assert popped is mesh
-
-
-@contextlib.contextmanager
-def maybe_set_sparse_mesh() -> Iterator[None]:
-    """Activate the registered sparse mesh, if present."""
-    if (mesh := spmd_sparse_mesh()) is None:
-        yield
-        return
-
-    with set_current_spmd_mesh(mesh):
-        yield
-
-
-@contextlib.contextmanager
-def spmd_context(parallel_dims: ParallelDims | None) -> Iterator[None]:
-    """Make the run's meshes answerable by name for the duration of the block.
-
-    This is the one place the ambient SPMD state is entered. Everything
-    downstream that asks "which process group is the TP axis?" -- the MoE token
-    reduction, the vocab-parallel embedding, the fused dist-GEMMs -- reads it
-    from here rather than receiving a mesh through its arguments, which is what
-    keeps a ``DeviceMesh`` from having to thread through every model component.
-
-    Two pieces of state, and both are required:
-
-    * ``set_spmd_meshes`` registers the dense and sparse meshes so
-      ``spmd_dense_mesh`` / ``spmd_sparse_mesh`` can answer. The sparse mesh is
-      ``None`` unless EP is on, and ``None`` there reads as "no EP axis".
-    * ``set_current_spmd_mesh`` pushes onto the mesh stack, which is what the
-      by-name lookups (``spmd_mesh_group`` / ``current_spmd_mesh``) read.
-      It also enters ``spmd_types.set_current_mesh``, so a model that wants
-      *static* SPMD type checking gets a live mesh too.
-
-    Without the second one the first is inert: the registry would hold a mesh
-    that no lookup consults, and every caller would keep taking its "no mesh"
-    branch -- the exact silent degradation this exists to remove.
-
-    ``parallel_dims is None`` is the single-process case: there is no process
-    group and no axis, so every lookup below correctly answers ``None``/``1``.
-    """
-    if parallel_dims is None:
-        yield
-        return
-
-    set_spmd_meshes(
-        dense_mesh=parallel_dims.spmd_dense_mesh(),
-        sparse_mesh=parallel_dims.spmd_sparse_mesh(),
-    )
-    with set_current_spmd_mesh(spmd_dense_mesh()):
-        yield
 
 
 def annotate_input_spmd_types(
@@ -306,30 +137,6 @@ def annotate_replicated_parameters(
     with set_current_spmd_mesh(parallel_dims.spmd_dense_mesh()):
         for param in module.parameters():
             spmd.assert_type(param, spmd.R)
-
-
-def _per_axis_types(
-    layout: spmd.SpmdType,
-) -> dict[MeshAxisName, spmd.PerMeshAxisSpmdType]:
-    result: dict[MeshAxisName, spmd.PerMeshAxisSpmdType] = {}
-    for axis, axis_type in layout.local_type.items():
-        if not isinstance(axis, str):
-            raise TypeError(
-                f"TorchTitan SPMD layouts require named mesh axes, got {axis!r}"
-            )
-        result[MeshAxisName(axis)] = axis_type
-    if layout.partition_spec is not None:
-        for dim, entry in enumerate(layout.partition_spec):
-            axes = (
-                () if entry is None else entry if isinstance(entry, tuple) else (entry,)
-            )
-            for axis in axes:
-                if not isinstance(axis, str):
-                    raise TypeError(
-                        f"TorchTitan SPMD layouts require named mesh axes, got {axis!r}"
-                    )
-                result[MeshAxisName(axis)] = spmd.S(dim)
-    return result
 
 
 def spmd_validate_redistributions(sharding_config: Any) -> None:

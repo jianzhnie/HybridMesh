@@ -20,7 +20,7 @@ a separate act with its own arguments (which rank am I, how many tokens per
 batch). Keeping them apart also keeps ``datasets/`` and ``components/`` free of
 any reference back to ``trainer/``.
 
-Same shape as ``components/lr_scheduler.build_lr_scheduler``, which exists for
+Same shape as ``components/optimizer.build_lr_scheduler``, which exists for
 the same reason.
 """
 
