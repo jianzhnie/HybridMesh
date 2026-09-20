@@ -2,13 +2,12 @@
 
 Vendored from torchtitan ``models/common/activation.py``. Two changes:
 
-* The ``Configurable``/``Function`` bases are gone. Upstream they exist so a
-  model config can name an activation by class and have it built; hpmesh
-  constructs modules directly, so a plain ``nn.Module`` with the same call
-  signature is enough.
-* ``ActivationFn`` survives as an ``ABC`` rather than a config carrier -- it is
-  the shared type for "consumes the gate and up halves of a fused projection",
-  which lets a caller swap activations without caring which one it holds.
+* The ``Function`` base is gone. Upstream it exists so a model config can name
+  an activation by class and have it built; hpmesh constructs modules directly,
+  so a plain ``nn.Module`` with the same call signature is enough.
+* ``ActivationFn`` survives as an ``ABC`` -- it is the shared type for
+  "consumes the gate and up halves of a fused projection", which lets a caller
+  swap activations without caring which one it holds.
 
 The call signature is ``(gate, up)`` rather than a single tensor because these
 consume the two halves of a fused gate-and-up projection separately.

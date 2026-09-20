@@ -20,8 +20,8 @@ is the whole contract, and ``AllToAllTokenDispatcher`` implements it.
 
 What changed from upstream, and why:
 
-* ``Configurable`` is gone. Dispatchers already took no nested ``Config`` beyond
-  plain ints, so they are constructed directly.
+* Dispatchers are constructed directly from plain ints; there is no nested
+  ``Config`` in between.
 * ``spmd.all_to_all`` is gone in favour of ``all_to_all_single``. Upstream
   already writes that call as the compiled/traced branch; it is the native
   collective, it needs no ``spmd_types``, and it is the branch that actually

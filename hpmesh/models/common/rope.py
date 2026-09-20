@@ -2,9 +2,9 @@
 
 Vendored from torchtitan ``models/common/rope.py``. What changed:
 
-* No ``Configurable``. The hyperparameters live in a plain ``RoPEConfig``
-  dataclass and reach ``__init__`` as one argument, which is how hpmesh carries
-  every other config (see docs/hybridmesh_design.md, SEAM 1).
+* The hyperparameters live in a plain ``RoPEConfig`` dataclass and reach
+  ``__init__`` as one argument, which is how hpmesh carries every other config
+  (see docs/hybridmesh_design.md, SEAM 1).
 * ``spmd.no_typecheck()`` and ``spmd.local_map(...)`` are gone. The first was a
   type-checker suppression with no runtime effect; the second declared that
   ``_reshape_for_broadcast`` is a pure per-rank reshape, which is true as

@@ -8,10 +8,10 @@ math itself; this file is only the wiring and the fallbacks).
 
 What changed from upstream:
 
-* The ``Configurable`` carriers are gone. Upstream's empty ``Config`` subclasses
-  exist solely so ``Config.build()`` binds to the fused class rather than the
-  stock one -- with no config system they have nothing left to do. Each class
-  now takes its sizes/weights as keyword args, like the rest of hpmesh.
+* Each class takes its sizes and weights as keyword args, like the rest of
+  hpmesh. Upstream's empty ``Config`` subclasses existed only to make the fused
+  class name a config choice; without a config system there is nothing to
+  choose between.
 * ``DistGEMMFeedForward`` subclasses :class:`~hpmesh.models.common.feed_forward.
   FeedForward`, as it does upstream: the fused and unfused paths share the weight
   layout (``w13`` holding the interleaved gate and up) and the activation split,
