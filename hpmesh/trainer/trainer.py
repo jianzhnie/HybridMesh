@@ -60,6 +60,11 @@ from ..datasets.random_data import (
     batch_iterator,
 )
 from ..mesh import build_mesh, build_parallel_dims, init_distributed
+from ..models.common.aux_loss import (
+    AuxLoss,
+    collect_aux_loss_metrics,
+    register_aux_loss_zero_hook,
+)
 from ..models.hf_wrapper import (
     HFTransformerModel,
     build_model_config_for,
@@ -112,6 +117,12 @@ class Trainer:
         self.optimizer = torch.optim.AdamW(
             self.model.parameters(), lr=cfg.lr, weight_decay=cfg.weight_decay
         )
+
+        # Aux losses (the MoE load-balance loss a swapped-in MoE carries)
+        # accumulate per forward; this pre-hook rolls the per-instance sums
+        # into the step registers at each optimizer step. Harmless when no
+        # aux loss exists.
+        register_aux_loss_zero_hook(self.optimizer, [self.model], self.parallel_dims)
 
         # 4. checkpointing, last because it needs the model and optimizer it is
         #    going to serialize, and because a checkpoint is meaningless until
@@ -269,6 +280,29 @@ class Trainer:
                 cp_mesh,
                 load_balancer=self.cfg.parallel.context_parallel_load_balancer,
             )
+        # Aux losses normalize by the step's global valid-token count -- the
+        # same denominator the main loss is normalized by in ``train_step``.
+        # The forward consumes it (``AuxLoss.inject``), so it must be reduced
+        # here, before the forward: the count is derivable from the labels
+        # alone (``_loss_sum`` predicts every label but the first), and the
+        # reduction spans the same token mesh the main-loss count uses.
+        if AuxLoss._group_counts:
+            if self.parallel_dims is None:
+                token_mesh = None
+            else:
+                token_mesh = (
+                    self.parallel_dims.get_optional_mesh("dp")
+                    if cp_mesh is None
+                    else self.parallel_dims.get_mesh("loss")
+                )
+            AuxLoss.set_step_denominator(
+                dist_sum_tensor(
+                    torch.tensor(
+                        labels.numel() - 1, dtype=torch.float32, device=self.device
+                    ),
+                    token_mesh,
+                )
+            )
         # ``spmd_context`` is what makes a process group answerable *by name*
         # (``spmd_mesh_group("tp")`` and friends) for the duration of the body.
         # It is entered here, around the forward/backward only, because that is
@@ -409,11 +443,18 @@ class Trainer:
         else:
             # Single rank: the two are the same number by construction.
             global_avg_loss = global_max_loss = float(loss)
-        return {
+        metrics = {
             "loss": global_avg_loss,
             "max_loss": global_max_loss,
             "grad_norm": float(grad_norm),
         }
+        # Aux-loss step registers are rolled up by the optimizer step pre-hook
+        # above; this reduces them for logging. Single-process runs skip the
+        # collection (there is no mesh to reduce over and no second rank's
+        # contribution); the injection itself is unaffected.
+        if AuxLoss._group_counts and self.parallel_dims is not None:
+            metrics.update(collect_aux_loss_metrics(self.parallel_dims))
+        return metrics
 
     def _check_finite(self, loss_sum: torch.Tensor, grad_norm: torch.Tensor) -> None:
         """Stop before the optimizer update if anything went non-finite.
@@ -493,6 +534,11 @@ class Trainer:
                             global_avg_loss=step_metrics["loss"],
                             global_max_loss=step_metrics["max_loss"],
                             grad_norm=step_metrics["grad_norm"],
+                            extra_metrics={
+                                k: v
+                                for k, v in step_metrics.items()
+                                if k not in ("loss", "max_loss", "grad_norm")
+                            },
                         )
 
                     # The manager owns the interval policy: ``save`` decides for
