@@ -147,6 +147,25 @@ def test_an_unknown_optimizer_name_is_rejected() -> None:
         )
 
 
+def test_an_unknown_implementation_is_rejected() -> None:
+    """``implementation`` is a closed enum; a typo must not silently pick a kernel."""
+    with pytest.raises(ValueError, match="Unknown optimizer implementation"):
+        OptimizersContainer(
+            _cfg(_catch_all(), implementation="quantum"), model_parts=[_model()]
+        )
+
+
+def test_a_closure_is_rejected_rather_than_dropped() -> None:
+    """``step(closure)`` cannot be honoured, and ignoring it skips the caller's work.
+
+    Returning ``None`` like ``Optimizer.step`` does would look like success while
+    the closure -- typically a loss recomputation -- never ran.
+    """
+    container = OptimizersContainer(_cfg(_catch_all()), model_parts=[_model()])
+    with pytest.raises(ValueError, match="does not support closures"):
+        container.step(lambda: 1.0)
+
+
 def test_zero_grad_and_step_reach_every_inner_optimizer() -> None:
     model = _model()
     container = OptimizersContainer(_cfg(_catch_all()), model_parts=[model])
