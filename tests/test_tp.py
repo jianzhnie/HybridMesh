@@ -22,7 +22,7 @@ from hpmesh.parallel.tensor_parallel.tp import (
     colwise,
     rowwise,
 )
-from hpmesh.trainer import HybridMeshConfig
+from hpmesh.trainer import ParallelConfig
 
 
 def test_declaration_factories_pick_the_right_realizer() -> None:
@@ -140,6 +140,6 @@ def test_a_wrapper_tp_plan_matches_the_modules_it_exposes() -> None:
 
 def test_apply_tp_is_a_noop_when_tp_is_one() -> None:
     model = nn.Linear(4, 4)
-    cfg = HybridMeshConfig()  # tp defaults to 1
+    cfg = ParallelConfig()  # tp defaults to 1
     assert apply_tp(model, mesh=None, cfg=cfg) is model
     assert isinstance(model, nn.Linear)  # not swapped

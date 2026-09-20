@@ -2,8 +2,8 @@
 
 Covers the behaviors verified during prototyping: the world_size constraint,
 deterministic synthetic data, DP batch slicing, and the model wrapper. The config
-is the grouped HybridMeshConfig; the flat view (cfg.dp, cfg.steps, ...) is what
-the trainer/mesh layer reads.
+is the grouped HybridMeshConfig; the flat view (cfg.steps, cfg.max_seq_len, ...)
+is what the trainer layer reads.
 """
 
 from __future__ import annotations

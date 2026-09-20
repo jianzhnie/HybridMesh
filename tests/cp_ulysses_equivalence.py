@@ -133,7 +133,7 @@ def _run_ulysses(
     cfg = _cfg(num_kv_heads)
     model = _build_model(cfg, flex=True)
     ref = _build_model(cfg, flex=False)
-    apply_cp(model, mesh, cfg)
+    apply_cp(model, mesh, cfg.parallel)
 
     ids, labels, positions = _data()
     ids_sh, labels_sh, pos_sh = shard_batch_for_cp(
@@ -269,7 +269,7 @@ def _check_refusals(mesh, failures: list[str]) -> None:
         ValueError,
         "num_key_value_heads",
         "attach with indivisible kv heads",
-        lambda: apply_cp(model, mesh, cfg),
+        lambda: apply_cp(model, mesh, cfg.parallel),
     )
     model = _build_model(_cfg(), flex=True)
     # As in a packed run: ``build_model_config_for`` derives this from the
@@ -279,7 +279,7 @@ def _check_refusals(mesh, failures: list[str]) -> None:
         ValueError,
         "packed",
         "attach with packed sequences",
-        lambda: apply_cp(model, mesh, _cfg()),
+        lambda: apply_cp(model, mesh, _cfg().parallel),
     )
 
 

@@ -90,9 +90,11 @@ class _FakeParallelDims:
         return self.pp > 1
 
 
-def _processor(**config_overrides) -> MetricsProcessor:
+def _processor(num_flops_per_token: int = 1000, **config_overrides) -> MetricsProcessor:
     return MetricsProcessor(
-        Config(**config_overrides), parallel_dims=None, num_flops_per_token=1000
+        Config(**config_overrides),
+        parallel_dims=None,
+        num_flops_per_token=num_flops_per_token,
     )
 
 
@@ -214,6 +216,22 @@ def test_mfu_is_computed_against_the_device_peak() -> None:
     assert _derive(processor).mfu == pytest.approx(100_000.0, rel=1e-3)
 
 
+def test_mfu_is_none_when_the_model_geometry_is_unknown() -> None:
+    """A non-zero peak does not make the ratio measurable.
+
+    ``num_flops_per_token`` is 0 for a config whose sizes the formula cannot
+    read, and 0 into a real peak computes a confident ``0.00%``. This is the
+    case a CPU baseline cannot reach (gpu_peak_flops is 0 there), so it is
+    pinned here rather than by a training run.
+    """
+    processor = _processor(num_flops_per_token=0)
+    processor.gpu_peak_flops = 1000.0
+    processor.add_tokens(1000)
+    processor.time_last_log -= 1.0
+
+    assert _derive(processor).mfu is None
+
+
 def test_time_per_step_averages_over_the_window() -> None:
     """end_to_end is per step, not per window: a run logging every 5 steps
     would otherwise report a number 5x its step time."""
@@ -306,6 +324,22 @@ def test_mfu_is_omitted_from_the_report_when_it_is_not_known() -> None:
     it gets a gap rather than a zero."""
     processor = _processor()
     assert processor.gpu_peak_flops == 0.0
+    sink = _RecordingLogger()
+    processor.logger = sink
+
+    processor.log(1, global_avg_loss=1.0, global_max_loss=1.0, grad_norm=1.0)
+
+    assert "mfu(%)" not in sink.calls[0][0]
+
+
+def test_mfu_key_is_absent_when_the_model_geometry_is_unknown() -> None:
+    """End to end through ``log``: a missing geometry leaves no ``mfu(%)`` key.
+
+    The console line reads that absence as ``N/A``; were the key present with a
+    computed 0.0 it would render as ``0.00%`` and read as a real measurement.
+    """
+    processor = _processor(num_flops_per_token=0)
+    processor.gpu_peak_flops = 1000.0
     sink = _RecordingLogger()
     processor.logger = sink
 

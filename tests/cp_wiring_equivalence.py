@@ -177,7 +177,7 @@ def _run_scenario(
     cfg = _cfg(load_balancer)
     model = _build_model(cfg, flex=True)
     ref = _build_model(cfg, flex=False)
-    apply_cp(model, mesh, cfg)
+    apply_cp(model, mesh, cfg.parallel)
 
     ids, labels, positions = _data(packed)
     ids_sh, labels_sh, pos_sh = shard_batch_for_cp(
@@ -322,7 +322,7 @@ def _check_preprocess_inputs_matches(mesh, failures: list[str]) -> float:
     # from the corpus (any non-random dataset is packed); here the model is
     # built without one, so it is set explicitly to the same value.
     model.model.config.attn_mask_type = "block_causal"
-    apply_cp(model, mesh, cfg)
+    apply_cp(model, mesh, cfg.parallel)
     ids, labels, positions = _data(packed=True)
 
     # ``preprocess_inputs`` reaches the mesh through ``parallel_dims``, so it
