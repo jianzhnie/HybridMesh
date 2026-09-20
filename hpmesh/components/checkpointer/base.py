@@ -15,11 +15,11 @@ their logic in torchtitan, and it is what will let hpmesh do the same.
 
 Four deliberate departures, all subtractions:
 
-* **The config is not defined here.** torchtitan's ``BaseCheckpointManager`` is
-  a ``Configurable`` whose nested ``Config.build()`` constructs ``Config._owner``,
-  which is what keeps a manager's defaults next to the manager. hpmesh keeps all
-  configuration in one module (``hpmesh.trainer.config``), so the managers take
-  an explicit ``config`` argument of the type defined there.
+* **The config is not defined here.** torchtitan's ``BaseCheckpointManager``
+  carries its own nested config, which is what keeps a manager's defaults next
+  to the manager. hpmesh keeps all configuration in one module
+  (``hpmesh.trainer.config``), so the managers take an explicit ``config``
+  argument of the type defined there.
 
 * **No tyro.** ``purge_exempt`` was
   ``Annotated[Function.Config | None, tyro.conf.Suppress]`` -- a CLI-suppressed

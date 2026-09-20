@@ -6,9 +6,10 @@ the output is annotated to match. Declaring the layout on the module (rather tha
 hand-rolling a wrapper) is what lets the kernel be sharded the same way as the
 rest of the network.
 
-torchtitan makes this a torchtitan ``Module`` subclass so the kernel can carry
-its sharding config through that protocol. hpmesh has no module protocol, so
-this is a plain ``nn.Module`` holding the sharding config the engine reads.
+torchtitan makes this a torchtitan ``Module`` subclass, because carrying the
+sharding config is one of the jobs of its module protocol. hpmesh has no module
+protocol, so this is a plain ``nn.Module`` holding the sharding config the
+engine reads.
 
 The HF attention module and the BlockMask ride as passthrough keyword args. They
 are not tensors, so the SPMD wrapper leaves them untouched.

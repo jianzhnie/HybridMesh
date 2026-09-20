@@ -4,12 +4,14 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-"""Sharding types for config-based parallelization.
+"""The sharding spec for one module: which axis shards which state.
 
-``ShardingConfig`` is set on ``Module.Config`` by ``set_sharding_config()``
-and read by ``Module.parallelize(parallel_dims)``. All placements use
-``SpmdType`` so they are self-documenting and support multi-dimensional
-meshes.
+``ShardingConfig`` is a plain description -- state names and activation names,
+each mapped to an ``SpmdType`` keyed by mesh axis -- and ``resolve_placements``
+is what turns one into DTensor placements for a given mesh. Splitting the two is
+what makes the spec mesh-agnostic: the same declaration resolves against a
+1-D dp mesh and a full dp/cp/tp mesh, and a missing axis is a ``ValueError``
+rather than a silently-replicated tensor.
 """
 
 from dataclasses import dataclass, field
@@ -30,13 +32,14 @@ __all__ = [
 
 @dataclass(kw_only=True, slots=True)
 class ShardingConfig:
-    """Declarative sharding for a Module's states and activations.
+    """Declarative sharding for a module's states and activations.
 
-    All placements use ``SpmdType`` keyed by mesh axis names. At
-    ``parallelize()`` time, parameters and buffers are locally sharded and
-    annotated, while activation layouts drive explicit redistributions.
+    All placements use ``SpmdType`` keyed by mesh axis names. A module holds one
+    of these as ``_sharding_config`` and the SPMD engine reads it off the
+    modules it walks; ``resolve_placements`` is what converts the declarations
+    to concrete ``Placement`` tuples at that point.
 
-    Completely dtype-agnostic at this moment — quantization (Float8/MXFP8) is
+    Completely dtype-agnostic at this moment -- quantization (Float8/MXFP8) is
     orthogonal.
 
     Redistribution is expressed as a (source, destination) pair: src declares
