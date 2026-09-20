@@ -108,7 +108,7 @@ from ..models.hf_wrapper import (
 from ..parallel.collectives import clip_grad_norm_, dist_max, dist_sum, dist_sum_tensor
 from ..parallel.parallel_dims import ParallelDims
 from ..parallel.pipeline_parallel import PipelineParallelSetup
-from ..parallel.spmd_types import spmd_context
+from ..utils.spmd_context import spmd_context
 from ..utils.gc import GarbageCollection
 from ..utils.logger_utils import get_logger
 from .config import HybridMeshConfig
@@ -210,7 +210,9 @@ class Trainer:
             self.model = orchestration
             self.model_parts = [orchestration]
 
-        self.optimizer = OptimizersContainer(cfg.optimizer, model_parts=self.model_parts)
+        self.optimizer = OptimizersContainer(
+            cfg.optimizer, model_parts=self.model_parts
+        )
 
         # The lr schedule. Built regardless of whether the knobs were touched:
         # the default is warmup_steps=0 with no decay, so the factor is a

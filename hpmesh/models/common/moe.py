@@ -37,7 +37,7 @@ import torch.distributed.nn.functional as dist_nn
 import torch.nn as nn
 import torch.nn.functional as F
 
-from hpmesh.parallel.spmd_types import spmd_mesh_group, spmd_sparse_mesh
+from hpmesh.utils.spmd_context import spmd_mesh_group, spmd_sparse_mesh
 
 from .aux_loss import AuxLoss
 from .grouped_experts import GroupedExperts

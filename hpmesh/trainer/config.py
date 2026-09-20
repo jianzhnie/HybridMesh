@@ -12,12 +12,12 @@ parser group or a nested one:
 
 These are descriptions, not builders. Nothing here constructs the runtime object
 it describes -- the loader in ``datasets/build.py``, the scheduler in
-``components/lr_scheduler.py`` -- for two reasons. A config that carries its own
-builder suggests the built object is one of its fields, and it is not: building
-takes arguments the config does not have (which rank am I, how many tokens per
-batch). And a builder has to name the type it produces, which for a config
-nested under a component would mean importing the component into this module
-while the component imports this one back.
+``components/optimizer/lr_scheduler.py`` -- for two reasons. A config that
+carries its own builder suggests the built object is one of its fields, and it
+is not: building takes arguments the config does not have (which rank am I, how
+many tokens per batch). And a builder has to name the type it produces, which
+for a config nested under a component would mean importing the component into
+this module while the component imports this one back.
 
 So the seam is a factory function that takes the config as its first argument.
 ``trainer/trainer.py`` calls those; this module is only ever read.
@@ -44,6 +44,7 @@ from typing import Any, Literal
 
 import torch
 from transformers import AutoConfig
+
 from hpmesh.components.checkpointer import LR_SCHEDULER, MODEL, OPTIMIZER
 from hpmesh.datasets.hf.text import DATASETS
 from hpmesh.utils import filesystem
@@ -411,7 +412,7 @@ class LRSchedulerConfig:
     """The WSD schedule's knobs.
 
     The runtime side -- the ``LambdaLR`` this builds -- is
-    ``hpmesh.components.lr_scheduler.LRScheduler``.
+    ``hpmesh.components.optimizer.LRSchedulersContainer``.
 
     ``decay_ratio`` is the switch that matters. At its default of 0 there is no
     decay phase, so the factor is 1.0 throughout (after any warmup) and the

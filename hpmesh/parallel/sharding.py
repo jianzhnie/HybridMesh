@@ -22,12 +22,48 @@ from torch.distributed.device_mesh import DeviceMesh
 from torch.distributed.tensor import Partial, Placement, Replicate, Shard
 
 from .parallel_dims import MeshAxisName, unfold_dp_axis
-from .spmd_types import _per_axis_types, spmd_axes
 
 __all__ = [
     "ShardingConfig",
     "resolve_placements",
+    "spmd_axes",
 ]
+
+
+def spmd_axes(layout: spmd.SpmdType) -> tuple[MeshAxisName, ...]:
+    """Return and validate the named mesh axes used by an SPMD layout."""
+    axes = []
+    for axis in layout.local_type:
+        if not isinstance(axis, str):
+            raise TypeError(
+                f"TorchTitan SPMD layouts require named mesh axes, got {axis!r}"
+            )
+        axes.append(MeshAxisName(axis))
+    return tuple(axes)
+
+
+def _per_axis_types(
+    layout: spmd.SpmdType,
+) -> dict[MeshAxisName, spmd.PerMeshAxisSpmdType]:
+    result: dict[MeshAxisName, spmd.PerMeshAxisSpmdType] = {}
+    for axis, axis_type in layout.local_type.items():
+        if not isinstance(axis, str):
+            raise TypeError(
+                f"TorchTitan SPMD layouts require named mesh axes, got {axis!r}"
+            )
+        result[MeshAxisName(axis)] = axis_type
+    if layout.partition_spec is not None:
+        for dim, entry in enumerate(layout.partition_spec):
+            axes = (
+                () if entry is None else entry if isinstance(entry, tuple) else (entry,)
+            )
+            for axis in axes:
+                if not isinstance(axis, str):
+                    raise TypeError(
+                        f"TorchTitan SPMD layouts require named mesh axes, got {axis!r}"
+                    )
+                result[MeshAxisName(axis)] = spmd.S(dim)
+    return result
 
 
 @dataclass(kw_only=True, slots=True)

@@ -20,7 +20,7 @@ What changed from upstream:
 * ``torch_remat`` is gone. Upstream wraps each projection in
   ``remat.region(..., recompute=...)``, which only steers activation
   checkpointing; calling the projection directly is the same arithmetic.
-* ``current_spmd_mesh`` is read through hpmesh's ``spmd_types`` helper.
+* ``current_spmd_mesh`` is read through ``hpmesh.utils.spmd_context``.
 
 The fallback matters: when TP is not active there is no collective to fuse, so
 each module runs its plain path. That keeps a TP=1 run working, but it also means
@@ -37,7 +37,7 @@ import torch.nn as nn
 
 from hpmesh.models.common.feed_forward import FeedForward
 from hpmesh.models.common.qkv import QKVLinear
-from hpmesh.parallel.spmd_types import current_spmd_mesh
+from hpmesh.utils.spmd_context import current_spmd_mesh
 from hpmesh.parallel.tensor_parallel.linear import (
     AllGatherLinear,
     LinearReduceScatter,

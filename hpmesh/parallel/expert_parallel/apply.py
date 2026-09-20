@@ -8,6 +8,7 @@ import torch.distributed as dist
 import torch.nn as nn
 
 from ...trainer.config import HybridMeshConfig
+from .ep import swap_hf_moe_blocks
 
 logger = logging.getLogger(__name__)
 
@@ -32,16 +33,6 @@ def apply_ep(
     """
     if cfg.ep == 1:
         return model
-
-    # Lazy, and only here: ``ep.py`` imports ``models/common/moe`` (the stack it
-    # swaps in), while ``models/common`` imports ``parallel/spmd_types``. An
-    # eager import at module scope would close that cycle for any import order
-    # that starts inside ``hpmesh.models`` -- including
-    # ``parallel/__init__`` -> this module, which reaches the MoE stack before
-    # ``models.common.linear`` has finished initializing. Importing at the call
-    # site keeps the cycle behind the ``cfg.ep > 1`` guard, which is also the
-    # only path that needs it.
-    from .ep import swap_hf_moe_blocks
 
     if ep_group is None or ep_group.size() != cfg.ep:
         raise ValueError(
