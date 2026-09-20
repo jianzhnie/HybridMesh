@@ -151,6 +151,13 @@ class CheckpointManager(BaseCheckpointManager):
         optimizer: the optimizer to checkpoint, as an ``OptimizersContainer``.
             Its state dict is flat and FQN-keyed, and it materializes a fresh
             optimizer's state before DCP plans the load.
+        lr_scheduler: the lr schedule to checkpoint, as an
+            ``LRSchedulersContainer``. Required: its ``last_epoch`` is the only
+            thing that makes a resumed run continue the curve rather than
+            restart it, and nothing else in the checkpoint carries it -- the
+            optimizer restores ``base_lrs`` but not the step count. Registering
+            it here also keeps it ordered after the optimizer, which it must be:
+            ``load_state_dict`` writes ``base_lrs`` into the optimizers.
         states: extra states to save beyond the model and optimizer.
         folder: absolute directory the checkpoints live in. Already joined with
             the run's dump folder by the caller.
@@ -169,6 +176,7 @@ class CheckpointManager(BaseCheckpointManager):
         *,
         model_parts: list[nn.Module],
         optimizer: Any,
+        lr_scheduler: Any,
         states: dict[str, Any],
         folder: str,
         sd_adapter: Any | None = None,
@@ -193,6 +201,9 @@ class CheckpointManager(BaseCheckpointManager):
                 # load, so a resumed run's fresh optimizer has somewhere to put
                 # ``exp_avg``.
                 OPTIMIZER: optimizer,
+                # After OPTIMIZER, deliberately: DCP loads in this order, and
+                # the scheduler's restore reads the optimizers' ``base_lrs``.
+                LR_SCHEDULER: lr_scheduler,
             }
         )
 

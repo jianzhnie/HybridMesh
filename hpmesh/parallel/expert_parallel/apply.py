@@ -7,7 +7,8 @@ import logging
 import torch.distributed as dist
 import torch.nn as nn
 
-from ...trainer.config import HybridMeshConfig
+from hpmesh.trainer.config import ParallelConfig
+
 from .ep import swap_hf_moe_blocks
 
 logger = logging.getLogger(__name__)
@@ -17,7 +18,7 @@ __all__ = ["apply_ep"]
 
 def apply_ep(
     model: nn.Module,
-    cfg: HybridMeshConfig,
+    cfg: ParallelConfig,
     *,
     ep_group: dist.ProcessGroup | None = None,
 ) -> nn.Module:

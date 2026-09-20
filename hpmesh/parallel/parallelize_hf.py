@@ -38,7 +38,8 @@ import logging
 import torch
 import torch.nn as nn
 
-from ..trainer.config import HybridMeshConfig
+from hpmesh.trainer.config import ParallelConfig
+
 from .context_parallel import apply_cp
 from .expert_parallel import apply_ep
 from .fully_shard.fsdp_wrap import apply_fsdp
@@ -53,12 +54,22 @@ __all__ = ["PipelineParallelSetup", "parallelize_hf_transformers"]
 def parallelize_hf_transformers(
     model: nn.Module,
     *,
-    cfg: HybridMeshConfig,
+    cfg: ParallelConfig,
     mesh,
     parallel_dims,
     device: torch.device | None = None,
+    compile: bool = False,
+    global_batch_size: int | None = None,
+    dataset: str = "random",
 ) -> nn.Module | PipelineParallelSetup:
     """Apply every parallelism dimension the config asks for, in order.
+
+    ``compile``, ``global_batch_size`` and ``dataset`` are training-side
+    values, passed explicitly rather than read off a run-wide config: this
+    layer's contract is ``ParallelConfig`` plus the handful of scalars the
+    guards actually need. ``global_batch_size`` is required only on the
+    ``pp > 1`` path (microbatch validation); ``dataset`` gates the same
+    path's corpus restriction.
 
     Returns the (possibly wrapped) model -- or, with ``pp > 1``, a
     ``PipelineParallelSetup``: pipeline parallelism cuts the model into
@@ -66,6 +77,11 @@ def parallelize_hf_transformers(
     return shapes are how the caller learns which case it is in.
     """
     if parallel_dims is not None and parallel_dims.pp_enabled:
+        if global_batch_size is None:
+            raise ValueError(
+                "pp > 1 needs global_batch_size for microbatch validation; "
+                "the trainer passes cfg.training.global_batch_size."
+            )
         # PP owns the per-chunk application of the other dimensions: each
         # stage's chunk goes through tp/(compile)/fsdp inside apply_pp, in the
         # same relative order as below. The dense (dp, cp, tp) ``mesh`` is not
@@ -76,6 +92,9 @@ def parallelize_hf_transformers(
             parallel_dims=parallel_dims,
             cfg=cfg,
             device=device if device is not None else next(model.parameters()).device,
+            global_batch_size=global_batch_size,
+            dataset=dataset,
+            compile=compile,
         )
         return PipelineParallelSetup(
             schedule=build_pipeline_schedule(stages, cfg=cfg),
@@ -107,7 +126,7 @@ def parallelize_hf_transformers(
     model = apply_ep(model, cfg, ep_group=ep_group)
     model = apply_cp(model, mesh, cfg)
 
-    if cfg.compile:
+    if compile:
         model = torch.compile(model)
 
     return apply_fsdp(model, mesh, cfg, parallel_dims)

@@ -13,7 +13,8 @@ from enum import StrEnum
 
 from torch.distributed.device_mesh import DeviceMesh, init_device_mesh
 
-from ..trainer.config import ParallelConfig
+from hpmesh.trainer.config import ParallelConfig
+
 from ..utils.device import device_type
 
 logger = logging.getLogger(__name__)

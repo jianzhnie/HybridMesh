@@ -41,7 +41,8 @@ import torch
 import torch.nn as nn
 from torch.distributed.device_mesh import DeviceMesh
 
-from ...trainer.config import HybridMeshConfig
+from hpmesh.trainer.config import ParallelConfig
+
 from .linear import AllGatherLinear, LinearReduceScatter
 
 ShardKind = Literal["colwise", "rowwise"]
@@ -212,7 +213,7 @@ def _enable_symm_mem(group) -> None:
 def apply_tp(
     model: nn.Module,
     mesh: DeviceMesh | None,
-    cfg: HybridMeshConfig,
+    cfg: ParallelConfig,
     plan=None,
 ) -> nn.Module:
     """Tensor-parallelize ``model`` in place. No-op when ``tp == 1``.
