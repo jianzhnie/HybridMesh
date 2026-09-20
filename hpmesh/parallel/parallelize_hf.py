@@ -5,6 +5,11 @@ declared first, ``torch.compile`` sits between, and FSDP wraps last so its hooks
 sit outermost. Each ``apply_*`` is a no-op when its degree is 1, so the same call
 runs from a single device up to a full hybrid mesh.
 
+PP is the exception to "one model in, one model out": with ``pp > 1`` the model
+is cut into per-stage chunks first (``pipeline_parallel.apply_pp``), each chunk
+goes through TP / compile / FSDP in the same relative order, and the caller gets
+back a ``PipelineParallelSetup`` (stages, chunks, schedule) instead of a model.
+
 On provenance: this is the *orchestration* half of torchtitan's
 ``parallelize_hf_transformers``. The other half was three things; the first
 two hpmesh deliberately does not do, and dropping them is a decision, not an
@@ -36,31 +41,12 @@ import torch.nn as nn
 from ..trainer.config import HybridMeshConfig
 from .cp_ep import apply_cp_ep
 from .fsdp2.fsdp_wrap import apply_fsdp
+from .pipeline_parallel import PipelineParallelSetup, apply_pp, build_pipeline_schedule
 from .tensor_parallel.tp import apply_tp
 
 logger = logging.getLogger(__name__)
 
-__all__ = ["parallelize_hf_transformers"]
-
-
-def _reject_pp(parallel_dims) -> None:
-    """Fail loudly on ``pp > 1``, which no code here can honour.
-
-    ``pipeline_parallel/pipeline.py`` can split a model into stages, but nothing
-    builds a schedule over them, so a PP run would train every rank on the whole
-    model and look like a working job. Raising here -- before the loop starts --
-    is the only outcome that is not silently wrong.
-
-    ``parallel_dims`` is ``None`` in the single-process case, where there is no
-    mesh and so no PP to reject.
-    """
-    if parallel_dims is not None and parallel_dims.pp_enabled:
-        raise NotImplementedError(
-            "pipeline parallelism is not wired: "
-            "parallel/pipeline_parallel/pipeline.py splits the model into "
-            "stages, but no schedule drives them. Set pp=1, or see "
-            "docs/hybridmesh_design.md, stage 4."
-        )
+__all__ = ["PipelineParallelSetup", "parallelize_hf_transformers"]
 
 
 def parallelize_hf_transformers(
@@ -69,12 +55,34 @@ def parallelize_hf_transformers(
     cfg: HybridMeshConfig,
     mesh,
     parallel_dims,
-) -> nn.Module:
+    device: torch.device | None = None,
+) -> nn.Module | PipelineParallelSetup:
     """Apply every parallelism dimension the config asks for, in order.
 
-    Returns the (possibly wrapped) model.
+    Returns the (possibly wrapped) model -- or, with ``pp > 1``, a
+    ``PipelineParallelSetup``: pipeline parallelism cuts the model into
+    per-stage chunks, so there is no single module left to return. The two
+    return shapes are how the caller learns which case it is in.
     """
-    _reject_pp(parallel_dims)
+    if parallel_dims is not None and parallel_dims.pp_enabled:
+        # PP owns the per-chunk application of the other dimensions: each
+        # stage's chunk goes through tp/(compile)/fsdp inside apply_pp, in the
+        # same relative order as below. The dense (dp, cp, tp) ``mesh`` is not
+        # passed down because it does not cover the world under PP; apply_pp
+        # resolves the per-stage views off parallel_dims itself.
+        stages, model_parts, has_first_stage, has_last_stage = apply_pp(
+            model,
+            parallel_dims=parallel_dims,
+            cfg=cfg,
+            device=device if device is not None else next(model.parameters()).device,
+        )
+        return PipelineParallelSetup(
+            schedule=build_pipeline_schedule(stages, cfg=cfg),
+            stages=stages,
+            model_parts=model_parts,
+            has_first_stage=has_first_stage,
+            has_last_stage=has_last_stage,
+        )
 
     # The EP group lives on the sparse mesh, not the dense (dp, cp, tp) mesh
     # the apply_* functions are handed, so it is resolved here from

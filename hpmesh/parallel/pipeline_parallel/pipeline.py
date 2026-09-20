@@ -9,11 +9,14 @@ Two independent pieces, usable on their own:
   result in a ``PipelineStage``.
 
 Vendored from torchtitan's ``experiments/transformers_modeling_backend/pipeline.py``.
-Three changes, all removals of torchtitan's protocol layer:
+Three changes, all removals of torchtitan's module layer:
 
 * ``ModuleList`` / ``ModuleDict`` -> the plain ``nn`` equivalents. torchtitan's
-  versions exist so the containers take part in its Module protocol; hpmesh has
-  no protocol, and ``nn.ModuleList`` is what every HF model already uses.
+  versions exist so the containers take part in its module protocol; hpmesh has
+  none, and ``nn.ModuleList`` is what every HF model already uses. The kept
+  layers are re-keyed to their original indices (via ``add_module``), because a
+  fresh ``ModuleList`` would renumber them and two stages' state-dict keys would
+  collide in one checkpoint.
 * ``Identity.Config().build()`` -> ``nn.Identity()``.
 * ``get_mesh`` defaults to ``None``. torchtitan passes a callback so each stage
   can rebuild a DTensor from the plain tensor it receives from the previous stage
@@ -217,17 +220,16 @@ def split_model_into_stages(
                         indices_to_keep = {
                             int(idx) for idx in layers_to_keep if idx.isdigit()
                         }
-                        setattr(
-                            model,
-                            module_name,
-                            nn.ModuleList(
-                                [
-                                    layer
-                                    for i, layer in enumerate(module_value)
-                                    if i in indices_to_keep
-                                ]
-                            ),
-                        )
+                        # add_module with the ORIGINAL index as the key: a
+                        # plain ``nn.ModuleList(kept)`` would renumber the kept
+                        # layers from 0, and two stages' state-dict keys would
+                        # then collide ("layers.0.*" meaning different layers
+                        # on different ranks) in one shared checkpoint.
+                        kept_layers = nn.ModuleList()
+                        for i, layer in enumerate(module_value):
+                            if i in indices_to_keep:
+                                kept_layers.add_module(str(i), layer)
+                        setattr(model, module_name, kept_layers)
                 else:
                     # This stage uses none of the container's layers.
                     if isinstance(module_value, nn.ModuleDict):

@@ -7,11 +7,10 @@
 """The projections a ``models/common`` model applies, where they differ from ``nn``.
 
 Vendored from torchtitan ``models/common/linear.py``. Upstream ``Linear`` is a
-diamond subclass of ``nn.Linear`` + ``Module`` so that ``Module.Config`` can
-build it; hpmesh has no config protocol and ``nn.Linear(in, out, bias)` is the
-whole construction, so that class is not carried over -- a model that wants a
-plain projection uses ``nn.Linear`` / the ``parallel.tensor_parallel`` wrappers
-directly, which is what ``dist_gemm`` and ``tp`` already do.
+diamond subclass of ``nn.Linear`` + ``Module`` so that a config can build it;
+that class is not carried over -- a model that wants a plain projection uses
+``nn.Linear`` / the ``parallel.tensor_parallel`` wrappers directly, which is
+what ``dist_gemm`` and ``tp`` already do.
 
 What is kept is the two classes whose forward is NOT ``nn.Linear``:
 
@@ -24,12 +23,11 @@ E = number of experts.
 
 from __future__ import annotations
 
+import spmd_types as spmd
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from torch.autograd.function import once_differentiable
-
-import spmd_types as spmd
 
 from hpmesh.parallel.spmd_types import spmd_mesh_group
 
