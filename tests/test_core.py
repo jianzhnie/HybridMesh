@@ -11,6 +11,7 @@ from __future__ import annotations
 import pytest
 import torch
 
+from hpmesh.components.loss import IGNORE_INDEX, next_token_targets
 from hpmesh.mesh import build_parallel_dims
 from hpmesh.models.hf_wrapper import (
     _ATTN_IMPLEMENTATION,
@@ -266,6 +267,11 @@ def test_wrapper_forward_returns_logits_the_trainer_can_score() -> None:
     Loss is the trainer's business now, so this pins the boundary -- the wrapper
     yields one logit row per input token, and the trainer's next-token
     cross-entropy over those rows is a finite scalar.
+
+    The labels handed to ``_loss_sum`` are already next-token aligned, which is
+    what ``_as_batch`` produces for both loaders; ``_loss_sum`` does no shifting
+    of its own. A sequence whose every position is predictable therefore
+    contributes one prediction per token.
     """
     cfg = HybridMeshConfig(
         training=TrainingArguments(seed=42, max_seq_len=32, global_batch_size=2)
@@ -281,5 +287,11 @@ def test_wrapper_forward_returns_logits_the_trainer_can_score() -> None:
     loss_sum, num_valid_tokens = Trainer._loss_sum(logits, ids)
     assert loss_sum.ndim == 0
     assert float(loss_sum) > 0
-    # One prediction per token except the last: the sequence is shifted by one.
-    assert num_valid_tokens == ids.shape[0] - 1
+    assert num_valid_tokens == ids.shape[0]
+
+    # The trainer's own path marks its row ends IGNORE_INDEX, and those are
+    # then excluded from the denominator rather than silently counted.
+    row_aware = next_token_targets(ids, seq_len=cfg.max_seq_len)
+    _, counted = Trainer._loss_sum(logits, row_aware)
+    assert counted == int((row_aware != IGNORE_INDEX).sum())
+    assert counted == ids.shape[0] - cfg.global_batch_size

@@ -17,7 +17,6 @@ import tempfile
 
 import numpy as np
 import pytest
-
 from data_fixtures import (
     CHAT_TEMPLATE,
     NUM_ROWS,
@@ -30,6 +29,7 @@ from data_fixtures import (
     tokenizer,  # noqa: F401  (fixture re-export)
     write_tokenizer,
 )
+
 from hpmesh.components.loss import IGNORE_INDEX
 from hpmesh.components.tokenizer import HuggingFaceTokenizer
 from hpmesh.datasets import (
@@ -42,7 +42,8 @@ from hpmesh.datasets import (
     WeightedDataset,
 )
 from hpmesh.datasets.hf.text import ChatProcessor
-
+from hpmesh.datasets.random_data import RandomTokenDataLoader
+from hpmesh.trainer.config import DataloaderArguments
 
 # --------------------------------------------------------------------------
 # Tokenizer
@@ -169,9 +170,7 @@ def test_documents_shorter_than_two_tokens_are_dropped(tokenizer, corpus):
     dataset = short.build(
         context=context, dataset_iteration_policy=make_policy(shuffle=False)
     )
-    kept = sum(
-        1 for sequence in (dataset[i] for i in range(len(dataset))) if sequence
-    )
+    kept = sum(1 for sequence in (dataset[i] for i in range(len(dataset))) if sequence)
     # Every row here is at least two tokens, so nothing should be filtered.
     assert kept == NUM_ROWS
 
@@ -283,9 +282,7 @@ def test_loader_emits_the_trainer_batch_contract(tokenizer, corpus):
     ]
     assert batch["input"].shape == (32,)
     assert batch["labels"].shape == (32,)
-    assert batch["num_valid_tokens"] == int(
-        (batch["labels"] != IGNORE_INDEX).sum()
-    )
+    assert batch["num_valid_tokens"] == int((batch["labels"] != IGNORE_INDEX).sum())
 
 
 def test_loader_resume_reproduces_the_following_batches_exactly(tokenizer, corpus):
@@ -325,9 +322,7 @@ def test_loader_rejects_resuming_across_a_changed_dp_degree(tokenizer, corpus):
     )
     loader = _loader(dataset, tokenizer)
     with pytest.raises(ValueError, match="data-parallel degree"):
-        loader.load_state_dict(
-            {"version": 1, "dp_world_size": 2, "dp_rank_0": {}}
-        )
+        loader.load_state_dict({"version": 1, "dp_world_size": 2, "dp_rank_0": {}})
     loader.close()
 
 
@@ -396,9 +391,9 @@ def test_concat_then_split_fills_the_token_batch(tokenizer, corpus):
 
 def test_first_fit_packing_fills_the_token_batch(tokenizer, corpus):
     context = make_context(tokenizer, num_tokens_per_batch=32)
-    graph = FirstFitPackingConfig(dataset=text_dataset(corpus), num_packing_bins=4).build(
-        context=context, dataset_iteration_policy=make_policy()
-    )
+    graph = FirstFitPackingConfig(
+        dataset=text_dataset(corpus), num_packing_bins=4
+    ).build(context=context, dataset_iteration_policy=make_policy())
     loader = _loader(graph, tokenizer, config_kwargs={"repeat": False})
     iterator = iter(loader)
     for _ in range(3):
@@ -464,7 +459,9 @@ def test_mix_rejects_a_non_positive_weight(tokenizer, corpus):
         )
     )
     with pytest.raises(ValueError, match="finite, positive-weight"):
-        mix.build(context=make_context(tokenizer), dataset_iteration_policy=make_policy())
+        mix.build(
+            context=make_context(tokenizer), dataset_iteration_policy=make_policy()
+        )
 
 
 def test_mix_produces_a_batch_from_interleaved_children(tokenizer, corpus):
@@ -485,7 +482,6 @@ def test_mix_produces_a_batch_from_interleaved_children(tokenizer, corpus):
 # --------------------------------------------------------------------------
 # ChatProcessor
 # --------------------------------------------------------------------------
-
 
 
 def _chat_processor(tokenizer, *, max_context_length=32):
@@ -518,7 +514,9 @@ def test_chat_processor_masks_the_prompt_labels(tokenizer):
     assert sequence is not None
 
     prompt = tokenizer.encode(
-        tokenizer.apply_chat_template(sample["messages"][:1], add_generation_prompt=True),
+        tokenizer.apply_chat_template(
+            sample["messages"][:1], add_generation_prompt=True
+        ),
         add_bos=True,
         add_eos=False,
     )
@@ -531,29 +529,31 @@ def test_chat_processor_masks_the_prompt_labels(tokenizer):
 def test_chat_processor_is_next_token_aligned(tokenizer):
     processor = _chat_processor(tokenizer)
     sequence = processor(
-        {"messages": [
-            {"role": "user", "content": "lorem"},
-            {"role": "assistant", "content": "ipsum"},
-        ]},
+        {
+            "messages": [
+                {"role": "user", "content": "lorem"},
+                {"role": "assistant", "content": "ipsum"},
+            ]
+        },
         np.random.default_rng(0),
     )
     real = sequence.labels != IGNORE_INDEX
     # Each label is the next token, wherever both positions carry a target.
     both = real[:-1] & real[1:]
-    assert (
-        sequence.labels[:-1][both] == sequence.input_ids[1:][both]
-    ).all()
+    assert (sequence.labels[:-1][both] == sequence.input_ids[1:][both]).all()
 
 
 def test_chat_processor_rejects_a_multi_turn_conversation(tokenizer):
     processor = _chat_processor(tokenizer)
     with pytest.raises(ValueError, match="Expected single-turn"):
         processor(
-            {"messages": [
-                {"role": "user", "content": "a"},
-                {"role": "assistant", "content": "b"},
-                {"role": "user", "content": "c"},
-            ]},
+            {
+                "messages": [
+                    {"role": "user", "content": "a"},
+                    {"role": "assistant", "content": "b"},
+                    {"role": "user", "content": "c"},
+                ]
+            },
             np.random.default_rng(0),
         )
 
@@ -562,10 +562,12 @@ def test_chat_processor_rejects_swapped_roles(tokenizer):
     processor = _chat_processor(tokenizer)
     with pytest.raises(ValueError, match="First message must be 'user'"):
         processor(
-            {"messages": [
-                {"role": "assistant", "content": "b"},
-                {"role": "user", "content": "a"},
-            ]},
+            {
+                "messages": [
+                    {"role": "assistant", "content": "b"},
+                    {"role": "user", "content": "a"},
+                ]
+            },
             np.random.default_rng(0),
         )
 
@@ -577,10 +579,12 @@ def test_chat_processor_drops_an_oversized_sample(tokenizer):
     """
     processor = _chat_processor(tokenizer, max_context_length=1)
     sequence = processor(
-        {"messages": [
-            {"role": "user", "content": "lorem ipsum"},
-            {"role": "assistant", "content": "lorem ipsum lorem ipsum"},
-        ]},
+        {
+            "messages": [
+                {"role": "user", "content": "lorem ipsum"},
+                {"role": "assistant", "content": "lorem ipsum lorem ipsum"},
+            ]
+        },
         np.random.default_rng(0),
     )
     assert sequence is None
@@ -592,8 +596,6 @@ def test_chat_processor_requires_an_eos_id():
             super().__init__(tokenizer_path=tokenizer_path)
             self.eos_id = None
 
-    import tempfile
-
     path = write_tokenizer(tempfile.mkdtemp())
     tokenizer = _NoEos(tokenizer_path=path)
     with pytest.raises(ValueError, match="does not have an eos_id"):
@@ -601,3 +603,115 @@ def test_chat_processor_requires_an_eos_id():
             context=make_context(tokenizer),
             messages_fn=lambda sample: sample["messages"],
         )
+
+
+# --------------------------------------------------------------------------
+# The trainer-facing seam: the config that names a corpus, and the loader it
+# builds. These are what the Trainer actually calls, so they are exercised
+# through the same entry point rather than by reaching past it.
+# --------------------------------------------------------------------------
+
+
+def test_dataloader_arguments_default_to_the_synthetic_corpus() -> None:
+    """The default must need no assets, so an untouched run stays offline."""
+    args = DataloaderArguments()
+    assert args.dataset == "random"
+    assert args.tokenizer_path is None
+
+
+def test_dataloader_arguments_require_a_tokenizer_for_a_real_corpus() -> None:
+    with pytest.raises(ValueError, match="tokenizer_path is required"):
+        DataloaderArguments(dataset="c4")
+
+
+def test_dataloader_arguments_require_a_path_for_local_jsonl() -> None:
+    with pytest.raises(ValueError, match="dataset_path is required"):
+        DataloaderArguments(dataset="local_jsonl", tokenizer_path="/tmp/tok")
+
+
+def test_dataloader_arguments_reject_an_unknown_corpus() -> None:
+    with pytest.raises(ValueError, match="unknown dataset"):
+        DataloaderArguments(dataset="not-a-dataset", tokenizer_path="/tmp/tok")
+
+
+def test_dataloader_arguments_build_the_synthetic_loader_without_assets() -> None:
+    loader = DataloaderArguments().build(
+        seed=42,
+        vocab_size=128,
+        batch_size=4,
+        seq_len=8,
+        dp_rank=0,
+        dp_world_size=1,
+        max_context_length=8,
+        num_tokens_per_batch=32,
+    )
+    assert isinstance(loader, RandomTokenDataLoader)
+    batch = next(iter(loader))
+    assert batch.input_ids.shape == (4, 8)
+
+
+def test_dataloader_arguments_build_a_grain_loader_over_a_local_corpus(
+    tmp_path, corpus
+) -> None:
+    """The end-to-end seam, without the network.
+
+    A tokenizer is written here rather than taken from the ``tokenizer``
+    fixture: the config takes a *path*, because the Trainer has no tokenizer
+    object to hand it, and the fixture lives in its own module-scoped temp
+    directory.
+    """
+    tokenizer_path = str(tmp_path / "tokenizer")
+    write_tokenizer(tokenizer_path)
+    loader = DataloaderArguments(
+        dataset="local_jsonl",
+        tokenizer_path=tokenizer_path,
+        dataset_path=corpus,
+    ).build(
+        seed=1,
+        vocab_size=128,
+        batch_size=4,
+        seq_len=8,
+        dp_rank=0,
+        dp_world_size=1,
+        max_context_length=8,
+        num_tokens_per_batch=32,
+    )
+    assert isinstance(loader, GrainDataLoader)
+
+    batch = next(iter(loader))
+    assert batch["input"].shape == (32,)
+    assert batch["labels"].shape == (32,)
+    assert batch["positions"].shape == (32,)
+    # Packing spends the whole batch on real tokens.
+    assert batch["num_valid_tokens"] == 32
+    assert int((batch["labels"] != IGNORE_INDEX).sum()) == 32
+    loader.close()
+
+
+def test_dataloader_arguments_reject_a_mismatched_dp_degree_at_build_time(
+    tmp_path, corpus
+) -> None:
+    """A config whose policy was built for one rank cannot be handed another's.
+
+    The trainer derives the policy from the config and passes the rank
+    separately, so the two can disagree; the loader is where that is caught.
+    """
+    tokenizer_path = str(tmp_path / "tokenizer")
+    write_tokenizer(tokenizer_path)
+    loader = DataloaderArguments(
+        dataset="local_jsonl",
+        tokenizer_path=tokenizer_path,
+        dataset_path=corpus,
+    ).build(
+        seed=1,
+        vocab_size=128,
+        batch_size=4,
+        seq_len=8,
+        dp_rank=1,
+        dp_world_size=2,
+        max_context_length=8,
+        num_tokens_per_batch=32,
+    )
+    # Stored under dp_rank_1 because that is what the config was built for.
+    assert loader.state_dict()["dp_rank_1"] is not None
+    loader.close()

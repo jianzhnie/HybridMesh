@@ -80,7 +80,8 @@ def write_tokenizer(dirpath: str, *, extra_vocab: dict[str, int] | None = None) 
         }
         for token, token_id in extras.items():
             assert added.get(token) == token_id, (
-                f"tokenizer assigned {token!r} id {added.get(token)}, expected {token_id}"
+                f"tokenizer assigned {token!r} id {added.get(token)}, "
+                f"expected {token_id}"
             )
     tokenizer.save(os.path.join(dirpath, "tokenizer.json"))
 
