@@ -42,22 +42,27 @@ torchrun --nproc_per_node=2 -m hpmesh --data_parallel_shard_degree 2
 
 | 文件 | 核心概念 | 状态 |
 |---|---|---|
-| `hpmesh/trainer/config.py` | 分组组合配置 + `derive_dp`（`world_size = dp*cp*tp*pp`） | 可运行 |
+| `hpmesh/trainer/config.py` | 分组组合配置（Model / Parallel / Optimizer / Training）+ 校验 | 可运行 |
 | `hpmesh/mesh.py` | **DeviceMesh / 进程拓扑** + torchrun 初始化 | 可运行 |
 | `hpmesh/models/hf_wrapper.py` | HF 模型包装成统一的 decoder forward（返回 logits，loss 在 trainer 里算） | 可运行 |
 | `hpmesh/trainer/trainer.py` | 训练循环：`train` -> `train_step` -> `forward_backward_step`，token 归一化 loss + 梯度裁剪 + 非有限值检测 | 可运行 |
 | `hpmesh/datasets/random_data.py` | `Batch` + 无限微批次迭代器（源耗尽即中止整步，不训练半个 batch） | 可运行 |
-| `hpmesh/components/checkpointer/checkpoint.py` | 每 rank 一份检查点，`step` / `ntokens_seen` / 模型 / 优化器，可续训 | 可运行 |
+| `hpmesh/datasets/{loader,sources,packing,hf/text}.py` | Grain 数据层：语料 -> 打包 -> 每 DP rank 分片；`DATALOADER` 状态进 checkpoint | 可运行 |
+| `hpmesh/datasets/hf/multimodal/` | 多模态语料（图/视频/文本处理器 + collator）——**尚未接线**：只有单测在调 | 已实现 |
+| `hpmesh/components/checkpointer/{base,dcp,torch_checkpointing}.py` | 每 rank 一份检查点，`step` / `ntokens_seen` / 模型 / 优化器，可续训；`base.py` 是共用骨架，两种后端各一个 manager | 可运行 |
 | `hpmesh/components/loss.py` | 交叉熵（含 vocab-parallel 形式）+ next-token 目标构造 | 已实现 |
+| `hpmesh/components/{lr_scheduler,metrics,profiler}.py` | WSD 学习率调度 + 训练指标 + profiler | 可运行 |
 | `hpmesh/parallel/collectives.py` | mesh 感知的 `dist_sum` / `dist_max` / `clip_grad_norm_`（跨 PP stage 归约范数） | 可运行 |
 | `hpmesh/parallel/fsdp2/fsdp.py` | 数据并行（FSDP2 `fully_shard`） | 已实现 |
 | `hpmesh/parallel/tensor_parallel/linear.py` | async-TP 融合原语（`AllGatherLinear` / `LinearReduceScatter`） | 已实现（CUDA） |
 | `hpmesh/parallel/tensor_parallel/tp.py` | 张量并行（声明式 sharding -> 融合原语） | 已实现（CUDA） |
-| `hpmesh/parallel/pipeline_parallel/pipeline.py` | PP 的 stage 切分（**缺 schedule，`pp>1` 会报错**） | 一半 |
-| `hpmesh/parallel/cp_ep.py` | 上下文并行 / 专家并行 | 学习练习 |
+| `hpmesh/parallel/pipeline_parallel/{pipeline,pp}.py` | PP：stage 切分 + `apply_pp` / schedule 驱动（1F1B 闭环，pp+cp/ep 未接线） | 已实现 |
+| `hpmesh/parallel/cp_ep.py` + `context_parallel/` + `ep.py` | 上下文并行（KV all-gather 接线）/ 专家并行（Qwen3Moe MoE 替换 + all-to-all） | 已实现 |
 | `hpmesh/trainer/train.py` | 入口：`HfArgumentParser` 解析 config -> `Trainer(cfg).train()` | 可运行 |
 
-结构审计见 `docs/hpmesh_structure.md`；设计（两个缝）见 `docs/hybridmesh_design.md`。
+结构审计见 `docs/hpmesh_structure.md`；设计见 `docs/hybridmesh_design.md`
+（`docs/FRAMEWORK_DESIGN.md` 是**立项前的评估稿，已归档**，其中的 `hftrain/`
+目录骨架未落地，读之前先看它的抬头）。
 
 ## 学习路径
 
@@ -67,8 +72,8 @@ torchrun --nproc_per_node=2 -m hpmesh --data_parallel_shard_degree 2
 第 0 步  单设备纯训练      已实现   python -m hpmesh --steps 20
 第 1 步  +FSDP 数据并行    已实现   torchrun --nproc_per_node=2 -m hpmesh --data_parallel_shard_degree 2
 第 2 步  +TP 张量并行      已实现   parallel/tensor_parallel/ (声明式 -> 融合 GEMM)
-第 3 步  +PP 流水线并行    练习     parallel/pipeline_parallel/ (缺 1F1B 调度)
-第 4 步  +CP 或 EP         练习     parallel/cp_ep.py (KV all-gather / all-to-all)
+第 3 步  +PP 流水线并行    已实现   parallel/pipeline_parallel/ (1F1B 闭环, pp_equivalence 对拍)
+第 4 步  +CP 或 EP         已实现   parallel/cp_ep.py + context_parallel/ + ep.py (KV all-gather / all-to-all)
 ```
 
 ## 验证方法
@@ -80,7 +85,10 @@ torchrun --nproc_per_node=2 -m hpmesh --data_parallel_shard_degree 2
 
 ## 已知限制
 
-- 依赖：`torch`、`transformers`。TP 那一步才需要独立的 `spmd_types` 包。
+- 依赖：`torch`、`transformers`、`spmd_types`（TP 用到），以及数据层的一组
+  `grain` / `datasets` / `tokenizers` / `jinja2` / `pillow` / `einops` /
+  `torchvision` / `requests`（见 `pyproject.toml` 的注释；后五个只在多模态路径上
+  才被 import，但都声明成了硬依赖）。
 - 第 1 步起的多进程（torchrun + FSDP）需要 **CUDA/NCCL**。在无 CUDA 的机器
   （如 Apple Silicon / MPS）上：第 0 步可正常运行，但 FSDP2 `fully_shard` 面向
   NCCL 设计，在 CPU+gloo 上不可用 —— 请在 GPU 机器上做第 1 步及以后。
@@ -88,6 +96,8 @@ torchrun --nproc_per_node=2 -m hpmesh --data_parallel_shard_degree 2
   `torch.ops.symm_mem.fused_*`（对称内存），本机 `symm_mem.is_available()==False`。
   CPU 上只能验证声明层与权重切分（见 `tests/test_tp.py`），完整的 all-gather /
   reduce-scatter 前反向要在 GPU 上跑。
+- **PP 只支持 `--dataset random`**：打包语料的 `positions` 没有穿过 schedule 的通道
+  （`pp.py` 里显式 raise）。见 `docs/hybridmesh_design.md` §5.5。
 
 ## License
 

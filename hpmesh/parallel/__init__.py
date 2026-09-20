@@ -2,7 +2,7 @@
 
 Each dimension gets its own module, except the two that come as a pair and are
 therefore subpackages: ``tensor_parallel/{tp,linear}`` (the declaration and the
-fused GEMMs it realizes into) and ``fsdp2/{fsdp,fsdp_wrap}`` (torchtitan's
+fused GEMMs it realizes into) and ``fully_shard/{fsdp,fsdp_wrap}`` (torchtitan's
 vendored sharding logic behind a thin driver).
 
 Every ``apply_*`` is a no-op when its degree is 1. That is what lets the same
@@ -19,7 +19,7 @@ the stage split and ``pp.py`` builds the schedule over this rank's stages.
 from __future__ import annotations
 
 from .cp_ep import apply_cp_ep
-from .fsdp2.fsdp_wrap import apply_fsdp
+from .fully_shard.fsdp_wrap import apply_fsdp
 from .parallelize_hf import parallelize_hf_transformers
 from .tensor_parallel.tp import apply_tp
 

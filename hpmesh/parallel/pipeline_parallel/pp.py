@@ -34,7 +34,7 @@ from torch.distributed.pipelining.schedules import (
 
 from ...components.loss import cross_entropy_loss
 from ...trainer.config import HybridMeshConfig, ParallelConfig
-from ..fsdp2.fsdp_wrap import apply_fsdp
+from ..fully_shard.fsdp_wrap import apply_fsdp
 from ..parallel_dims import ParallelDims
 from ..tensor_parallel.tp import apply_tp
 from .pipeline import generate_llm_fqn_per_model_part, split_model_into_stages
@@ -60,7 +60,9 @@ class PipelineParallelSetup:
     has_last_stage: bool
 
 
-def _scalar_loss_fn(pred: torch.Tensor, labels: torch.Tensor) -> torch.Tensor:
+def _scalar_loss_fn(
+    pred: torch.Tensor, labels: torch.Tensor, **loss_kwargs
+) -> torch.Tensor:
     """Summed next-token CE over one microbatch, as a bare scalar.
 
     Same arithmetic as ``Trainer._loss_sum``: ``labels`` arrives already
@@ -69,8 +71,16 @@ def _scalar_loss_fn(pred: torch.Tensor, labels: torch.Tensor) -> torch.Tensor:
     ``loss_fn(output, target)`` and backward the result directly, so the
     trainer's pair-returning version cannot be handed over -- this is the same
     computation in the shape the schedule needs.
+
+    ``global_valid_tokens`` arrives through the schedule's ``loss_kwargs`` (it
+    has to: the denominator spans every rank and every microbatch, so no single
+    call could compute it). Dividing here is what makes the schedule's own
+    backward produce summed/G -- the step's normalized gradient -- with one
+    division per microbatch instead of a rescale applied afterwards.
+
+    The caller divides it back out for reporting.
     """
-    return cross_entropy_loss(pred, labels)
+    return cross_entropy_loss(pred, labels) / loss_kwargs["global_valid_tokens"]
 
 
 def _get_pipeline_metadata(
