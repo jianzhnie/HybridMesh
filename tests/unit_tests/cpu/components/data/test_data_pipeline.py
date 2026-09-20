@@ -151,7 +151,7 @@ def test_repeat_reshuffles_each_epoch_when_shuffle_is_on(tokenizer, corpus):
     assert first != second
 
 
-def test_too_few_rows_for_the_dp_degree_raises(tokenizer, corpus):
+def test_too_few_rows_for_the_dp_size_raises(tokenizer, corpus):
     """The slice arithmetic cannot be carried out below one row per rank."""
     with pytest.raises(ValueError, match="fewer than dp_world_size"):
         text_dataset(corpus).build(
@@ -317,7 +317,7 @@ def test_loader_resume_reproduces_the_following_batches_exactly(tokenizer, corpu
     behind.close()
 
 
-def test_loader_rejects_resuming_across_a_changed_dp_degree(tokenizer, corpus):
+def test_loader_rejects_resuming_across_a_changed_dp_size(tokenizer, corpus):
     dataset = text_dataset(corpus).build(
         context=make_context(tokenizer, num_tokens_per_batch=32),
         dataset_iteration_policy=make_policy(repeat=True),
@@ -703,7 +703,7 @@ def test_dataloader_arguments_build_a_grain_loader_over_a_local_corpus(
     loader.close()
 
 
-def test_dataloader_arguments_reject_a_mismatched_dp_degree_at_build_time(
+def test_dataloader_arguments_reject_a_mismatched_dp_size_at_build_time(
     tmp_path, corpus
 ) -> None:
     """A config whose policy was built for one rank cannot be handed another's.

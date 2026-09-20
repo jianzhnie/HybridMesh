@@ -1,11 +1,13 @@
-"""``ParallelDims`` assignment and mesh resolution: the guards, not the happy path.
+"""``ParallelDims`` and the config layer that resolves it: guards, not happy path.
 
-The derivation arithmetic (``dp == world_size / (cp * tp * pp)`` and friends)
-already has coverage in ``test_core.py``. What is pinned here is the part a
-successful run never executes: the checks that reject an inconsistent
-assignment, and the two mesh lookups that fail *because* an axis is disabled.
-Those are the paths that turn a misconfigured run into a stack trace instead of
-a silent wrong-size process group, and nothing was executing them.
+Two things live here. The first is the derivation chain a config walks before a
+process group exists -- ``ParallelConfig.derive_dp`` -> ``build_parallel_dims``
+-> ``ParallelDims`` -- where a mis-sized launch has to fail with a config-level
+message rather than deep inside mesh construction. The second is the part a
+successful run never executes: the assignment guards that reject an inconsistent
+size, and the two mesh lookups that fail *because* an axis is disabled. Those are
+the paths that turn a misconfigured run into a stack trace instead of a silent
+wrong-size process group.
 
 ``build_mesh`` is what needs a real process group, so the mesh tests run behind a
 single-rank gloo group -- the same fixture shape as ``test_pipeline.py``.
@@ -18,7 +20,13 @@ import torch
 import torch.distributed as dist
 from torch.distributed.device_mesh import init_device_mesh
 
+from hpmesh.mesh import build_parallel_dims
 from hpmesh.parallel.parallel_dims import ParallelDims
+from hpmesh.trainer import HybridMeshConfig, ParallelConfig
+
+
+def _config(**parallel_kw) -> HybridMeshConfig:
+    return HybridMeshConfig(parallel=ParallelConfig(**parallel_kw))
 
 
 @pytest.fixture(scope="module")
@@ -72,7 +80,7 @@ def test_ep_that_divides_is_accepted() -> None:
     assert dims.dp_shard * dims.cp * dims.tp == 8
 
 
-def test_a_non_positive_degree_is_rejected() -> None:
+def test_a_non_positive_size_is_rejected() -> None:
     """A zero degree would divide by zero deep in the mesh builder."""
     with pytest.raises(AssertionError):
         _dims(world_size=8, dp_shard=0)
@@ -144,6 +152,91 @@ def test_a_multi_axis_request_returns_one_mesh_from_the_cache(
     assert first is second
 
 
+# -- config resolution: derive_dp and build_parallel_dims ---------------------
+
+
+def test_derive_dp_derives_from_world_size() -> None:
+    """``-1`` means "use whatever is left", not "1"."""
+    cfg = _config(data_parallel_shard_size=-1)
+    assert cfg.derive_dp(world_size=8) == 8
+    assert cfg.derive_dp(world_size=4) == 4
+
+
+def test_derive_dp_rejects_inconsistent_sizes() -> None:
+    """A pinned dp_shard that does not multiply out to world_size is a launch bug."""
+    cfg = _config(data_parallel_shard_size=1)
+    with pytest.raises(ValueError):
+        cfg.derive_dp(world_size=2)
+
+
+def test_derive_dp_rejects_indivisible_world() -> None:
+    cfg = _config(data_parallel_shard_size=-1, tensor_parallel_size=3)
+    with pytest.raises(ValueError):
+        cfg.derive_dp(world_size=8)  # 8 % 3 != 0
+
+
+def test_derive_dp_narrows_by_the_non_dp_sizes() -> None:
+    """tp=2 consumes half the ranks; the rest are data-parallel."""
+    cfg = _config(data_parallel_shard_size=-1, tensor_parallel_size=2)
+    assert cfg.derive_dp(world_size=8) == 4
+
+
+def test_build_parallel_dims_resolves_against_world_size() -> None:
+    """Single process -> no process group, so there is no ``ParallelDims`` at all.
+
+    ``None`` is the sentinel every downstream ``parallel_dims is None`` guard
+    keys on, so returning a degenerate object here would make them all dead.
+    """
+    assert build_parallel_dims(HybridMeshConfig(), world_size=1) is None
+
+    cfg = _config(data_parallel_shard_size=-1, tensor_parallel_size=2)
+    pd = build_parallel_dims(cfg, world_size=8)
+    assert isinstance(pd, ParallelDims)
+    # tp=2 over 8 ranks leaves 4 for data parallelism; dp_shard=-1 resolves here.
+    assert (pd.tp, pd.dp_shard) == (2, 4)
+
+
+def test_derive_dp_matches_parallel_dims_resolution() -> None:
+    """The config helper and the torchtitan-shaped class must agree.
+
+    They compute the same number by different routes -- the config by dividing
+    world_size itself, ``ParallelDims`` inside ``_validate`` -- so a drift
+    between them would make the trainer and the mesh disagree about how many
+    ranks go to data parallelism, silently.
+    """
+    cfg = _config(data_parallel_shard_size=-1, tensor_parallel_size=2)
+    pd = build_parallel_dims(cfg, world_size=8)
+    assert cfg.derive_dp(world_size=8) == pd.dp_shard
+
+
+def test_cp_only_still_needs_a_loss_reduction() -> None:
+    """cp > 1 with dp = 1 shards the sequence but leaves the DP axis empty.
+
+    The loss is summed over each rank's own *slice* of the sequence, so with
+    only CP on, a dp-only reduction would be over a size-1 group: every rank
+    would report its own shard's loss as the whole batch's. The trainer
+    therefore gates the loss reduce-group on ``dp_cp_enabled`` (dp *or* cp)
+    rather than on how dense the mesh is.
+
+    Only the flags are asserted here -- the group sizes they select need a live
+    process group (``get_optional_mesh`` builds meshes). The sizes themselves
+    are pinned by the ``expected_sizes`` table in ``parallel_dims.py``, which
+    is what makes the property sufficient: ``loss`` is defined there as
+    ``dp_replicate * dp_shard * cp``, so choosing it is choosing a group that
+    spans the cp axis. The end-to-end version runs under torchrun in
+    ``tests/integration_tests/cp_wiring_equivalence.py``.
+    """
+    cfg = _config(data_parallel_shard_size=1, context_parallel_size=2)
+    pd = build_parallel_dims(cfg, world_size=2)
+    assert isinstance(pd, ParallelDims)
+
+    assert pd.cp_enabled
+    assert not pd.dp_enabled
+    # The property the trainer gates on: either axis alone is enough. Gating on
+    # cp alone (or on dp alone) is the bug this pins.
+    assert pd.dp_cp_enabled
+
+
 # -- tensor-parallel declaration layer ---------------------------------------
 
 
@@ -171,59 +264,3 @@ def test_an_unknown_shard_kind_is_rejected() -> None:
 
     with pytest.raises(ValueError, match="Unknown shard kind"):
         ShardingConfig(kind="diagonal", implementation=nn.Linear)
-
-
-# -- pipeline stage arithmetic ------------------------------------------------
-
-
-def test_the_smallest_legal_stage_count_leaves_one_effective_layer_each() -> None:
-    """``num_stages == num_effective_layers`` is the boundary, and it must work.
-
-    One stage below this is rejected by the ``num_stages > num_effective_layers``
-    guard, so this is the tightest split the arithmetic has to survive.
-    """
-    from hpmesh.parallel.pipeline_parallel.pipeline import (
-        generate_llm_fqn_per_model_part,
-    )
-
-    stages = generate_llm_fqn_per_model_part(
-        num_stages=4, num_layers=2, input_weight=1, output_weight=1
-    )
-    assert len(stages) == 4
-
-
-def test_more_stages_than_effective_layers_is_rejected() -> None:
-    """The guard that makes the ``layers_per_stage == 0`` branch unreachable."""
-    from hpmesh.parallel.pipeline_parallel.pipeline import (
-        generate_llm_fqn_per_model_part,
-    )
-
-    with pytest.raises(ValueError, match="cannot be greater than effective"):
-        generate_llm_fqn_per_model_part(
-            num_stages=8, num_layers=2, input_weight=1, output_weight=1
-        )
-
-
-def test_a_weighted_module_must_fit_inside_one_stage() -> None:
-    """A stage holding only the embedding is a stage with no transformer layers."""
-    from hpmesh.parallel.pipeline_parallel.pipeline import (
-        generate_llm_fqn_per_model_part,
-    )
-
-    with pytest.raises(ValueError, match="input_weight .* exceeds minimum"):
-        generate_llm_fqn_per_model_part(
-            num_stages=3, num_layers=1, input_weight=5, output_weight=1
-        )
-    with pytest.raises(ValueError, match="output_weight .* exceeds minimum"):
-        generate_llm_fqn_per_model_part(
-            num_stages=3, num_layers=1, input_weight=1, output_weight=5
-        )
-
-
-def test_a_zero_stage_count_is_rejected() -> None:
-    from hpmesh.parallel.pipeline_parallel.pipeline import (
-        generate_llm_fqn_per_model_part,
-    )
-
-    with pytest.raises(ValueError, match="at least 1"):
-        generate_llm_fqn_per_model_part(num_stages=0, num_layers=2)

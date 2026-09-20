@@ -122,7 +122,7 @@ def main() -> None:
     assert world == 2, f"this check assumes 2 ranks, got {world}"
 
     cfg = HybridMeshConfig(
-        parallel=ParallelConfig(context_parallel_degree=2, backend="gloo"),
+        parallel=ParallelConfig(context_parallel_size=2, backend="gloo"),
         training=TrainingConfig(max_seq_len=SEQ, steps=STEPS),
     )
     parallel_dims = ParallelDims.from_config(cfg.parallel, world)

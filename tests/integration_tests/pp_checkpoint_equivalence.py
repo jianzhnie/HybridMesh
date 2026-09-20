@@ -80,12 +80,12 @@ def _cfg(workdir: str) -> HybridMeshConfig:
             num_key_value_heads=4,
         ),
         parallel=ParallelConfig(
-            pipeline_parallel_degree=2,
+            pipeline_parallel_size=2,
             pipeline_parallel_schedule="1F1B",
             num_pp_microbatches=MICROBATCHES,
             # -1 derives the shard degree from the world size; with pp=2 on 2
             # ranks that leaves dp=1, so both stages see the whole batch.
-            data_parallel_shard_degree=-1,
+            data_parallel_shard_size=-1,
             backend="gloo",
         ),
         optimizer=OptimizerConfig(learning_rate=3e-4, weight_decay=0.0),

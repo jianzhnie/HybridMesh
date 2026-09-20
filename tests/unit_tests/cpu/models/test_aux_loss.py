@@ -142,7 +142,7 @@ def test_carrier_gradient_passes_through_unchanged() -> None:
 
     loss(carrier).sum().backward()
 
-    assert torch.allclose(carrier.grad, torch.ones(4))
+    torch.testing.assert_close(carrier.grad, torch.ones(4), rtol=1e-5, atol=1e-8)
 
 
 def test_aux_loss_receives_gradient_one() -> None:
@@ -159,7 +159,9 @@ def test_aux_loss_receives_gradient_one() -> None:
 
     loss(x, carrier=torch.ones(1, requires_grad=True)).sum().backward()
 
-    assert torch.allclose(x.grad, torch.full((3,), 2 * coeff / denominator))
+    torch.testing.assert_close(
+        x.grad, torch.full((3,), 2 * coeff / denominator), rtol=1e-5, atol=1e-8
+    )
 
 
 def test_aux_gradient_scales_with_coeff() -> None:
@@ -174,7 +176,7 @@ def test_aux_gradient_scales_with_coeff() -> None:
         loss(x, carrier=torch.ones(1, requires_grad=True)).sum().backward()
         grads.append(x.grad.clone())
 
-    assert torch.allclose(grads[1], grads[0] * 3.0)
+    torch.testing.assert_close(grads[1], grads[0] * 3.0, rtol=1e-5, atol=1e-8)
 
 
 def test_aux_gradient_shrinks_with_the_denominator() -> None:
@@ -189,7 +191,7 @@ def test_aux_gradient_shrinks_with_the_denominator() -> None:
         loss(x, carrier=torch.ones(1, requires_grad=True)).sum().backward()
         grads.append(x.grad.clone())
 
-    assert torch.allclose(grads[1], grads[0] / 4.0)
+    torch.testing.assert_close(grads[1], grads[0] / 4.0, rtol=1e-5, atol=1e-8)
 
 
 def test_metric_accumulates_the_scaled_not_the_weighted_value() -> None:
@@ -204,7 +206,9 @@ def test_metric_accumulates_the_scaled_not_the_weighted_value() -> None:
 
     loss(torch.ones(2, requires_grad=True))
 
-    assert torch.allclose(loss.instance_acc, torch.tensor(2.0 / 4.0))
+    torch.testing.assert_close(
+        loss.instance_acc, torch.tensor(2.0 / 4.0), rtol=1e-5, atol=1e-8
+    )
 
 
 def test_metric_accumulates_across_microbatches_within_a_step() -> None:
@@ -214,7 +218,9 @@ def test_metric_accumulates_across_microbatches_within_a_step() -> None:
     loss(torch.ones(2, requires_grad=True))
     loss(torch.ones(2, requires_grad=True))
 
-    assert torch.allclose(loss.instance_acc, torch.tensor(1.0 + 1.0))
+    torch.testing.assert_close(
+        loss.instance_acc, torch.tensor(1.0 + 1.0), rtol=1e-5, atol=1e-8
+    )
 
 
 # -- roll-up and collection --------------------------------------------------
@@ -227,8 +233,11 @@ def test_zero_hook_rolls_instances_into_the_group_and_clears_them() -> None:
 
     _zero_aux_losses([loss])
 
-    assert torch.allclose(
-        AuxLoss.group_acc[("batch", "_constant_loss")], torch.tensor(1.0)
+    torch.testing.assert_close(
+        AuxLoss.group_acc[("batch", "_constant_loss")],
+        torch.tensor(1.0),
+        rtol=1e-5,
+        atol=1e-8,
     )
     assert loss.instance_acc.item() == 0.0
 
@@ -242,8 +251,11 @@ def test_zero_hook_sums_instances_within_one_group() -> None:
 
     _zero_aux_losses([a, b])
 
-    assert torch.allclose(
-        AuxLoss.group_acc[("batch", "_constant_loss")], torch.tensor(4.0)
+    torch.testing.assert_close(
+        AuxLoss.group_acc[("batch", "_constant_loss")],
+        torch.tensor(4.0),
+        rtol=1e-5,
+        atol=1e-8,
     )
 
 
@@ -255,8 +267,11 @@ def test_zero_hook_finds_nested_loss_modules() -> None:
 
     _zero_aux_losses([container])
 
-    assert torch.allclose(
-        AuxLoss.group_acc[("batch", "_constant_loss")], torch.tensor(2.0)
+    torch.testing.assert_close(
+        AuxLoss.group_acc[("batch", "_constant_loss")],
+        torch.tensor(2.0),
+        rtol=1e-5,
+        atol=1e-8,
     )
 
 

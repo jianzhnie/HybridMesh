@@ -94,7 +94,7 @@ def test_cross_entropy_ignores_the_shifted_padding() -> None:
     # Same number as computing the CE over only the three real targets.
     kept_logits = logits[[0, 1, 3]]
     expected = cross_entropy_loss(kept_logits, torch.tensor([1, 2, 6]))
-    assert torch.allclose(total, expected, atol=1e-6)
+    torch.testing.assert_close(total, expected, rtol=1e-5, atol=1e-6)
 
 
 def test_cross_entropy_selects_the_local_path_by_shape() -> None:
@@ -113,7 +113,9 @@ def test_cross_entropy_selects_the_local_path_by_shape() -> None:
 
     full = cross_entropy_loss(logits, targets, tp_group=object(), global_vocab_size=5)
 
-    assert torch.allclose(full, cross_entropy_loss(logits, targets), atol=1e-6)
+    torch.testing.assert_close(
+        full, cross_entropy_loss(logits, targets), rtol=1e-5, atol=1e-6
+    )
 
 
 def test_vocab_shard_bounds_are_contiguous_and_cover_the_vocabulary() -> None:
@@ -164,7 +166,7 @@ def test_clip_scales_gradients_to_the_threshold() -> None:
     assert float(norm) > 1.0
     # After clipping the concatenated gradient vector has norm exactly max_norm.
     clipped = torch.cat([p.grad.reshape(-1) for p in params])
-    assert torch.allclose(clipped.norm(), torch.tensor(1.0), atol=1e-6)
+    torch.testing.assert_close(clipped.norm(), torch.tensor(1.0), rtol=1e-5, atol=1e-6)
 
 
 def test_non_positive_max_norm_reports_the_norm_without_clipping() -> None:
@@ -187,7 +189,7 @@ def test_clip_ignores_parameters_with_no_gradient() -> None:
     params = _graded(False, True)
     norm = clip_grad_norm_(params, max_norm=-1.0)
 
-    assert torch.allclose(norm, torch.tensor(6.0), atol=1e-6)
+    torch.testing.assert_close(norm, torch.tensor(6.0), rtol=1e-5, atol=1e-6)
 
 
 def test_clip_does_not_exhaust_a_generator() -> None:
@@ -786,7 +788,7 @@ def test_loss_sum_scores_every_label_ignored_ones_included() -> None:
     loss_sum = Trainer._loss_sum(logits, labels)
 
     expected = F.cross_entropy(logits.float(), labels, reduction="sum")
-    assert torch.allclose(loss_sum, expected)
+    torch.testing.assert_close(loss_sum, expected, rtol=1e-5, atol=1e-8)
 
 
 def test_loss_sum_makes_one_prediction_per_predictable_label() -> None:
@@ -796,7 +798,7 @@ def test_loss_sum_makes_one_prediction_per_predictable_label() -> None:
     loss_sum = Trainer._loss_sum(logits, labels)
 
     expected = F.cross_entropy(logits.float(), labels, reduction="sum")
-    assert torch.allclose(loss_sum, expected)
+    torch.testing.assert_close(loss_sum, expected, rtol=1e-5, atol=1e-8)
 
 
 def test_checkpoint_carries_a_dataloader_read_position(tmp_path) -> None:
@@ -852,3 +854,39 @@ def test_checkpoint_carries_a_dataloader_read_position(tmp_path) -> None:
     got = next(iter(resumed_loader))
     assert torch.equal(got.input_ids, expected.input_ids)
     assert torch.equal(got.labels, expected.labels)
+
+
+# -- the synthetic data iterator ------------------------------------------------
+
+
+def test_synthetic_batch_is_deterministic() -> None:
+    """Two independent iterators over one config must agree.
+
+    That is what makes two runs comparable and what makes every DP rank see the
+    same global batch without a broadcast.
+    """
+    trainer = _bare_trainer(
+        _cfg_with_batch(global_batch_size=8, max_seq_len=16, seed=42)
+    )
+    first = next(trainer._data_iterator())
+    second = next(trainer._data_iterator())
+
+    assert torch.equal(first.input_ids, second.input_ids)
+    assert first.input_ids.shape == (8, 16)
+    assert torch.equal(first.labels, first.input_ids)
+
+
+def test_dp_slice_partitions_global_batch() -> None:
+    """Two DP ranks' slices must concatenate back to the global batch.
+
+    The slice math is driven directly (no process group): a gap or overlap here
+    would drop or duplicate samples once per step, invisibly.
+    """
+    cfg = _cfg_with_batch(global_batch_size=8, max_seq_len=16, seed=42)
+    batch = next(_bare_trainer(cfg)._data_iterator())
+
+    per_rank = cfg.global_batch_size // 2
+    rank_0 = batch.input_ids[0:per_rank]
+    rank_1 = batch.input_ids[per_rank : 2 * per_rank]
+
+    assert torch.equal(torch.cat([rank_0, rank_1]), batch.input_ids)

@@ -113,7 +113,8 @@ def test_feed_forward_splits_gate_and_up_interleaved() -> None:
         halves = w2(torch.nn.functional.silu(gate_up[:, :HIDDEN]) * gate_up[:, HIDDEN:])
 
     assert torch.equal(out, interleaved)
-    assert not torch.allclose(out, halves, atol=1e-4)
+    with pytest.raises(AssertionError):
+        torch.testing.assert_close(out, halves, rtol=1e-5, atol=1e-4)
 
 
 def test_feed_forward_uses_the_given_activation() -> None:
@@ -131,7 +132,8 @@ def test_feed_forward_uses_the_given_activation() -> None:
         swiglu_out = DistGEMMFeedForward(w13=w13, w2=w2, activation_fn=SwiGLU())(x)
         other_out = DistGEMMFeedForward(w13=w13, w2=w2, activation_fn=DoubleGate())(x)
 
-    assert not torch.allclose(swiglu_out, other_out)
+    with pytest.raises(AssertionError):
+        torch.testing.assert_close(swiglu_out, other_out, rtol=1e-5, atol=1e-8)
 
 
 def test_feed_forward_warns_when_tp_is_off(caplog) -> None:

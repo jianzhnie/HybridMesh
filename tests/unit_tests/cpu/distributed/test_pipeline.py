@@ -112,6 +112,18 @@ def test_weight_larger_than_a_stage_is_rejected() -> None:
         generate_llm_fqn_per_model_part(2, 2, input_weight=5, output_weight=1)
 
 
+def test_the_output_weight_is_guarded_independently_of_the_input_weight() -> None:
+    """The head has its own bound; a small input weight must not shield it.
+
+    ``input_weight`` and ``output_weight`` are separate arguments on the public
+    signature, but the sibling test above raises on ``input_weight`` -- so it
+    would still pass if this branch never ran. That is the shape of a guard
+    that looks covered and is not.
+    """
+    with pytest.raises(ValueError, match="output_weight"):
+        generate_llm_fqn_per_model_part(2, 2, input_weight=1, output_weight=5)
+
+
 # -- split_model_into_stages, over a single-rank gloo group --------------------
 
 _NUM_LAYERS = 4
@@ -206,4 +218,18 @@ def test_split_stages_chain_to_the_full_forward(pp_mesh) -> None:
         reference = model(ids)
         chained = last(first(ids))
 
-    assert torch.allclose(chained, reference, atol=1e-6)
+    torch.testing.assert_close(chained, reference, rtol=1e-5, atol=1e-6)
+
+
+def test_the_smallest_fillable_split_works() -> None:
+    """``num_stages == num_effective_layers`` is the tightest legal split.
+
+    The guard just below this rejects one stage more, so this is the boundary
+    where ``layers_per_stage`` is exactly 1 and the split must still succeed --
+    the case a ``>`` vs ``>=`` slip would break.
+    """
+    # 2 layers + 1 + 1 = 4 effective layers, so 4 stages is exactly fillable.
+    stages = generate_llm_fqn_per_model_part(4, 2, input_weight=1, output_weight=1)
+
+    assert len(stages) == 4
+    assert all(stage for stage in stages), "no stage may be empty"

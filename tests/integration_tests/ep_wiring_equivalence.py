@@ -87,7 +87,7 @@ def main() -> None:
     ep1 = _model()
     swap_hf_moe_blocks(ep1)
     ep2 = _model()
-    apply_ep(ep2, ParallelConfig(expert_parallel_degree=2), ep_group=ep_group)
+    apply_ep(ep2, ParallelConfig(expert_parallel_size=2), ep_group=ep_group)
 
     ids, positions = _data(rank)
     with torch.no_grad():

@@ -1,9 +1,14 @@
-"""Unit tests for the parts that run without a GPU / process group.
+"""`HFTransformerModel`: the seam between the training loop and HuggingFace.
 
-Covers the behaviors verified during prototyping: the world_size constraint,
-deterministic synthetic data, DP batch slicing, and the model wrapper. The config
-is the grouped HybridMeshConfig; the flat view (cfg.steps, cfg.max_seq_len, ...)
-is what the trainer layer reads.
+The wrapper's job is plumbing -- expose the decoder's parts under stable names,
+add the batch dim HF expects, feed RoPE explicit `position_ids`, and route
+attention through a mask -- but three separate layers read those names (FSDP
+walks `layers`, the parallel layer renames `tp_plan`, the trainer scores the
+logits), so a silent change here propagates everywhere.
+
+These run on the sdpa fallback, so the mask exercised below is the one sdpa
+gets. The flex path's own mask handling is covered at the end of the file by
+flipping `_attn_implementation` on the built config.
 """
 
 from __future__ import annotations
@@ -12,165 +17,13 @@ import pytest
 import torch
 
 from hpmesh.components.loss import IGNORE_INDEX, next_token_targets
-from hpmesh.mesh import build_parallel_dims
 from hpmesh.models.hf_wrapper import (
     _ATTN_IMPLEMENTATION,
     HFTransformerModel,
     build_model_config,
     build_model_config_for,
 )
-from hpmesh.parallel.parallel_dims import ParallelDims
-from hpmesh.trainer import HybridMeshConfig, ParallelConfig, TrainingConfig
-from hpmesh.trainer.trainer import Trainer
-
-
-def _cfg(**parallel_kw) -> HybridMeshConfig:
-    return HybridMeshConfig(parallel=ParallelConfig(**parallel_kw))
-
-
-def test_derive_dp_derives_from_world_size() -> None:
-    cfg = _cfg(data_parallel_shard_degree=-1)
-    assert cfg.derive_dp(world_size=8) == 8
-    assert cfg.derive_dp(world_size=4) == 4
-
-
-def test_derive_dp_rejects_inconsistent_degrees() -> None:
-    cfg = _cfg(data_parallel_shard_degree=1)
-    with pytest.raises(ValueError):
-        cfg.derive_dp(world_size=2)
-
-
-def test_derive_dp_rejects_indivisible_world() -> None:
-    cfg = _cfg(data_parallel_shard_degree=-1, tensor_parallel_degree=3)
-    with pytest.raises(ValueError):
-        cfg.derive_dp(world_size=8)  # 8 % 3 != 0
-
-
-def test_derive_dp_narrows_by_the_non_dp_degrees() -> None:
-    # tp=2 consumes half the ranks; the rest are data-parallel.
-    cfg = _cfg(data_parallel_shard_degree=-1, tensor_parallel_degree=2)
-    assert cfg.derive_dp(world_size=8) == 4
-
-
-def test_build_parallel_dims_resolves_against_world_size() -> None:
-    # Single process -> no process group and no parallelism to describe.
-    assert build_parallel_dims(HybridMeshConfig(), world_size=1) is None
-
-    cfg = _cfg(data_parallel_shard_degree=-1, tensor_parallel_degree=2)
-    pd = build_parallel_dims(cfg, world_size=8)
-    assert isinstance(pd, ParallelDims)
-    # tp=2 over 8 ranks leaves 4 for data parallelism; dp_shard=-1 resolves here.
-    assert (pd.tp, pd.dp_shard) == (2, 4)
-
-
-def test_derive_dp_matches_parallel_dims_resolution() -> None:
-    # The config helper and the torchtitan class must agree, or the trainer and
-    # the mesh would disagree about how many ranks go to data parallelism.
-    cfg = _cfg(data_parallel_shard_degree=-1, tensor_parallel_degree=2)
-    pd = build_parallel_dims(cfg, world_size=8)
-    assert cfg.derive_dp(world_size=8) == pd.dp_shard
-
-
-def test_cp_only_still_needs_a_loss_reduction() -> None:
-    """cp > 1 with dp = 1 shards the sequence but leaves the DP axis empty.
-
-    The loss is summed over each rank's own *slice* of the sequence, so with
-    only CP on a dp-only reduction would be over a size-1 group: every rank
-    would report its own shard's loss as the whole batch's. The trainer
-    therefore gates the loss reduce-group on ``dp_cp_enabled`` (dp *or* cp)
-    rather than on how dense the mesh is.
-
-    Only the flags are asserted here -- the group sizes they select need a live
-    process group (``get_optional_mesh`` builds meshes). The sizes themselves
-    are pinned by the ``expected_sizes`` table in ``parallel_dims.py``, which
-    is what makes the property sufficient: ``loss`` is defined there as
-    ``dp_replicate * dp_shard * cp``, so choosing it is choosing a group that
-    spans the cp axis. The end-to-end version runs under torchrun in
-    ``tests/cp_wiring_equivalence.py``.
-    """
-    cfg = _cfg(data_parallel_shard_degree=1, context_parallel_degree=2)
-    pd = build_parallel_dims(cfg, world_size=2)
-    assert isinstance(pd, ParallelDims)
-
-    assert pd.cp_enabled
-    assert not pd.dp_enabled
-    # The property the trainer gates on: either axis alone is enough. Gating on
-    # cp alone (or on dp alone) is the bug this pins.
-    assert pd.dp_cp_enabled
-
-
-def test_cp_must_divide_seq_len() -> None:
-    with pytest.raises(ValueError):
-        HybridMeshConfig(
-            parallel=ParallelConfig(context_parallel_degree=3),
-            training=TrainingConfig(max_seq_len=64),
-        )
-
-
-def test_gradient_accumulation_must_be_at_least_one() -> None:
-    with pytest.raises(ValueError):
-        TrainingConfig(gradient_accumulation_steps=0)
-
-
-def test_accumulation_and_gc_freq_reach_the_flat_view() -> None:
-    """The trainer reads both off ``cfg``, not off ``cfg.training``.
-
-    The flat view is a hand-written list of properties, so a new field on
-    ``TrainingConfig`` stays invisible to the trainer until its passthrough
-    exists. These two are the newest, and the failure mode is an AttributeError
-    on the first training step rather than at parse time.
-    """
-    cfg = HybridMeshConfig(
-        training=TrainingConfig(gradient_accumulation_steps=3, gc_freq=7)
-    )
-    assert cfg.gradient_accumulation_steps == 3
-    assert cfg.gc_freq == 7
-    # The defaults the trainer runs with when nothing is passed.
-    assert HybridMeshConfig().gradient_accumulation_steps == 1
-    assert HybridMeshConfig().gc_freq == 50
-
-
-def _bare_trainer(cfg: HybridMeshConfig) -> Trainer:
-    """A Trainer with __init__ bypassed, for testing pure data helpers."""
-    t = Trainer.__new__(Trainer)
-    t.cfg = cfg
-    return t
-
-
-def test_synthetic_batch_is_deterministic() -> None:
-    cfg = HybridMeshConfig(
-        training=TrainingConfig(global_batch_size=8, max_seq_len=16, seed=42)
-    )
-    t = _bare_trainer(cfg)
-    # Two independent iterators over the same config must agree: that is what
-    # makes two runs comparable and what makes every DP rank see one global batch.
-    b1 = next(t._data_iterator())
-    b2 = next(t._data_iterator())
-    assert torch.equal(b1.input_ids, b2.input_ids)
-    assert b1.input_ids.shape == (8, 16)
-    assert torch.equal(b1.labels, b1.input_ids)
-
-
-def test_dp_slice_partitions_global_batch() -> None:
-    # Simulate 2 DP ranks without a process group by driving the slice math directly.
-    cfg = HybridMeshConfig(
-        training=TrainingConfig(global_batch_size=8, max_seq_len=16, seed=42)
-    )
-    t = _bare_trainer(cfg)
-    batch = next(t._data_iterator())
-    per = cfg.global_batch_size // 2
-    r0 = batch.input_ids[0:per]
-    r1 = batch.input_ids[per : 2 * per]
-    assert torch.equal(torch.cat([r0, r1]), batch.input_ids)
-
-
-# -- the model wrapper (merged in from the former tests/test_hf_wrapper.py) ----
-#
-# The wrapper's job is plumbing: expose the decoder's parts under stable names,
-# add the batch dim HF expects, feed RoPE explicit ``position_ids``, and route
-# attention through a mask. These tests run on the sdpa fallback, so the mask
-# they exercise is the one sdpa gets -- for the flex path's own mask handling,
-# see the ``_apply_attention`` tests at the end of this file.
+from hpmesh.trainer import HybridMeshConfig, TrainingConfig
 
 _HIDDEN = 32
 _VOCAB = 128
@@ -193,15 +46,15 @@ def model() -> HFTransformerModel:
     return HFTransformerModel(config).eval()
 
 
-def test_parts_are_exposed_under_stable_names(model: HFTransformerModel) -> None:
-    assert model.tok_embeddings is not None
-    assert len(model.layers) == 2
-    assert model.norm is not None
-    assert model.lm_head is not None
-    assert model.rotary_emb is not None
+# -- part names ---------------------------------------------------------------
 
 
 def test_named_children_flattens_the_decoder(model: HFTransformerModel) -> None:
+    """Five parts, in the order the parallel layer walks them.
+
+    The names are a contract: ``apply_tp`` matches TP-plan entries against these
+    paths, and FSDP walks the same children to find the transformer blocks.
+    """
     names = [name for name, _ in model.named_children()]
     assert names == ["tok_embeddings", "layers", "norm", "lm_head", "rotary_emb"]
 
@@ -214,10 +67,7 @@ def test_state_dict_does_not_duplicate_tensors(model: HFTransformerModel) -> Non
     assert len(keys) == len(set(keys))
 
 
-def test_attention_masks_is_a_block_mask(model: HFTransformerModel) -> None:
-    positions = torch.arange(8)
-    mask = model.get_attention_masks(positions=positions)
-    assert type(mask).__name__ == "BlockMask"
+# -- forward ------------------------------------------------------------------
 
 
 def test_forward_applies_lm_head_and_gradients_flow(model: HFTransformerModel) -> None:
@@ -240,7 +90,8 @@ def test_positions_drive_rope(model: HFTransformerModel) -> None:
         shifted = model(input_ids, positions=torch.arange(16) + 3)
         repeated = model(input_ids, positions=torch.arange(16))
 
-    assert not torch.allclose(base, shifted)
+    with pytest.raises(AssertionError):
+        torch.testing.assert_close(base, shifted, rtol=1e-5, atol=1e-8)
     assert torch.equal(base, repeated)
 
 
@@ -261,6 +112,12 @@ def test_sdpa_fallback_gives_the_decoder_no_mask(model: HFTransformerModel) -> N
     kwargs = model._apply_attention(torch.arange(16), None)
 
     assert kwargs == {"attention_mask": None}
+
+
+def test_attention_masks_is_a_block_mask(model: HFTransformerModel) -> None:
+    positions = torch.arange(8)
+    mask = model.get_attention_masks(positions=positions)
+    assert type(mask).__name__ == "BlockMask"
 
 
 def test_flex_backend_gets_the_block_mask(model: HFTransformerModel) -> None:
@@ -356,6 +213,8 @@ def test_wrapper_forward_returns_logits_the_trainer_can_score() -> None:
     shifting of its own. A sequence whose every position is predictable
     therefore contributes one prediction per token.
     """
+    from hpmesh.trainer.trainer import Trainer
+
     cfg = HybridMeshConfig(
         training=TrainingConfig(seed=42, max_seq_len=32, global_batch_size=2)
     )

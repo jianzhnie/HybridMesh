@@ -154,7 +154,7 @@ def test_token_zero_is_unrotated() -> None:
     q, _ = _qk()
     with torch.no_grad():
         out = rope(q, None)
-    assert torch.allclose(out[0], q[0], atol=1e-6)
+    torch.testing.assert_close(out[0], q[0], rtol=1e-5, atol=1e-6)
 
 
 def test_complex_rope_inverse_undoes_the_forward_rotation() -> None:
@@ -164,8 +164,8 @@ def test_complex_rope_inverse_undoes_the_forward_rotation() -> None:
     with torch.no_grad():
         q_rot, k_rot = rope(q, k)
         q_back, k_back = rope(q_rot, k_rot, inverse=True)
-    assert torch.allclose(q_back, q, atol=1e-6)
-    assert torch.allclose(k_back, k, atol=1e-6)
+    torch.testing.assert_close(q_back, q, rtol=1e-5, atol=1e-6)
+    torch.testing.assert_close(k_back, k, rtol=1e-5, atol=1e-6)
 
 
 def test_cossin_rope_rejects_inverse_rotation() -> None:
