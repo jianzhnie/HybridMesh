@@ -26,7 +26,9 @@ from hpmesh.components.checkpointer import (
 )
 from hpmesh.components.checkpointer.dcp import _FilesystemCheckpointStorage
 from hpmesh.components.optimizer import OptimizerWrapper, init_optim_state
+from hpmesh.components.optimizer.lr_scheduler import build_lr_scheduler
 from hpmesh.trainer.config import CheckpointConfig as Config
+from hpmesh.trainer.config import LRSchedulerConfig
 
 # -- canonical_fqn ------------------------------------------------------------
 
@@ -116,6 +118,17 @@ def test_config_rejects_hf_safetensors_against_a_remote_folder() -> None:
     raise AssertionError("last_save_in_hf over a remote URI should be rejected")
 
 
+def _schedule(optimizer):
+    """The lr schedule the manager now requires alongside the optimizer.
+
+    A bare scheduler over the bare ``AdamW`` these cases build: the manager
+    checkpoints ``last_epoch`` and nothing else, so the lambda is irrelevant.
+    """
+    return build_lr_scheduler(
+        LRSchedulerConfig(), optimizers=[optimizer], training_steps=8
+    )
+
+
 # -- the manager's unwired-option guard ---------------------------------------
 
 
@@ -128,6 +141,7 @@ def test_hf_options_are_rejected_without_a_state_dict_adapter(tmp_path) -> None:
             Config(enable=True, last_save_in_hf=True),
             model_parts=[model],
             optimizer=optimizer,
+            lr_scheduler=_schedule(optimizer),
             states={},
             folder=str(tmp_path),
         )
@@ -145,6 +159,7 @@ def test_a_disabled_manager_returns_early_without_building_anything(tmp_path) ->
         Config(enable=False),
         model_parts=[model],
         optimizer=optimizer,
+        lr_scheduler=_schedule(optimizer),
         states={},
         folder=str(tmp_path),
     )
@@ -169,6 +184,7 @@ def test_close_and_the_public_methods_survive_a_failed_constructor(tmp_path) -> 
             Config(enable=True, async_mode="async", last_save_in_hf=True),
             model_parts=[model],
             optimizer=optimizer,
+            lr_scheduler=_schedule(optimizer),
             states={},
             folder=str(tmp_path),
         )

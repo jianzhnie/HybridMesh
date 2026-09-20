@@ -17,6 +17,7 @@ cold Adam has no ``exp_avg`` tensors for DCP to write into.
 
 from __future__ import annotations
 
+import pytest
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -33,6 +34,7 @@ from hpmesh.components.loss import (
     vocab_shard_bounds,
 )
 from hpmesh.components.optimizer import OptimizersContainer
+from hpmesh.components.optimizer.lr_scheduler import build_lr_scheduler
 from hpmesh.datasets.random_data import (
     Batch,
     DataLoaderExhausted,
@@ -47,7 +49,14 @@ from hpmesh.parallel.collectives import (
     dist_sum,
     dist_sum_tensor,
 )
-from hpmesh.trainer.config import CheckpointConfig, OptimizerConfig, ParamGroupConfig
+from hpmesh.trainer.config import (
+    CheckpointConfig,
+    HybridMeshConfig,
+    LRSchedulerConfig,
+    OptimizerConfig,
+    ParamGroupConfig,
+    TrainingConfig,
+)
 from hpmesh.trainer.trainer import Trainer
 
 # -- losses -------------------------------------------------------------------
@@ -193,6 +202,40 @@ def test_clip_does_not_exhaust_a_generator() -> None:
 # -- the data iterator --------------------------------------------------------
 
 
+def _cfg_with_batch(**overrides) -> HybridMeshConfig:
+    fields = {"global_batch_size": 8, "max_seq_len": 16, "seed": 42, **overrides}
+    return HybridMeshConfig(training=TrainingConfig(**fields))
+
+
+def _bare_trainer(cfg: HybridMeshConfig) -> Trainer:
+    """A Trainer with ``__init__`` bypassed, for testing pure data helpers."""
+    trainer = Trainer.__new__(Trainer)
+    trainer.cfg = cfg
+    return trainer
+
+
+def test_batch_size_per_rank_divides_evenly() -> None:
+    trainer = _bare_trainer(_cfg_with_batch(global_batch_size=8))
+
+    # 8 over 2 ranks is 4 each; 8 over 8 is 1 each.
+    assert trainer._batch_size_per_rank(2) == 4
+    assert trainer._batch_size_per_rank(8) == 1
+
+
+def test_an_indivisible_global_batch_is_rejected() -> None:
+    """A floor would silently train a smaller global batch than the config names.
+
+    Every number derived from it -- the lr, the token count, the value logged as
+    ``batch_size`` -- would then describe a batch that is not the one being read.
+    The random loader happens to reject this too, but only after it is built and
+    only on that one path; the check has to sit where both paths compute it.
+    """
+    trainer = _bare_trainer(_cfg_with_batch(global_batch_size=10))
+
+    with pytest.raises(ValueError, match="divisible by"):
+        trainer._batch_size_per_rank(4)
+
+
 def _source(n: int, *, batch_size: int = 2, seq_len: int = 4) -> RandomTokenSource:
     return RandomTokenSource(
         seed=0, vocab_size=16, batch_size=batch_size, seq_len=seq_len
@@ -281,6 +324,15 @@ class _TrainState:
         self.ntokens_seen = state_dict["ntokens_seen"]
 
 
+def _lr_scheduler(optimizer, *, warmup_steps: int = 0, training_steps: int = 8):
+    """The schedule the trainer builds, over the same inner optimizers."""
+    return build_lr_scheduler(
+        LRSchedulerConfig(warmup_steps=warmup_steps),
+        optimizers=list(optimizer),
+        training_steps=training_steps,
+    )
+
+
 def _manager(
     folder: str, model: nn.Module, optimizer, state: _TrainState, **overrides
 ) -> CheckpointManager:
@@ -292,6 +344,7 @@ def _manager(
         CheckpointConfig(enable=True, folder="checkpoint", **config),
         model_parts=[model],
         optimizer=optimizer,
+        lr_scheduler=_lr_scheduler(optimizer),
         states={TRAIN_STATE: state},
         folder=folder,
     )
@@ -351,6 +404,139 @@ def test_checkpoint_round_trips_model_optimizer_and_counters(tmp_path) -> None:
     assert restored_optim.keys() == saved_optim.keys()
     for key, value in saved_optim.items():
         assert torch.equal(restored_optim[key], value)
+
+
+def test_checkpoint_round_trips_the_lr_schedule(tmp_path) -> None:
+    """A resumed run continues the lr curve instead of restarting it.
+
+    The optimizer restores ``base_lrs``, so the *current* lr comes back right
+    whether or not the schedule was checkpointed -- which is what let the bug
+    hide. ``last_epoch`` is the scheduler's own counter, and a fresh scheduler
+    starts it at 0. Restoring it is what puts the next step's lr on the curve.
+    """
+    model, optimizer = _model_and_optimizer()
+    state = _TrainState()
+    schedule = _lr_scheduler(optimizer, warmup_steps=8)
+    _step(model, optimizer)
+    schedule.step()
+    schedule.step()
+    assert schedule.state_dict() == {"last_epoch": 2}
+
+    manager = CheckpointManager(
+        CheckpointConfig(enable=True, folder="checkpoint", keep_latest_k=0, interval=1),
+        model_parts=[model],
+        optimizer=optimizer,
+        lr_scheduler=schedule,
+        states={TRAIN_STATE: state},
+        folder=str(tmp_path),
+    )
+    assert manager.save(2) is True
+    manager.close()
+
+    # A brand-new trainer's objects, as a resume builds them. Both counters are
+    # fresh, so a resume that restored neither could not be told from this one.
+    fresh_model, fresh_optimizer = _model_and_optimizer()
+    fresh_state = _TrainState()
+    fresh_schedule = _lr_scheduler(fresh_optimizer, warmup_steps=8)
+
+    resumed = CheckpointManager(
+        CheckpointConfig(enable=True, folder="checkpoint", keep_latest_k=0),
+        model_parts=[fresh_model],
+        optimizer=fresh_optimizer,
+        lr_scheduler=fresh_schedule,
+        states={TRAIN_STATE: fresh_state},
+        folder=str(tmp_path),
+    )
+    assert resumed.load(-1) is True
+    resumed.close()
+
+    assert fresh_schedule.state_dict() == {"last_epoch": 2}
+    # The property that matters: the next step's lr is the one an uninterrupted
+    # run would have used. The optimizer restores ``base_lrs`` (0.1), and at
+    # last_epoch 3 the 8-step linear warmup gives a factor of 4/8 -- 0.05. With
+    # the schedule's state lost the factor would be 1/8, i.e. 0.0125: the curve
+    # restarted from the beginning.
+    fresh_schedule.step()
+    assert fresh_schedule.get_metrics() == {"lr/AdamW": pytest.approx(0.05)}
+
+
+def test_the_schedule_is_not_restored_from_a_missing_checkpoint(tmp_path) -> None:
+    """A fresh run's schedule must start at zero, not at whatever it last was."""
+    _, optimizer = _model_and_optimizer()
+    schedule = _lr_scheduler(optimizer, warmup_steps=8)
+    schedule.step()
+    assert schedule.state_dict() == {"last_epoch": 1}
+
+    # No checkpoint on disk: nothing to restore, and nothing must be invented.
+    fresh_model, fresh_optimizer = _model_and_optimizer()
+    fresh_schedule = _lr_scheduler(fresh_optimizer, warmup_steps=8)
+    manager = CheckpointManager(
+        CheckpointConfig(enable=True, folder="checkpoint", keep_latest_k=0),
+        model_parts=[fresh_model],
+        optimizer=fresh_optimizer,
+        lr_scheduler=fresh_schedule,
+        states={TRAIN_STATE: _TrainState()},
+        folder=str(tmp_path),
+    )
+    assert manager.load(-1) is False
+    manager.close()
+
+    assert fresh_schedule.state_dict() == {"last_epoch": 0}
+
+
+def test_excluding_both_optimizer_and_schedule_leaves_them_untouched(tmp_path) -> None:
+    """The pairing ``config.py`` demands must actually be loadable.
+
+    The config rejects excluding the optimizer without the schedule, on the
+    grounds that a restored ``last_epoch`` would be applied against cold
+    ``base_lrs``. That rule is only enforceable if both keys exist in the
+    manager's states: before the schedule was registered, asking to exclude it
+    raised "lr_scheduler not found in state_dict", so the pairing the config
+    mandates could not be expressed at all.
+    """
+    model, optimizer = _model_and_optimizer()
+    schedule = _lr_scheduler(optimizer, warmup_steps=8)
+    _step(model, optimizer)
+    schedule.step()
+
+    manager = CheckpointManager(
+        CheckpointConfig(
+            enable=True,
+            folder="checkpoint",
+            keep_latest_k=0,
+            interval=1,
+            exclude_from_loading=["optimizer", "lr_scheduler"],
+        ),
+        model_parts=[model],
+        optimizer=optimizer,
+        lr_scheduler=schedule,
+        states={TRAIN_STATE: _TrainState()},
+        folder=str(tmp_path),
+    )
+    assert manager.save(1) is True
+    manager.close()
+
+    fresh_model, fresh_optimizer = _model_and_optimizer()
+    fresh_schedule = _lr_scheduler(fresh_optimizer, warmup_steps=8)
+    resumed = CheckpointManager(
+        CheckpointConfig(
+            enable=True,
+            folder="checkpoint",
+            keep_latest_k=0,
+            exclude_from_loading=["optimizer", "lr_scheduler"],
+        ),
+        model_parts=[fresh_model],
+        optimizer=fresh_optimizer,
+        lr_scheduler=fresh_schedule,
+        states={TRAIN_STATE: _TrainState()},
+        folder=str(tmp_path),
+    )
+    # Reaching here at all is the point: the exclusion is a legal request.
+    assert resumed.load(-1) is True
+    resumed.close()
+
+    # Excluded means excluded -- the schedule is not quietly advanced to match.
+    assert fresh_schedule.state_dict() == {"last_epoch": 0}
 
 
 def test_checkpoint_save_includes_optimizer_state_without_a_prior_step(
@@ -629,6 +815,7 @@ def test_checkpoint_carries_a_dataloader_read_position(tmp_path) -> None:
         CheckpointConfig(enable=True, folder="checkpoint", keep_latest_k=0, interval=1),
         model_parts=[model],
         optimizer=optimizer,
+        lr_scheduler=_lr_scheduler(optimizer),
         states={TRAIN_STATE: _TrainState(), DATALOADER: loader},
         folder=str(tmp_path),
     )
@@ -647,6 +834,7 @@ def test_checkpoint_carries_a_dataloader_read_position(tmp_path) -> None:
         CheckpointConfig(enable=True, folder="checkpoint", keep_latest_k=0, interval=1),
         model_parts=[fresh_model],
         optimizer=fresh_optimizer,
+        lr_scheduler=_lr_scheduler(fresh_optimizer),
         states={TRAIN_STATE: _TrainState(), DATALOADER: resumed_loader},
         folder=str(tmp_path),
     )

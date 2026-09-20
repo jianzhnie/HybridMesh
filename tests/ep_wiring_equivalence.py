@@ -34,17 +34,11 @@ from hpmesh.models.common.aux_loss import AuxLoss
 from hpmesh.models.common.moe import MoE
 from hpmesh.models.hf_wrapper import HFTransformerModel
 from hpmesh.parallel.expert_parallel import apply_ep, swap_hf_moe_blocks
+from hpmesh.trainer import ParallelConfig
 
 NUM_EXPERTS = 8
 TOKENS = 40
 TOL = 1e-6
-
-
-class _Cfg:
-    """``apply_ep`` reads exactly this one attribute."""
-
-    cp = 1
-    ep = 2
 
 
 def _config() -> AutoConfig:
@@ -93,7 +87,7 @@ def main() -> None:
     ep1 = _model()
     swap_hf_moe_blocks(ep1)
     ep2 = _model()
-    apply_ep(ep2, _Cfg(), ep_group=ep_group)
+    apply_ep(ep2, ParallelConfig(expert_parallel_degree=2), ep_group=ep_group)
 
     ids, positions = _data(rank)
     with torch.no_grad():

@@ -150,7 +150,7 @@ def main() -> None:
         ref_losses.append(loss_sum.item() / SEQ)
 
     # -- pure-CP run through the real apply_fsdp entry point -------------------
-    model = apply_fsdp(_build_model(), None, cfg, parallel_dims)
+    model = apply_fsdp(_build_model(), None, cfg.parallel, parallel_dims)
     if not isinstance(model, FSDPModule):
         failures.append("apply_fsdp left the model unsharded under pure CP")
 

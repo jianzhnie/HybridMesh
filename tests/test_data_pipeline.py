@@ -631,9 +631,20 @@ def test_dataloader_arguments_require_a_path_for_local_jsonl() -> None:
         DataloaderConfig(dataset="local_jsonl", tokenizer_path="/tmp/tok")
 
 
-def test_dataloader_arguments_reject_an_unknown_corpus() -> None:
+def test_dataloader_rejects_an_unknown_corpus_at_build_time() -> None:
+    """The registry check lives in ``build_dataloader``, not in the config."""
     with pytest.raises(ValueError, match="unknown dataset"):
-        DataloaderConfig(dataset="not-a-dataset", tokenizer_path="/tmp/tok")
+        build_dataloader(
+            DataloaderConfig(dataset="not-a-dataset", tokenizer_path="/tmp/tok"),
+            seed=42,
+            vocab_size=128,
+            batch_size=4,
+            seq_len=8,
+            dp_rank=0,
+            dp_world_size=1,
+            max_context_length=8,
+            num_tokens_per_batch=32,
+        )
 
 
 def test_dataloader_arguments_build_the_synthetic_loader_without_assets() -> None:

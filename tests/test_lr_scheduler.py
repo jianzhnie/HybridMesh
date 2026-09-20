@@ -182,7 +182,9 @@ def test_total_steps_shorter_than_the_run_is_rejected() -> None:
     """A schedule that ends early would take the lr negative, not just to zero."""
     with pytest.raises(ValueError, match="shorter than the run"):
         build_lr_scheduler(
-            LRSchedulerConfig(total_steps=4), optimizers=[_optimizer()], training_steps=10
+            LRSchedulerConfig(total_steps=4),
+            optimizers=[_optimizer()],
+            training_steps=10,
         )
 
 

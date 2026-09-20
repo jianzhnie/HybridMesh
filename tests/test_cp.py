@@ -25,6 +25,7 @@ from hpmesh.parallel.context_parallel import (
     cp_group,
     cp_redistribute,
 )
+from hpmesh.trainer import ParallelConfig
 from hpmesh.utils.spmd_context import set_current_spmd_mesh
 
 
@@ -83,11 +84,9 @@ def test_default_reduce_dtype_is_float32() -> None:
 def test_apply_cp_is_a_no_op_when_cp_is_off() -> None:
     """CP=1 must hand the model back untouched rather than raise."""
     model = torch.nn.Linear(4, 4)
+    cfg = ParallelConfig(context_parallel_degree=1)
 
-    class _Cfg:
-        cp = 1
-
-    assert apply_cp(model, None, _Cfg()) is model
+    assert apply_cp(model, None, cfg) is model
 
 
 def test_apply_cp_requires_the_flex_backend() -> None:
@@ -98,8 +97,7 @@ def test_apply_cp_requires_the_flex_backend() -> None:
     from silently computing attention over its own shard only.
     """
 
-    class _Cfg:
-        cp = 2
+    cfg = ParallelConfig(context_parallel_degree=2)
 
     with pytest.raises(RuntimeError, match="attention backend"):
-        apply_cp(torch.nn.Linear(4, 4), None, _Cfg())
+        apply_cp(torch.nn.Linear(4, 4), None, cfg)
