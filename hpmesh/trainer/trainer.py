@@ -632,9 +632,7 @@ class Trainer:
         # it is a no-op, so the same code runs from one device to a full mesh.
         with self._param_context(), spmd_context(self.parallel_dims):
             logits = self.model(input_ids, positions=positions)
-            loss_sum = self._loss_sum(
-                logits, labels, num_valid_tokens=num_valid_tokens
-            )
+            loss_sum = self._loss_sum(logits, labels, num_valid_tokens=num_valid_tokens)
             del logits
             # Normalize BEFORE backward, while the sum is still differentiable.
             # Dividing after backwarding the raw sum would work for a single
@@ -805,9 +803,14 @@ class Trainer:
             if self.parallel_dims is None
             else self.parallel_dims.get_optional_mesh("pp")
         )
+        cp_mesh = (
+            None
+            if self.parallel_dims is None
+            else self.parallel_dims.get_optional_mesh("cp")
+        )
         loss_mesh = (
             dp_mesh
-            if pp_mesh is None and self.parallel_dims.get_optional_mesh("cp") is None
+            if pp_mesh is None and cp_mesh is None
             else self.parallel_dims.get_optional_mesh("loss")
         )
 
@@ -835,6 +838,7 @@ class Trainer:
                     zip(
                         ("input_ids", "labels", "positions", "num_valid_tokens"),
                         self._as_batch(batch),
+                        strict=False,
                     )
                 )
             )
