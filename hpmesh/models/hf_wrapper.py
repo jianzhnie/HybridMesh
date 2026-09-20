@@ -511,7 +511,10 @@ class HFTransformerModel(nn.Module):
 
         Args:
             input_ids: ``(T,)`` flat token ids. Under CP, this rank's sequence
-                shard -- ``(T/cp,)``.
+                shard -- ``(T/cp,)``. Under pipeline parallelism, a non-first
+                stage receives the previous stage's output instead: ``(T, H)``
+                hidden states, detected by ``tok_embeddings`` having been split
+                out (replaced by an ``nn.Identity``).
             positions: ``(T,)`` per-token positions, resetting at document
                 boundaries. Drives RoPE. Defaults to ``arange``, which is correct
                 only when the sequence is a single document. Under CP, the
@@ -521,7 +524,16 @@ class HFTransformerModel(nn.Module):
                 its own causal default. Under CP, a full-length mask already
                 Q-sharded by ``shard_attention_mask_for_cp``.
         """
-        local_seq_len = input_ids.shape[0]
+        if isinstance(self.tok_embeddings, nn.Identity):
+            # Non-first pipeline stage: the input IS the previous stage's
+            # hidden states, so the embedding lookup is skipped by feeding the
+            # decoder ``inputs_embeds`` directly. PP does not shard the
+            # sequence, so the local ``arange`` positions default stays right.
+            local_seq_len = input_ids.shape[0]
+            decoder_input = {"inputs_embeds": input_ids.unsqueeze(0)}
+        else:
+            local_seq_len = input_ids.shape[0]
+            decoder_input = {"input_ids": input_ids.unsqueeze(0)}
         if positions is None:
             positions = torch.arange(local_seq_len, device=input_ids.device)
 
@@ -529,7 +541,7 @@ class HFTransformerModel(nn.Module):
 
         # A HF decoder expects a batch dim; the wrapper's contract is flat.
         hidden_states = self._decoder(
-            input_ids.unsqueeze(0),
+            **decoder_input,
             position_ids=positions.unsqueeze(0),
             use_cache=False,
             **kwargs,

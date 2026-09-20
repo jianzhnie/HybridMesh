@@ -12,8 +12,11 @@ What changed from upstream:
   exist solely so ``Config.build()`` binds to the fused class rather than the
   stock one -- with no config system they have nothing left to do. Each class
   now takes its sizes/weights as keyword args, like the rest of hpmesh.
-* ``DistGEMMFeedForward`` no longer subclasses ``FeedForward`` (hpmesh has none);
-  it is a self-contained module holding the two projections and the activation.
+* ``DistGEMMFeedForward`` subclasses :class:`~hpmesh.models.common.feed_forward.
+  FeedForward`, as it does upstream: the fused and unfused paths share the weight
+  layout (``w13`` holding the interleaved gate and up) and the activation split,
+  so only the two GEMMs differ. It overrides ``forward`` and falls back to the
+  inherited implementation when TP is off.
 * ``torch_remat`` is gone. Upstream wraps each projection in
   ``remat.region(..., recompute=...)``, which only steers activation
   checkpointing; calling the projection directly is the same arithmetic.
@@ -32,7 +35,7 @@ import torch
 import torch.distributed as dist
 import torch.nn as nn
 
-from hpmesh.models.common.activation import ActivationFn, SwiGLU
+from hpmesh.models.common.feed_forward import FeedForward
 from hpmesh.models.common.qkv import QKVLinear
 from hpmesh.parallel.spmd_types import current_spmd_mesh
 from hpmesh.parallel.tensor_parallel.linear import (
@@ -179,7 +182,7 @@ class RowParallelLinear(nn.Module):
         )
 
 
-class DistGEMMFeedForward(nn.Module):
+class DistGEMMFeedForward(FeedForward):
     """SwiGLU feed-forward with both TP collectives folded into its GEMMs.
 
     The fused ``w13`` projection consumes an all-gather of the sequence shard;
@@ -189,6 +192,8 @@ class DistGEMMFeedForward(nn.Module):
     -- ``[g0, u0, g1, u1, ...]`` -- so ``w1`` and ``w3`` can be recovered by
     unflattening on the last axis. That is the layout an HF-style checkpoint
     expects, and the pairing ``(g_i, u_i)`` is what the activation consumes.
+    Both of those are inherited from :class:`FeedForward`; this class replaces
+    only the two projections' execution.
 
     Args:
         w13: the fused gate-and-up projection, ``dim -> 2 * hidden_dim``.
@@ -196,23 +201,11 @@ class DistGEMMFeedForward(nn.Module):
         activation_fn: the gated activation; defaults to SwiGLU.
     """
 
-    def __init__(
-        self,
-        *,
-        w13: nn.Module,
-        w2: nn.Module,
-        activation_fn: ActivationFn | None = None,
-    ) -> None:
-        super().__init__()
-        self.w13 = w13
-        self.w2 = w2
-        self.activation_fn = activation_fn if activation_fn is not None else SwiGLU()
-
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         tp_group = _tp_group_from_context()
         if tp_group is None:
             _warn_once_no_tp_overlap()
-            return self._forward_plain(x)
+            return super().forward(x)
 
         gate_up_TF = AllGatherLinear.apply(
             x,
@@ -222,23 +215,10 @@ class DistGEMMFeedForward(nn.Module):
             tp_group.group_name,
         )
         out_TD = LinearReduceScatter.apply(
-            self._activate(gate_up_TF),
+            self.activation_fn(*self._split_gate_up(gate_up_TF)),
             self.w2.weight,
             self.w2.bias,
             tp_group,
             tp_group.group_name,
         )
         return out_TD
-
-    def _forward_plain(self, x: torch.Tensor) -> torch.Tensor:
-        """The unfused path: two ordinary projections, no collectives."""
-        return self.w2(self._activate(self.w13(x)))
-
-    def _activate(self, gate_up_TF: torch.Tensor) -> torch.Tensor:
-        """Split the interleaved gate/up halves and apply the activation.
-
-        The split is elementwise on feature-sharded activations, so it needs no
-        collective even when the feature dim is TP-sharded.
-        """
-        gate_TF, up_TF = gate_up_TF.unflatten(-1, (-1, 2)).unbind(-1)
-        return self.activation_fn(gate_TF, up_TF)
