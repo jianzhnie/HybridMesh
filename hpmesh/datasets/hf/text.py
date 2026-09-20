@@ -29,12 +29,16 @@ import numpy as np
 from ...components.loss import IGNORE_INDEX
 from ...utils.logger_utils import get_logger
 from ..dataset import SampleProcessor, SingleDatasetConfig, TextSequence
-from ..sources import HuggingFaceRandomAccessSource, HuggingFaceStreamingSource
+from ..sources import (
+    HuggingFaceRandomAccessSource,
+    HuggingFaceStreamingSource,
+    IndexedJsonlSource,
+)
 from ..types import DatasetBuildContext
 
 logger = get_logger(__name__)
 
-__all__ = ["ChatProcessor", "DATASETS", "TextProcessor"]
+__all__ = ["ChatProcessor", "DATASETS", "TextProcessor", "make_local_jsonl"]
 
 
 def _read_text(sample: dict[str, Any]) -> str:
@@ -193,6 +197,19 @@ class ChatProcessor(SampleProcessor):
     ) -> TextSequence | None:
         del rng
         return self._tokenize_sample(sample)
+
+
+def make_local_jsonl(*, path: str) -> SingleDatasetConfig:
+    """Build the ``local_jsonl`` recipe over a caller-supplied corpus.
+
+    A function rather than an entry in :data:`DATASETS`: the path is a runtime
+    argument, so it cannot live in a module-level dict without a global.
+    """
+    return SingleDatasetConfig(
+        source=IndexedJsonlSource(patterns=(path,)),
+        processor=TextProcessor,
+        post_filters=(lambda sample: sample is not None,),
+    )
 
 
 DATASETS: dict[str, SingleDatasetConfig] = {

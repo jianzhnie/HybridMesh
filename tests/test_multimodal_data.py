@@ -23,14 +23,17 @@ from __future__ import annotations
 
 import base64
 import json
-from functools import partial
 
 import numpy as np
 import pytest
 import torch
+from data_fixtures import (  # noqa: F401
+    VOCAB,
+    make_context,
+    make_policy,
+    write_tokenizer,
+)
 
-from data_fixtures import make_context, make_policy, tokenizer as _text_tokenizer  # noqa: F401
-from data_fixtures import VOCAB, write_tokenizer
 from hpmesh.components.loss import IGNORE_INDEX
 from hpmesh.components.tokenizer import MultiModalTokenizer
 from hpmesh.datasets import IndexedJsonlSource, SingleDatasetConfig
@@ -67,11 +70,15 @@ def mm_tokenizer(tmp_path_factory) -> MultiModalTokenizer:
     """A tokenizer whose vision placeholders are real added tokens.
 
     They have to be in the saved vocabulary rather than added afterwards:
-    ``MultiModalTokenizer`` validates all five at construction.
+    ``MultiModalTokenizer`` validates all five at construction. Ids must be
+    contiguous with the base vocabulary -- WordLevel refuses to save a vocab
+    with holes in it.
     """
     path = write_tokenizer(
         str(tmp_path_factory.mktemp("mm_tokenizer")),
-        extra_vocab={token: 100 + i for i, token in enumerate(MM_TOKENS)},
+        extra_vocab={
+            token: max(VOCAB.values()) + 1 + i for i, token in enumerate(MM_TOKENS)
+        },
     )
     return MultiModalTokenizer(
         tokenizer_path=path,
@@ -277,29 +284,17 @@ def test_insert_vision_placeholders_appends_eos_once():
     assert insert_vision_placeholders(["abc[EOS]"], [], **kwargs) == "abc[EOS]"
 
 
-def test_insert_vision_placeholders_leaves_a_surplus_slot_alone():
-    """A ``None`` with no vision token count and no later text part is dropped:
-    ``join`` is guarded by ``strip()``, not by any ``None`` handling."""
-    text = insert_vision_placeholders(
-        ["a", None],
-        [],
-        vision_start_token=VISION_START,
-        vision_token=IMAGE_TOKEN,
-        vision_end_token=VISION_END,
-    )
-    assert text == "a"
+def test_insert_vision_placeholders_rejects_a_slot_with_no_token_count():
+    """A ``None`` slot with no corresponding vision token count raises.
 
-
-def test_insert_vision_placeholders_rejects_a_surplus_slot_before_text():
-    """The same surplus ``None`` *before* a text part raises.
-
-    That is the honest behavior rather than a bug: the only caller builds the
-    list by marking accepted images, so a slot without a count is a contract
-    violation, and failing loudly beats emitting text with a hole in it.
+    Not a bug: the processor only ever sets a slot to ``None`` for an image it
+    accepted, and it drops the whole sample if any image failed. So a slot with
+    no count means that invariant broke, and failing loudly beats emitting text
+    with a hole where an image should be.
     """
     with pytest.raises(TypeError, match="expected str instance, NoneType"):
         insert_vision_placeholders(
-            ["a", None, "b"],
+            ["a", None],
             [],
             vision_start_token=VISION_START,
             vision_token=IMAGE_TOKEN,
@@ -322,7 +317,8 @@ def test_process_mm_sample_masks_the_vision_tokens_in_the_labels(
     """Vision placeholders must not be predicted as text.
 
     The model reads features, not tokens, at those positions, so a label there
-    trains the language head against something it never sees.
+    trains the language head against something it never sees. The assertion is
+    therefore the negative one: no placeholder survives in ``labels``.
     """
     result = _process_mm_sample(
         texts=[None, "hello"],
@@ -340,10 +336,10 @@ def test_process_mm_sample_masks_the_vision_tokens_in_the_labels(
             mm_tokenizer.video_id,
         ]
     )
-    labels = result["labels"]
-    placeholder = torch.isin(labels, special)
-    assert bool(placeholder.any()), "the sample should contain placeholders"
-    assert bool((labels[placeholder] == IGNORE_INDEX).all())
+    # The placeholders are all in the input, so the sample really does contain
+    # them -- otherwise the check below would pass on an empty sequence.
+    assert bool(torch.isin(result["input_ids"], special).any())
+    assert not bool(torch.isin(result["labels"], special).any())
 
 
 def test_process_mm_sample_aligns_every_token_field(mm_tokenizer, image_bytes):
@@ -383,13 +379,11 @@ def test_process_cc12_wd_sample_reads_the_pair_format(mm_tokenizer, image_bytes)
     assert len(result["pixel_values"]) == 1
 
 
-def test_process_cc12_wd_sample_returns_none_when_the_image_is_missing(mm_tokenizer):
-    assert (
-        _process_cc12_wd_sample(
-            {"txt": "hello", "jpg": None}, tokenizer=mm_tokenizer, **MM_KWARGS
-        )
-        is None
-    )
+def test_process_cc12_wd_sample_raises_when_the_image_field_is_absent(mm_tokenizer):
+    """A row without a ``jpg`` key is malformed for this dataset, not an image
+    that failed to decode -- so it raises rather than being silently dropped."""
+    with pytest.raises(TypeError):
+        _process_cc12_wd_sample({"txt": "hello"}, tokenizer=mm_tokenizer, **MM_KWARGS)
 
 
 # --------------------------------------------------------------------------
@@ -452,7 +446,13 @@ def test_multimodal_processor_runs_over_a_jsonl_corpus(
 ):
     """The end-to-end shape of the image-text path: rows in, a tokenized sample
     with its media out. ``pixel_values`` stays per sample until the collator
-    flattens it, so the row is the unit under test here."""
+    flattens it, so the row is the unit under test here.
+
+    The context is sized to fit one padded image: a 64x64 image at patch 16
+    with merge 2 contributes many placeholder tokens, and the default 32-token
+    context would drop every row. That is the real constraint a caller sizes
+    against, so it is stated rather than hidden behind a larger default.
+    """
     path = str(tmp_path / "pairs.jsonl")
     encoded = base64.b64encode(image_bytes).decode()
     with open(path, "w") as handle:
@@ -463,21 +463,32 @@ def test_multimodal_processor_runs_over_a_jsonl_corpus(
 
     config = SingleDatasetConfig(
         source=_Base64JsonlSource(patterns=(path,)),
-        processor=partial(
-            MultiModalProcessor,
-            context=make_context(mm_tokenizer, max_context_length=256),
-            sample_processor=_process_cc12_wd_sample,
-        ),
+        # A class, not a `partial` fixing a different context: `_build_map_dataset`
+        # calls `processor(context=...)`, and a partial's bound keyword would be
+        # silently overridden by that call-site keyword.
+        processor=_CtxSizedMMProcessor,
         post_filters=(lambda sample: sample is not None,),
     )
     dataset = config.build(
-        context=make_context(mm_tokenizer, num_tokens_per_batch=256),
+        context=make_context(mm_tokenizer, num_tokens_per_batch=1024),
         dataset_iteration_policy=make_policy(shuffle=False),
     )
     row = next(iter(dataset))
     assert row is not None
     assert len(row["pixel_values"]) == 1
     assert row["input_ids"].shape[0] >= 2
+
+
+class _CtxSizedMMProcessor(MultiModalProcessor):
+    """``MultiModalProcessor`` with a context large enough for one image."""
+
+    def __init__(self, *, context):
+        from dataclasses import replace
+
+        super().__init__(
+            context=replace(context, max_context_length=1024),
+            sample_processor=_process_cc12_wd_sample,
+        )
 
 
 # --------------------------------------------------------------------------
@@ -531,9 +542,7 @@ def test_collator_pads_positions_within_the_context_window(mm_tokenizer, token_i
     assert int(batch["positions"][10:].max()) < 32
 
 
-def test_collator_concatenates_whole_samples_before_padding(
-    mm_tokenizer, token_ids
-):
+def test_collator_concatenates_whole_samples_before_padding(mm_tokenizer, token_ids):
     batch = _collator(mm_tokenizer)(
         [_mm_sample(10, token_ids), _mm_sample(5, token_ids)]
     )
@@ -547,9 +556,7 @@ def test_collator_rejects_rows_over_the_token_batch(mm_tokenizer, token_ids):
         _collator(mm_tokenizer)([_mm_sample(129, token_ids)])
 
 
-def test_collator_carries_the_special_token_ids_into_the_batch(
-    mm_tokenizer, token_ids
-):
+def test_collator_carries_the_special_token_ids_into_the_batch(mm_tokenizer, token_ids):
     """The model forward reads these off the batch rather than off the
     tokenizer, so every name has to survive the trip."""
     batch = _collator(mm_tokenizer)([_mm_sample(4, token_ids)])
@@ -562,9 +569,7 @@ def test_collator_carries_the_special_token_ids_into_the_batch(
     }
 
 
-def test_collator_emits_no_media_when_the_batch_has_no_images(
-    mm_tokenizer, token_ids
-):
+def test_collator_emits_no_media_when_the_batch_has_no_images(mm_tokenizer, token_ids):
     batch = _collator(mm_tokenizer)([_mm_sample(4, token_ids)])
     assert batch["pixel_values"] is None
     assert batch["grid_thw"] is None
@@ -574,7 +579,11 @@ def test_collator_packs_image_patches_with_their_grids(mm_tokenizer, image_bytes
     sample = _mm_sample(8, _ids_of(mm_tokenizer))
     sample["pixel_values"] = [
         process_image(
-            image_bytes, patch_size=16, merge_size=2, min_pixels=32 * 32, max_pixels=10**8
+            image_bytes,
+            patch_size=16,
+            merge_size=2,
+            min_pixels=32 * 32,
+            max_pixels=10**8,
         )
     ]
     batch = _collator(mm_tokenizer)([sample])
@@ -583,9 +592,13 @@ def test_collator_packs_image_patches_with_their_grids(mm_tokenizer, image_bytes
 
 
 def _ids_of(mm_tokenizer) -> dict[str, int]:
-    return {"image": mm_tokenizer.image_id, "video": mm_tokenizer.video_id,
-            "vision_start": mm_tokenizer.vision_start_id,
-            "vision_end": mm_tokenizer.vision_end_id, "pad": mm_tokenizer.pad_id}
+    return {
+        "image": mm_tokenizer.image_id,
+        "video": mm_tokenizer.video_id,
+        "vision_start": mm_tokenizer.vision_start_id,
+        "vision_end": mm_tokenizer.vision_end_id,
+        "pad": mm_tokenizer.pad_id,
+    }
 
 
 def test_collator_enforces_the_per_batch_media_budget(mm_tokenizer, image_bytes):
@@ -593,7 +606,11 @@ def test_collator_enforces_the_per_batch_media_budget(mm_tokenizer, image_bytes)
     sample = _mm_sample(8, _ids_of(mm_tokenizer))
     sample["pixel_values"] = [
         process_image(
-            image_bytes, patch_size=16, merge_size=2, min_pixels=32 * 32, max_pixels=10**8
+            image_bytes,
+            patch_size=16,
+            merge_size=2,
+            min_pixels=32 * 32,
+            max_pixels=10**8,
         )
     ]
     with pytest.raises(ValueError, match="max_images_per_batch"):
@@ -603,9 +620,7 @@ def test_collator_enforces_the_per_batch_media_budget(mm_tokenizer, image_bytes)
 def test_mrope_rejects_a_raster_patch_order(mm_tokenizer):
     """MRoPE coordinates index the block-ordered patch sequence, so a raster
     order would leave every coordinate pointing at the wrong patch."""
-    collator = _collator(
-        mm_tokenizer, patch_order="raster", build_mrope_positions=True
-    )
+    collator = _collator(mm_tokenizer, patch_order="raster", build_mrope_positions=True)
     ids = _ids_of(mm_tokenizer)
     with pytest.raises(ValueError, match="MRoPE requires patch_order='block'"):
         collator._build_mrope_positions(

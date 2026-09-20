@@ -27,6 +27,10 @@ Metrics (stdout always; TensorBoard and WandB are opt-in):
     python -m hpmesh --steps 20 --enable_tensorboard
     python -m hpmesh --steps 20 --enable_wandb --tag baseline
 
+Data (synthetic random tokens unless a corpus is named):
+    python -m hpmesh --steps 20 --dataset local_jsonl \
+        --dataset_path ./corpus.jsonl --tokenizer_path ./tokenizer
+
 Profiling (off unless enabled; both write under --dump_folder):
     python -m hpmesh --steps 20 --enable_profiling --profile_freq 4
     python -m hpmesh --steps 20 --enable_memory_snapshot --memory_snapshot_freq 5
@@ -38,6 +42,7 @@ from transformers import HfArgumentParser
 
 from .config import (
     CheckpointArguments,
+    DataloaderArguments,
     HybridMeshConfig,
     MetricsArguments,
     ModelArguments,
@@ -57,6 +62,7 @@ def parse_config() -> HybridMeshConfig:
             OptimizerArguments,
             TrainingArguments,
             CheckpointArguments,
+            DataloaderArguments,
             MetricsArguments,
             ProfilerArguments,
         ]
@@ -67,6 +73,7 @@ def parse_config() -> HybridMeshConfig:
         optimizer,
         training,
         checkpoint,
+        dataloader,
         metrics,
         profiler,
     ) = parser.parse_args_into_dataclasses()
@@ -75,6 +82,7 @@ def parse_config() -> HybridMeshConfig:
     # grafted on here; their __post_init__ already ran as part of the parser's
     # construction.
     training.checkpoint_config = checkpoint
+    training.dataloader_config = dataloader
     training.metrics_config = metrics
     training.profiler_config = profiler
     cfg = HybridMeshConfig(

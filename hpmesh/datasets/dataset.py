@@ -120,7 +120,13 @@ class SingleDatasetConfig:
     source: SourceConfig
     pre_filters: tuple[Callable[[Any], bool], ...] = ()
     processor: type[SampleProcessor] | None = None
-    """Processor class, constructed per build with the build context."""
+    """Processor class, constructed per build as ``processor(context=context)``.
+
+    A class rather than a bound :func:`functools.partial`: a partial's fixed
+    keyword arguments are *overridden* by an explicit keyword at the call site,
+    so ``partial(Proc, context=other)`` here would be silently replaced by the
+    build context rather than raising.
+    """
     post_filters: tuple[Callable[[Any], bool], ...] = ()
 
     def build(
