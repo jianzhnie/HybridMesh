@@ -37,11 +37,11 @@ import torch.nn as nn
 
 from hpmesh.models.common.feed_forward import FeedForward
 from hpmesh.models.common.qkv import QKVLinear
-from hpmesh.utils.spmd_context import current_spmd_mesh
 from hpmesh.parallel.tensor_parallel.linear import (
     AllGatherLinear,
     LinearReduceScatter,
 )
+from hpmesh.utils.spmd_context import current_spmd_mesh
 
 logger = logging.getLogger(__name__)
 

@@ -108,9 +108,9 @@ from ..models.hf_wrapper import (
 from ..parallel.collectives import clip_grad_norm_, dist_max, dist_sum, dist_sum_tensor
 from ..parallel.parallel_dims import ParallelDims
 from ..parallel.pipeline_parallel import PipelineParallelSetup
-from ..utils.spmd_context import spmd_context
 from ..utils.gc import GarbageCollection
 from ..utils.logger_utils import get_logger
+from ..utils.spmd_context import spmd_context
 from .config import HybridMeshConfig
 
 # Rank-aware: the helper installs a handler on rank 0 only, so a torchrun run
