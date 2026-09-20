@@ -426,6 +426,10 @@ class TorchCheckpointingManager(BaseCheckpointManager):
             f"to {self.folder}"
         )
 
+        # Last: the backend manager is built above and ``__del__`` runs ``close``
+        # on whatever was left behind if any of that raised.
+        self._initialized = True
+
     def __del__(self) -> None:
         # __init__ can fail before the backend manager is built. In that case
         # this object owns no backend resources to close.

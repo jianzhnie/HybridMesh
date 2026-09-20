@@ -280,6 +280,12 @@ class CheckpointManager(BaseCheckpointManager):
             f"to {self.folder}"
         )
 
+        # Last, and load-bearing: everything above can raise (the HF-option
+        # guard most notably), and ``__del__`` runs ``close`` on whatever was
+        # left behind. Until this is set, the base class's public methods treat
+        # the object as unusable rather than reading attributes that are absent.
+        self._initialized = True
+
     def __del__(self) -> None:
         self.close()
 

@@ -18,11 +18,13 @@ from typing import Literal
 import torch
 from transformers import AutoConfig
 
+from hpmesh.components.checkpointer.dcp import CheckpointManager
 from hpmesh.utils.logger_utils import get_logger
 
 logger = get_logger(__name__)
 
 __all__ = [
+    "CheckpointArguments",
     "HybridMeshConfig",
     "ModelArguments",
     "OptimizerArguments",
@@ -360,6 +362,31 @@ class OptimizerArguments:
     weight_decay: float = field(default=0.0, metadata={"help": "Weight decay"})
 
 
+@dataclass(kw_only=True)
+class CheckpointArguments(CheckpointManager.Config):
+    """CLI view of the checkpoint config.
+
+    Subclasses the manager's own ``Config`` (rather than re-declaring the same
+    fields) so hpmesh has ONE source of truth for checkpointing: the manager
+    reads the inherited fields directly, exactly as ``ParallelDims.from_config``
+    reads the inherited ``*_degree`` fields off ``ParallelArguments``.
+
+    Why an empty subclass is needed at all: ``HfArgumentParser`` cannot nest a
+    dataclass group behind a named flag -- a nested field surfaces as a single
+    opaque ``--checkpoint CHECKPOINT`` string argument. Being its own dataclass
+    gives the parser the flat field list to generate real flags from
+    (``--checkpoint_folder``, ``--checkpoint_interval``, ...). It also runs
+    ``Config.__post_init__`` validation on the parsed values.
+
+    The defaults are inherited, not restated, so a change to the manager's
+    default reaches the CLI.
+
+    No ``slots=True`` (the manager's ``Config`` omits it too): rebuilding the
+    class would break the zero-arg ``super()`` in ``Config.__post_init__`` once
+    this is its subclass, and the fields are config, not a hot inner loop.
+    """
+
+
 @dataclass
 class TrainingArguments:
     """Training loop hyperparameters and reproducibility."""
@@ -385,17 +412,42 @@ class TrainingArguments:
             "clipping but still reports grad_norm."
         },
     )
-    checkpoint_folder: str = field(
-        default="./outputs/checkpoints",
-        metadata={"help": "Directory for per-rank training checkpoints"},
-    )
-    checkpoint_interval: int = field(
-        default=0,
+    dump_folder: str = field(
+        default="./outputs",
         metadata={
-            "help": "Save a checkpoint every N steps; 0 disables checkpointing "
-            "entirely (no directory is created)."
+            "help": "Root directory for this run's outputs. The checkpoint folder "
+            "is resolved against it."
         },
     )
+    arguments: CheckpointArguments = field(
+        default_factory=CheckpointArguments,
+        metadata={
+            "help": "Checkpointing (see components/checkpointer). A nested "
+            "dataclass, so the parser exposes it as one opaque --arguments "
+            "value; the checkpoint flags live on the CheckpointArguments group "
+            "instead, which train.py parses and grafts back in."
+        },
+    )
+
+    @property
+    def checkpoint(self) -> CheckpointArguments:
+        """The checkpoint manager's config, spelled the way callers expect.
+
+        A property rather than a field, for two reasons.
+
+        The binding one: dataclasses reject an instance as a field default
+        ("mutable default"), and ``default_factory=CheckpointArguments`` would
+        construct a *fresh* default on every use -- which means
+        ``BaseCheckpointManagerConfig.__post_init__`` runs its
+        ``initial_load_model_only`` warning each time, including on the
+        parser's own ``--help``. Nesting the dataclass under ``arguments`` makes
+        it a constructor argument that the escape hatch absorbs, and the
+        property keeps the flat ``cfg.checkpoint`` spelling at the call site.
+
+        The incidental one: a property is not a field, so ``HfArgumentParser``
+        never turns it into a flag.
+        """
+        return self.arguments
 
     def __post_init__(self) -> None:
         if self.global_batch_size < 1:
@@ -406,10 +458,6 @@ class TrainingArguments:
             raise ValueError(f"max_seq_len must be >= 1, got {self.max_seq_len}")
         if self.steps < 1:
             raise ValueError(f"steps must be >= 1, got {self.steps}")
-        if self.checkpoint_interval < 0:
-            raise ValueError(
-                f"checkpoint_interval must be >= 0, got {self.checkpoint_interval}"
-            )
 
 
 @dataclass
@@ -417,6 +465,8 @@ class HybridMeshConfig:
     """Single entry point: composes the argument groups (no multiple inheritance).
 
     Each group validates itself in its own __post_init__ (run by default_factory).
+    Nested groups (``parallel``, ``training``) are reachable both as themselves and
+    through the flat property view below.
     """
 
     model: ModelArguments = field(default_factory=ModelArguments)
@@ -522,12 +572,12 @@ class HybridMeshConfig:
         return self.training.max_norm
 
     @property
-    def checkpoint_folder(self) -> str:
-        return self.training.checkpoint_folder
+    def dump_folder(self) -> str:
+        return self.training.dump_folder
 
     @property
-    def checkpoint_interval(self) -> int:
-        return self.training.checkpoint_interval
+    def checkpoint(self) -> CheckpointArguments:
+        return self.training.checkpoint
 
     def derive_dp(self, world_size: int) -> int:
         """Flat passthrough so callers use cfg.derive_dp(world_size) uniformly."""
