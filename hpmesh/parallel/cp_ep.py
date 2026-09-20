@@ -35,10 +35,14 @@ wrapper over torch's own
 ``torch.distributed.tensor.experimental._context_parallel_shard`` plus BlockMask
 sharding -- both available to hpmesh directly from torch. It also derives shard
 dims from a per-input SPMD layout dict, which hpmesh does not carry through its
-forward path. Wire it from torch when a real CP training step is added.
+forward path. The hpmesh equivalent lives in
+``parallel/context_parallel/input_shard.py`` and is driven by the trainer;
+:func:`apply_cp_ep` below wires the attention side.
 """
 
 from __future__ import annotations
+
+import logging
 
 import spmd_types as spmd
 import torch
@@ -47,8 +51,11 @@ import torch.nn as nn
 from torch.distributed.device_mesh import DeviceMesh
 
 from ..trainer.config import HybridMeshConfig
+from .context_parallel import CPFlexKernel
 from .parallel_dims import MeshAxisName
 from .spmd_types import spmd_mesh_group
+
+logger = logging.getLogger(__name__)
 
 __all__ = [
     "HEAD_DIM",
@@ -195,19 +202,86 @@ class UlyssesContextParallel(nn.Module):
         return self.shard(q_THK, k_THK, v_THV)
 
 
+# HF names the attention submodule differently across model families; probe in
+# the style of hf_wrapper's ``_first_present`` rather than hardcoding one
+# family's spelling.
+_ATTN_MODULE_NAMES = ("self_attn", "attn", "attention")
+
+
+def _apply_cp(model: nn.Module, mesh: DeviceMesh, cfg: HybridMeshConfig) -> None:
+    """Attach a CP flex kernel to every decoder layer's attention module.
+
+    The kernel declares the CP region: q/k/v reach it sequence-sharded, it
+    all-gathers K/V, and flex runs the local queries against the full keys.
+    The model inputs still have to be sharded along the sequence axis -- that
+    is the trainer's half of the wiring (``shard_batch_for_cp``).
+    """
+    # Lazy: parallel/ is imported before models/ in the trainer, and hf_wrapper
+    # itself imports the CP input sharding, so a module-level import here would
+    # close an import cycle.
+    from ..models.hf_wrapper import _ATTN_IMPLEMENTATION
+
+    impl = getattr(getattr(model, "model", None), "config", None)
+    impl = getattr(impl, "_attn_implementation", None)
+    if impl != _ATTN_IMPLEMENTATION:
+        raise RuntimeError(
+            f"CP requires the {_ATTN_IMPLEMENTATION!r} attention backend, but "
+            f"this model runs {impl!r}. CP expresses the sharded attention mask "
+            "as a BlockMask, which only the flex path consumes -- the same "
+            "reason the sdpa fallback cannot run packed sequences. On a "
+            "CPU-only machine the wrapper selects 'sdpa', so CP needs CUDA."
+        )
+    if mesh is None or "cp" not in (mesh.mesh_dim_names or ()):
+        raise ValueError(
+            f"cp={cfg.cp} requires a device mesh with a 'cp' axis, got "
+            f"{None if mesh is None else mesh.mesh_dim_names}."
+        )
+    cp_mesh = mesh["cp"]
+    if cp_mesh.size() != cfg.cp:
+        raise ValueError(
+            f"mesh 'cp' axis has size {cp_mesh.size()}, but cfg requests cp={cfg.cp}."
+        )
+
+    layers = getattr(model, "layers", None)
+    if layers is None:
+        raise TypeError(
+            f"apply_cp_ep expects a HFTransformerModel (with .layers); got "
+            f"{type(model).__name__}."
+        )
+    for idx, layer in enumerate(layers):
+        for name in _ATTN_MODULE_NAMES:
+            if hasattr(layer, name):
+                attn_mod = getattr(layer, name)
+                break
+        else:
+            raise AttributeError(
+                f"{type(layer).__name__} (layer {idx}) has no attention module "
+                f"under any of {_ATTN_MODULE_NAMES}. Add the model's spelling "
+                "to the probe in apply_cp_ep."
+            )
+        attn_mod._titan_flex_kernel = CPFlexKernel(cp_mesh=cp_mesh)
+
+    model.set_cp_mesh(
+        cp_mesh, load_balancer=cfg.parallel.context_parallel_load_balancer
+    )
+    logger.info("Applied CP (kv all-gather) with degree %d", cfg.cp)
+
+
 def apply_cp_ep(
     model: nn.Module, mesh: DeviceMesh | None, cfg: HybridMeshConfig
 ) -> nn.Module:
     """Wire CP/EP onto a model.
 
-    Still unimplemented for both. The CP attention primitives above are in
-    place, but a runnable CP step also needs the model inputs sharded along the
-    sequence axis (see the module docstring) and a hook that calls them around
-    the HF attention kernel. EP has no dispatcher yet either.
+    CP is wired: every decoder layer's attention module gets a
+    :class:`CPFlexKernel` that all-gathers K/V across the CP axis, and the
+    model records the CP mesh so its forward Q-shards the BlockMask to match.
+    EP has no dispatcher yet and still raises.
     """
     if cfg.cp == 1 and cfg.ep == 1:
         return model
-    raise NotImplementedError(
-        "CP/EP is step 4 of the learning path: implement KV all-gather (CP) or an "
-        "all-to-all token dispatcher (EP) here."
-    )
+    if cfg.ep > 1:
+        raise NotImplementedError(
+            "EP is not wired: there is no all-to-all token dispatcher yet. Set ep=1."
+        )
+    _apply_cp(model, mesh, cfg)
+    return model
