@@ -40,11 +40,12 @@ from hpmesh.models.hf_wrapper import HFTransformerModel, build_model_config_for
 from hpmesh.parallel.collectives import clip_grad_norm_
 from hpmesh.trainer import (
     HybridMeshConfig,
-    ModelArguments,
-    OptimizerArguments,
-    ParallelArguments,
-    TrainingArguments,
+    ModelConfig,
+    OptimizerConfig,
+    ParallelConfig,
+    TrainingConfig,
 )
+from hpmesh.trainer.config import MetricsConfig
 from hpmesh.trainer.trainer import Trainer
 
 STEPS = 4
@@ -54,13 +55,14 @@ SEQ = 32
 VOCAB = 128
 SEED = 42
 
-# fp32; the only sanctioned divergence is the grad-norm summation order.
-TOL = 1e-4
+# fp32; the only sanctioned divergence is the grad-norm summation order (per
+# stage, then combined, vs one whole-model norm), which sits at ~1e-7 relative.
+TOL = 1e-5
 
 
 def _cfg() -> HybridMeshConfig:
     return HybridMeshConfig(
-        model=ModelArguments(
+        model=ModelConfig(
             model_name_or_path="qwen3",  # offline: AutoConfig.for_model("qwen3", ...)
             vocab_size=VOCAB,
             hidden_size=64,
@@ -69,7 +71,7 @@ def _cfg() -> HybridMeshConfig:
             num_attention_heads=4,
             num_key_value_heads=4,
         ),
-        parallel=ParallelArguments(
+        parallel=ParallelConfig(
             pipeline_parallel_degree=2,
             pipeline_parallel_schedule="1F1B",
             num_pp_microbatches=MICROBATCHES,
@@ -78,14 +80,14 @@ def _cfg() -> HybridMeshConfig:
             data_parallel_shard_degree=-1,
             backend="gloo",
         ),
-        optimizer=OptimizerArguments(learning_rate=3e-4, weight_decay=0.0),
-        training=TrainingArguments(
+        optimizer=OptimizerConfig(learning_rate=3e-4, weight_decay=0.0),
+        training=TrainingConfig(
             global_batch_size=GLOBAL_BATCH,
             max_seq_len=SEQ,
             steps=STEPS,
             seed=SEED,
             deterministic=True,
-            log_freq=1,
+            metrics_config=MetricsConfig(log_freq=1),
         ),
     )
 
@@ -144,7 +146,9 @@ def main() -> None:
     # Trainer init owns the process group (torchrun env); pp=2 over 2 ranks.
     trainer = Trainer(cfg)
     rank = trainer.rank
-    assert trainer.world_size == 2, f"this check assumes 2 ranks, got {trainer.world_size}"
+    assert trainer.world_size == 2, (
+        f"this check assumes 2 ranks, got {trainer.world_size}"
+    )
 
     # -- non-vacuity: this rank holds one stage and only its own layers ------
     assert len(trainer.model_parts) == 1  # 1F1B: one stage per rank
@@ -199,18 +203,17 @@ def main() -> None:
     dist.broadcast_object_list(gathered, src=trainer.world_size - 1)
     pp_losses = gathered[0]
 
+    # Every rank has both series now (the reference is computed locally and
+    # identically on each), so every rank runs the comparison.
     max_diff = 0.0
-    if trainer.pp_has_last_stage:
-        for step, (got, want) in enumerate(zip(pp_losses, reference, strict=True), 1):
-            diff = abs(got - want)
-            max_diff = max(max_diff, diff)
-            if not torch.isclose(
-                torch.tensor(got), torch.tensor(want), rtol=TOL, atol=TOL
-            ):
-                failures.append(
-                    f"rank {rank}: step {step} loss {got:.6f} vs reference "
-                    f"{want:.6f} (diff {diff:.3e})"
-                )
+    for step, (got, want) in enumerate(zip(pp_losses, reference, strict=True), 1):
+        diff = abs(got - want)
+        max_diff = max(max_diff, diff)
+        if not torch.isclose(torch.tensor(got), torch.tensor(want), rtol=TOL, atol=TOL):
+            failures.append(
+                f"rank {rank}: step {step} loss {got:.6f} vs reference "
+                f"{want:.6f} (diff {diff:.3e})"
+            )
 
     # Every rank must agree that every check passed, not just report its own.
     local_ok = torch.tensor([0.0 if not failures else 1.0])

@@ -20,12 +20,12 @@ from hpmesh.models.hf_wrapper import (
     build_model_config_for,
 )
 from hpmesh.parallel.parallel_dims import ParallelDims
-from hpmesh.trainer import HybridMeshConfig, ParallelArguments, TrainingArguments
+from hpmesh.trainer import HybridMeshConfig, ParallelConfig, TrainingConfig
 from hpmesh.trainer.trainer import Trainer
 
 
 def _cfg(**parallel_kw) -> HybridMeshConfig:
-    return HybridMeshConfig(parallel=ParallelArguments(**parallel_kw))
+    return HybridMeshConfig(parallel=ParallelConfig(**parallel_kw))
 
 
 def test_derive_dp_derives_from_world_size() -> None:
@@ -74,8 +74,8 @@ def test_derive_dp_matches_parallel_dims_resolution() -> None:
 def test_cp_must_divide_seq_len() -> None:
     with pytest.raises(ValueError):
         HybridMeshConfig(
-            parallel=ParallelArguments(context_parallel_degree=3),
-            training=TrainingArguments(max_seq_len=64),
+            parallel=ParallelConfig(context_parallel_degree=3),
+            training=TrainingConfig(max_seq_len=64),
         )
 
 
@@ -88,7 +88,7 @@ def _bare_trainer(cfg: HybridMeshConfig) -> Trainer:
 
 def test_synthetic_batch_is_deterministic() -> None:
     cfg = HybridMeshConfig(
-        training=TrainingArguments(global_batch_size=8, max_seq_len=16, seed=42)
+        training=TrainingConfig(global_batch_size=8, max_seq_len=16, seed=42)
     )
     t = _bare_trainer(cfg)
     # Two independent iterators over the same config must agree: that is what
@@ -103,7 +103,7 @@ def test_synthetic_batch_is_deterministic() -> None:
 def test_dp_slice_partitions_global_batch() -> None:
     # Simulate 2 DP ranks without a process group by driving the slice math directly.
     cfg = HybridMeshConfig(
-        training=TrainingArguments(global_batch_size=8, max_seq_len=16, seed=42)
+        training=TrainingConfig(global_batch_size=8, max_seq_len=16, seed=42)
     )
     t = _bare_trainer(cfg)
     batch = next(t._data_iterator())
@@ -250,7 +250,7 @@ def test_non_flex_backend_rejects_a_packed_sequence(model: HFTransformerModel) -
 
 def test_build_model_config_for_offline_arch() -> None:
     """A bare architecture name builds a local model from cfg's explicit sizes."""
-    cfg = HybridMeshConfig(training=TrainingArguments(seed=42))
+    cfg = HybridMeshConfig(training=TrainingConfig(seed=42))
 
     config = build_model_config_for(cfg)
 
@@ -274,7 +274,7 @@ def test_wrapper_forward_returns_logits_the_trainer_can_score() -> None:
     contributes one prediction per token.
     """
     cfg = HybridMeshConfig(
-        training=TrainingArguments(seed=42, max_seq_len=32, global_batch_size=2)
+        training=TrainingConfig(seed=42, max_seq_len=32, global_batch_size=2)
     )
 
     model = HFTransformerModel(build_model_config_for(cfg)).eval()

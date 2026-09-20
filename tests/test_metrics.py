@@ -30,10 +30,15 @@ from hpmesh.components.metrics import (
     get_metrics_rank,
 )
 from hpmesh.models.hf_wrapper import num_flops_per_token
-from hpmesh.trainer.config import HybridMeshConfig, ModelArguments, TrainingArguments
+from hpmesh.trainer.config import (
+    HybridMeshConfig,
+    ModelConfig,
+    TrainingConfig,
+)
+from hpmesh.trainer.config import (
+    MetricsConfig as Config,
+)
 from hpmesh.utils.monitoring import Color, NoColor, colors_enabled, get_peak_flops
-
-Config = MetricsProcessor.Config
 
 
 class _RecordingLogger(BaseLogger):
@@ -715,7 +720,7 @@ def test_a_tpu_name_must_start_with_tpu() -> None:
 
 
 def _cfg(**model_kwargs) -> HybridMeshConfig:
-    return HybridMeshConfig(model=ModelArguments(**model_kwargs))
+    return HybridMeshConfig(model=ModelConfig(**model_kwargs))
 
 
 def test_num_flops_per_token_is_positive_and_grows_with_the_model() -> None:
@@ -740,7 +745,7 @@ def test_num_flops_per_token_is_affine_in_the_layer_count() -> None:
 def test_num_flops_per_token_matches_the_formula_exactly() -> None:
     """A fully specified model, so every term is checked rather than bounded."""
     cfg = HybridMeshConfig(
-        model=ModelArguments(
+        model=ModelConfig(
             vocab_size=32,
             hidden_size=8,
             intermediate_size=16,
@@ -748,7 +753,7 @@ def test_num_flops_per_token_matches_the_formula_exactly() -> None:
             num_attention_heads=2,
             num_key_value_heads=1,
         ),
-        training=TrainingArguments(max_seq_len=4),
+        training=TrainingConfig(max_seq_len=4),
     )
     # _cfg() above cannot set training, so max_seq_len is the default 64.
     assert cfg.max_seq_len == 4
@@ -773,12 +778,12 @@ def test_the_attention_term_grows_with_sequence_length() -> None:
     """The parameter term does not depend on the sequence length, so this
     isolates the attention term."""
     short = HybridMeshConfig(
-        model=ModelArguments(hidden_size=8),
-        training=TrainingArguments(max_seq_len=8),
+        model=ModelConfig(hidden_size=8),
+        training=TrainingConfig(max_seq_len=8),
     )
     long = HybridMeshConfig(
-        model=ModelArguments(hidden_size=8),
-        training=TrainingArguments(max_seq_len=32),
+        model=ModelConfig(hidden_size=8),
+        training=TrainingConfig(max_seq_len=32),
     )
 
     assert num_flops_per_token(long) > num_flops_per_token(short)
@@ -819,8 +824,8 @@ def test_num_flops_per_token_defaults_kv_heads_to_the_head_count(
         return _Arch()
 
     cfg = HybridMeshConfig(
-        model=ModelArguments(hidden_size=8),
-        training=TrainingArguments(max_seq_len=4),
+        model=ModelConfig(hidden_size=8),
+        training=TrainingConfig(max_seq_len=4),
     )
 
     monkeypatch.setattr(hf_wrapper, "build_model_config_for", lambda _: _config(None))

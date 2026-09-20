@@ -37,13 +37,15 @@ from hpmesh.datasets import (
     DatasetMixConfig,
     FirstFitPackingConfig,
     GrainDataLoader,
+    GrainDataLoaderConfig,
     TextCollator,
     TextSequence,
     WeightedDataset,
+    build_dataloader,
 )
 from hpmesh.datasets.hf.text import ChatProcessor
 from hpmesh.datasets.random_data import RandomTokenDataLoader
-from hpmesh.trainer.config import DataloaderArguments
+from hpmesh.trainer.config import DataloaderConfig
 
 # --------------------------------------------------------------------------
 # Tokenizer
@@ -258,7 +260,7 @@ def test_collator_num_rows_per_batch_is_one(collator):
 
 def _loader(dataset, tokenizer, *, dp_rank=0, dp_world_size=1, config_kwargs=None):
     return GrainDataLoader(
-        GrainDataLoader.Config(dataset=dataset, **(config_kwargs or {})),
+        GrainDataLoaderConfig(dataset=dataset, **(config_kwargs or {})),
         dp_world_size=dp_world_size,
         dp_rank=dp_rank,
         tokenizer=tokenizer,
@@ -368,7 +370,7 @@ def test_max_num_documents_must_be_positive(tokenizer, corpus, num_tokens_per_ba
         dataset_iteration_policy=make_policy(),
     )
     with pytest.raises(ValueError, match="max_num_documents must be positive"):
-        GrainDataLoader.Config(dataset=dataset, max_num_documents=0)
+        GrainDataLoaderConfig(dataset=dataset, max_num_documents=0)
 
 
 # --------------------------------------------------------------------------
@@ -614,28 +616,29 @@ def test_chat_processor_requires_an_eos_id():
 
 def test_dataloader_arguments_default_to_the_synthetic_corpus() -> None:
     """The default must need no assets, so an untouched run stays offline."""
-    args = DataloaderArguments()
+    args = DataloaderConfig()
     assert args.dataset == "random"
     assert args.tokenizer_path is None
 
 
 def test_dataloader_arguments_require_a_tokenizer_for_a_real_corpus() -> None:
     with pytest.raises(ValueError, match="tokenizer_path is required"):
-        DataloaderArguments(dataset="c4")
+        DataloaderConfig(dataset="c4")
 
 
 def test_dataloader_arguments_require_a_path_for_local_jsonl() -> None:
     with pytest.raises(ValueError, match="dataset_path is required"):
-        DataloaderArguments(dataset="local_jsonl", tokenizer_path="/tmp/tok")
+        DataloaderConfig(dataset="local_jsonl", tokenizer_path="/tmp/tok")
 
 
 def test_dataloader_arguments_reject_an_unknown_corpus() -> None:
     with pytest.raises(ValueError, match="unknown dataset"):
-        DataloaderArguments(dataset="not-a-dataset", tokenizer_path="/tmp/tok")
+        DataloaderConfig(dataset="not-a-dataset", tokenizer_path="/tmp/tok")
 
 
 def test_dataloader_arguments_build_the_synthetic_loader_without_assets() -> None:
-    loader = DataloaderArguments().build(
+    loader = build_dataloader(
+        DataloaderConfig(),
         seed=42,
         vocab_size=128,
         batch_size=4,
@@ -662,11 +665,12 @@ def test_dataloader_arguments_build_a_grain_loader_over_a_local_corpus(
     """
     tokenizer_path = str(tmp_path / "tokenizer")
     write_tokenizer(tokenizer_path)
-    loader = DataloaderArguments(
-        dataset="local_jsonl",
-        tokenizer_path=tokenizer_path,
-        dataset_path=corpus,
-    ).build(
+    loader = build_dataloader(
+        DataloaderConfig(
+            dataset="local_jsonl",
+            tokenizer_path=tokenizer_path,
+            dataset_path=corpus,
+        ),
         seed=1,
         vocab_size=128,
         batch_size=4,
@@ -698,11 +702,12 @@ def test_dataloader_arguments_reject_a_mismatched_dp_degree_at_build_time(
     """
     tokenizer_path = str(tmp_path / "tokenizer")
     write_tokenizer(tokenizer_path)
-    loader = DataloaderArguments(
-        dataset="local_jsonl",
-        tokenizer_path=tokenizer_path,
-        dataset_path=corpus,
-    ).build(
+    loader = build_dataloader(
+        DataloaderConfig(
+            dataset="local_jsonl",
+            tokenizer_path=tokenizer_path,
+            dataset_path=corpus,
+        ),
         seed=1,
         vocab_size=128,
         batch_size=4,
