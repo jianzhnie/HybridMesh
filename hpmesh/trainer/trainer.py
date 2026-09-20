@@ -53,9 +53,10 @@ import torch.nn.functional as F
 from .. import parallel
 from ..components.checkpointer import DATALOADER, TRAIN_STATE, CheckpointManager
 from ..components.loss import IGNORE_INDEX, next_token_targets
-from ..components.lr_scheduler import LRScheduler
+from ..components.lr_scheduler import LRScheduler, build_lr_scheduler
 from ..components.metrics import MetricsProcessor
 from ..components.profiler import Profiler
+from ..datasets import build_dataloader
 from ..datasets.loader import BaseDataLoader, DataloaderExhaustedError, TrainerBatch
 from ..datasets.random_data import Batch, DataLoaderExhausted, RandomTokenDataLoader
 from ..mesh import build_mesh, build_parallel_dims, init_distributed
@@ -159,7 +160,8 @@ class Trainer:
         # multiply per step and removes the branch that would otherwise decide
         # whether the lr is scheduled -- a branch whose two sides would have to
         # be kept numerically identical forever.
-        self.lr_scheduler = cfg.lr_scheduler_config.build(
+        self.lr_scheduler = build_lr_scheduler(
+            cfg.lr_scheduler_config,
             optimizer=self.optimizer,
             training_steps=cfg.steps,
         )
@@ -275,7 +277,8 @@ class Trainer:
         state that could disagree with the first.
         """
         dp_rank, dp_world_size = self._dp_rank_world_size()
-        loader = self.cfg.dataloader.build(
+        loader = build_dataloader(
+            self.cfg.dataloader,
             seed=self.cfg.seed,
             vocab_size=self.cfg.vocab_size,
             batch_size=self.cfg.global_batch_size,

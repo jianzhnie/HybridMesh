@@ -10,11 +10,22 @@ parser group or a nested one:
   group that holds it -- ``CheckpointConfig``, ``DataloaderConfig``,
   ``MetricsConfig``, ``ProfilerConfig``, ``LRSchedulerConfig``.
 
+These are descriptions, not builders. Nothing here constructs the runtime object
+it describes -- the loader in ``datasets/build.py``, the scheduler in
+``components/lr_scheduler.py`` -- for two reasons. A config that carries its own
+builder suggests the built object is one of its fields, and it is not: building
+takes arguments the config does not have (which rank am I, how many tokens per
+batch). And a builder has to name the type it produces, which for a config
+nested under a component would mean importing the component into this module
+while the component imports this one back.
+
+So the seam is a factory function that takes the config as its first argument.
+``trainer/trainer.py`` calls those; this module is only ever read.
+
 A component -- the checkpointer, the metrics processor, the profiler, the
-learning-rate schedule -- does not define its own config class next to itself;
-it takes an instance from here and reads fields off it. It names the type only
-under ``TYPE_CHECKING``, because importing this module for real would close a
-cycle: this module imports the components' runtime classes to build them.
+learning-rate schedule -- does not define its own config class next to itself
+either; it takes an instance from here and reads fields off it. It names the
+type only under ``TYPE_CHECKING``, for the same cycle reason.
 
 Design notes (see docs/hybridmesh_design.md): grouped by concern, then COMPOSED
 -- not mixed in via multiple inheritance -- so each group's ``__post_init__``
@@ -27,28 +38,15 @@ schedule, deterministic seeding. Add knobs only when a learning step needs them.
 
 from __future__ import annotations
 
-import functools
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Literal
 
-import grain.python as grain
 import torch
-from torch.optim import Optimizer
 from transformers import AutoConfig
 
 from hpmesh.components.checkpointer import LR_SCHEDULER, MODEL, OPTIMIZER
-from hpmesh.components.lr_scheduler import LRScheduler, _wsd_factor
-from hpmesh.datasets.hf.text import DATASETS, make_local_jsonl
-from hpmesh.datasets.loader import (
-    BaseDataLoader,
-    GrainDataLoader,
-    GrainDataLoaderConfig,
-    build_dataset_iteration_policy,
-)
-from hpmesh.datasets.packing import ConcatThenSplitPackingConfig
-from hpmesh.datasets.random_data import RandomTokenDataLoader
-from hpmesh.datasets.types import DatasetBuildContext
+from hpmesh.datasets.hf.text import DATASETS
 from hpmesh.utils import filesystem
 from hpmesh.utils.logger_utils import get_logger
 
@@ -440,65 +438,6 @@ class LRSchedulerConfig:
                 f"min_lr_factor must be in [0, 1), got {self.min_lr_factor}"
             )
 
-    def build(self, *, optimizer: Optimizer, training_steps: int) -> LRScheduler:
-        """Build the scheduler this configuration describes.
-
-        ``training_steps`` is the run's actual length; ``total_steps`` overrides
-        it for the curve only. The two are validated against each other rather
-        than clamped: a schedule shorter than the run would put the last steps
-        past its end, where the decay factor runs off the bottom of the curve
-        and turns the learning rate negative -- which ascends the loss instead of
-        failing.
-        """
-        total_steps = (
-            self.total_steps if self.total_steps is not None else training_steps
-        )
-        if total_steps < training_steps:
-            raise ValueError(
-                f"lr_scheduler.total_steps ({total_steps}) is shorter than the run "
-                f"({training_steps} steps). The decay would run past its end and "
-                "produce a negative learning rate. Raise total_steps, or drop it "
-                "to use the run length."
-            )
-
-        warmup_steps = self.warmup_steps
-        if warmup_steps > total_steps:
-            logger.warning(
-                "lr_scheduler.warmup_steps (%d) exceeds total_steps (%d); "
-                "clamping the warmup to the whole schedule.",
-                warmup_steps,
-                total_steps,
-            )
-            warmup_steps = total_steps
-
-        decay_steps = round(total_steps * self.decay_ratio)
-        if warmup_steps + decay_steps > total_steps:
-            logger.warning(
-                "lr_scheduler warmup (%d) + decay (%d) exceed total_steps (%d); "
-                "shortening the decay to %d.",
-                warmup_steps,
-                decay_steps,
-                total_steps,
-                total_steps - warmup_steps,
-            )
-            decay_steps = total_steps - warmup_steps
-        # The "+ 1" is a virtual final step. Without it the last real step would
-        # land exactly at the end of the decay, where the factor is 0 (linear) --
-        # an lr of zero on the final update. With no decay phase it makes the
-        # stable region one step longer than the run, which is the point: every
-        # real step falls inside it and the factor is a constant 1.0.
-        stable_steps = total_steps + 1 - warmup_steps - decay_steps
-
-        lr_lambda = functools.partial(
-            _wsd_factor,
-            warmup_steps=warmup_steps,
-            stable_steps=stable_steps,
-            decay_steps=decay_steps,
-            decay_type=self.decay_type,
-            min_lr_factor=self.min_lr_factor,
-        )
-        return LRScheduler(optimizer, lr_lambda, total_steps=total_steps)
-
 
 @dataclass
 class OptimizerConfig:
@@ -875,84 +814,6 @@ class DataloaderConfig:
             )
         if self.max_num_documents is not None and self.max_num_documents <= 0:
             raise ValueError("max_num_documents must be positive")
-
-    def build(
-        self,
-        *,
-        seed: int,
-        vocab_size: int,
-        batch_size: int,
-        seq_len: int,
-        dp_rank: int,
-        dp_world_size: int,
-        max_context_length: int,
-        num_tokens_per_batch: int,
-    ) -> BaseDataLoader:
-        """Build the loader this configuration describes.
-
-        ``num_tokens_per_batch`` is the per-rank token count, matching
-        torchtitan's ``num_tokens_per_microbatch_per_dp_rank``: the Grain
-        loader divides every dataset's rows among ``dp_world_size`` ranks and
-        hands each one exactly that many tokens, so the DP slice the trainer
-        used to perform no longer exists on this path.
-        """
-        if self.dataset == "random":
-            return RandomTokenDataLoader(
-                seed=seed,
-                vocab_size=vocab_size,
-                batch_size=batch_size,
-                seq_len=seq_len,
-                dp_rank=dp_rank,
-                dp_world_size=dp_world_size,
-            )
-
-        # Imported here, not at module scope: building the tokenizer pulls in
-        # ``tokenizers``/``jinja2``, and a random-token run should not have to
-        # have them installed.
-        from hpmesh.components.tokenizer import HuggingFaceTokenizer
-
-        tokenizer = HuggingFaceTokenizer(tokenizer_path=self.tokenizer_path)
-        recipe = (
-            make_local_jsonl(path=self.dataset_path)
-            if self.dataset == "local_jsonl"
-            else DATASETS[self.dataset]
-        )
-        context = DatasetBuildContext(
-            tokenizer=tokenizer,
-            max_context_length=max_context_length,
-            num_tokens_per_batch=num_tokens_per_batch,
-            read_options=grain.ReadOptions(),
-            max_num_documents=self.max_num_documents,
-        )
-        # The loader's config is built first and the graph filled in after,
-        # because ``build_dataset_iteration_policy`` derives the policy the
-        # graph is built with *from* that config -- restating the seed and
-        # shuffle flags here instead would let the two drift, and a shuffle
-        # flag the graph never sees is a silent no-op. ``dataset`` is the one
-        # field the policy does not read, so the placeholder cannot leak.
-        loader_config = GrainDataLoaderConfig(
-            dataset=None,
-            seed=seed,
-            shuffle=self.shuffle,
-            streaming_shuffle_buffer_size=self.streaming_shuffle_buffer_size,
-            num_prefetch_batches=self.num_prefetch_batches,
-            max_num_documents=self.max_num_documents,
-        )
-        graph = ConcatThenSplitPackingConfig(dataset=recipe).build(
-            context=context,
-            dataset_iteration_policy=build_dataset_iteration_policy(
-                loader_config, dp_rank=dp_rank, dp_world_size=dp_world_size
-            ),
-        )
-        loader_config.dataset = graph
-        return GrainDataLoader(
-            loader_config,
-            dp_world_size=dp_world_size,
-            dp_rank=dp_rank,
-            tokenizer=tokenizer,
-            max_context_length=max_context_length,
-            num_tokens_per_batch=num_tokens_per_batch,
-        )
 
 
 @dataclass
