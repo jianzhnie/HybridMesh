@@ -23,17 +23,26 @@ What the migration added, and why each earned its place:
   and load; the manager owns *how*, including the interval and retention
   policies. ``Trainer.state_dict``/``load_state_dict`` are what make the step
   and token counters part of the checkpoint.
+* **Metrics**, reported through ``components/metrics`` rather than a bare
+  ``logger.info``: the same loss and grad_norm, plus throughput, MFU and device
+  memory, to stdout and optionally TensorBoard or WandB. The processor also owns
+  the reporting frequency and the token/data-loading accounting, so the loop
+  only has to call ``add_tokens`` and ``log``.
+* **Profiling**, through ``components/profiler``: ``Profiler`` is entered once
+  around the loop and stepped once per iteration, so Kineto traces land on a
+  schedule and allocator memory snapshots are written periodically -- plus one
+  more if the run dies of an OOM, which is the one that is usually wanted.
 
 What was NOT ported: the component system (``Configurable``, ``model_spec``,
-metrics processor, ``sdc_replayer``, profiler, validator, CUDA graphs). Those are
-infrastructure the loop calls into, not loop logic, and hpmesh has no
-counterparts to call.
+``sdc_replayer``, validator, CUDA graphs). Those are infrastructure the loop
+calls into, not loop logic, and hpmesh has no counterparts to call.
 """
 
 from __future__ import annotations
 
 from collections.abc import Iterator
 from contextlib import nullcontext
+from time import perf_counter
 from typing import Any
 
 import torch
@@ -42,6 +51,8 @@ import torch.nn.functional as F
 
 from .. import parallel
 from ..components.checkpointer import TRAIN_STATE, CheckpointManager
+from ..components.metrics import MetricsProcessor
+from ..components.profiler import Profiler
 from ..datasets.random_data import (
     Batch,
     DataLoaderExhausted,
@@ -49,8 +60,13 @@ from ..datasets.random_data import (
     batch_iterator,
 )
 from ..mesh import build_mesh, build_parallel_dims, init_distributed
-from ..models.hf_wrapper import HFTransformerModel, build_model_config_for
+from ..models.hf_wrapper import (
+    HFTransformerModel,
+    build_model_config_for,
+    num_flops_per_token,
+)
 from ..parallel.collectives import clip_grad_norm_, dist_max, dist_sum, dist_sum_tensor
+from ..parallel.context_parallel import shard_batch_for_cp
 from ..parallel.spmd_types import spmd_context
 from ..utils.logger_utils import get_logger
 from .config import HybridMeshConfig
@@ -117,6 +133,24 @@ class Trainer:
         # can log "step 61 (resumed at 60)" without re-deriving them.
         self.step = 0
         self.ntokens_seen = 0
+
+        # 5. metrics, last because it needs the mesh (for the throughput
+        #    divisor and the metrics rank) and the model config (for FLOPs per
+        #    token). It replaces the plain per-step ``logger.info`` the loop used
+        #    to emit: the same loss and grad_norm, plus throughput, MFU and
+        #    memory, and the frequency is now one knob instead of two.
+        #
+        #    ``num_flops_per_token`` is measured from the parameters, not from
+        #    the config's sizes, so the number describes the model that actually
+        #    exists -- including one whose sizes came from the Hub.
+        self.metrics = MetricsProcessor(
+            cfg.metrics,
+            parallel_dims=self.parallel_dims,
+            dump_folder=cfg.dump_folder,
+            pp_schedule=cfg.pipeline_parallel_schedule,
+            num_flops_per_token=num_flops_per_token(cfg),
+            tag=cfg.metrics.tag,
+        )
 
     # -- setup helpers ---------------------------------------------------------
 
@@ -215,6 +249,26 @@ class Trainer:
 
     def _forward_backward_body(self, batch: Batch) -> tuple[torch.Tensor, int]:
         input_ids, labels = self._flatten(batch)
+        cp_mesh = (
+            None
+            if self.parallel_dims is None
+            else self.parallel_dims.get_optional_mesh("cp")
+        )
+        positions = None
+        if cp_mesh is not None:
+            # CP shards the sequence: positions are generated explicitly (the
+            # wrapper's arange default would restart at 0 on every rank) and
+            # sharded alongside the tokens, so RoPE follows each token to its
+            # rank. The loss sums over tokens, so the headtail rearrangement
+            # needs no undoing here.
+            positions = torch.arange(input_ids.numel(), device=self.device)
+            input_ids, labels, positions = shard_batch_for_cp(
+                input_ids,
+                labels,
+                positions,
+                cp_mesh,
+                load_balancer=self.cfg.parallel.context_parallel_load_balancer,
+            )
         # ``spmd_context`` is what makes a process group answerable *by name*
         # (``spmd_mesh_group("tp")`` and friends) for the duration of the body.
         # It is entered here, around the forward/backward only, because that is
@@ -222,7 +276,7 @@ class Trainer:
         # the checkpointers take their groups as arguments. On a single process
         # it is a no-op, so the same code runs from one device to a full mesh.
         with self._param_context(), spmd_context(self.parallel_dims):
-            logits = self.model(input_ids)
+            logits = self.model(input_ids, positions=positions)
             loss_sum, num_valid_tokens = self._loss_sum(logits, labels)
             del logits
             loss_sum.backward()
@@ -283,8 +337,12 @@ class Trainer:
 
         # The reduced meshes are resolved once here rather than inline at each
         # collective: under PP the loss and token count must go to the loss mesh
-        # (which spans PP, where the total only exists on the last stage), while
-        # everything else stays on the dense DP mesh.
+        # (which spans PP, where the total only exists on the last stage), and
+        # under CP they must span the CP axis too -- every CP rank holds a
+        # sequence shard, so a dp-only reduction would undercount both the
+        # token total and the loss sum by a factor of cp. The loss mesh is
+        # exactly dp * cp, so it is the right group for both cases; everything
+        # else stays on the dense DP mesh.
         dp_mesh = (
             None
             if self.parallel_dims is None
@@ -295,9 +353,22 @@ class Trainer:
             if self.parallel_dims is None
             else self.parallel_dims.get_optional_mesh("pp")
         )
-        loss_mesh = dp_mesh if pp_mesh is None else self.parallel_dims.get_mesh("loss")
+        cp_mesh = (
+            None
+            if self.parallel_dims is None
+            else self.parallel_dims.get_optional_mesh("cp")
+        )
+        loss_mesh = (
+            dp_mesh
+            if pp_mesh is None and cp_mesh is None
+            else self.parallel_dims.get_mesh("loss")
+        )
 
+        data_load_start = perf_counter()
         batch = self._dp_slice(next(data_iterator))
+        self.metrics.add_data_loading_time(perf_counter() - data_load_start)
+        self.metrics.add_tokens(batch.labels.numel())
+
         loss_sum, local_valid_tokens = self.forward_backward_step(batch)
         self.ntokens_seen += local_valid_tokens
 
@@ -306,7 +377,8 @@ class Trainer:
         local_valid_tokens_tensor = torch.tensor(
             local_valid_tokens, dtype=torch.int64, device=self.device
         )
-        global_valid_tokens = dist_sum_tensor(local_valid_tokens_tensor, dp_mesh)
+        token_mesh = dp_mesh if cp_mesh is None else loss_mesh
+        global_valid_tokens = dist_sum_tensor(local_valid_tokens_tensor, token_mesh)
 
         grad_norm = clip_grad_norm_(
             [p for p in self.model.parameters()],
@@ -324,13 +396,16 @@ class Trainer:
         # tensor keeps the whole computation on device.
         loss = loss_sum / global_valid_tokens
 
+        # Only a logging step derives the two reported losses: they are the only
+        # place this function touches the host, and the metrics dict is typed
+        # for floats. The loss the optimizer uses is the tensor above.
         if not self.should_log():
             return None
 
         if loss_mesh is not None:
             local_avg = loss_sum / local_valid_tokens_tensor
-            global_avg_loss = dist_sum(loss, loss_mesh)
-            global_max_loss = dist_max(local_avg, loss_mesh)
+            global_avg_loss = float(dist_sum(loss, loss_mesh))
+            global_max_loss = float(dist_max(local_avg, loss_mesh))
         else:
             # Single rank: the two are the same number by construction.
             global_avg_loss = global_max_loss = float(loss)
@@ -364,7 +439,10 @@ class Trainer:
     # -- the loop ---------------------------------------------------------------
 
     def should_log(self) -> bool:
-        return self.step % self.cfg.log_freq == 0
+        # Delegated rather than reimplemented: the metrics processor also
+        # guarantees the first step logs, and two copies of that rule would
+        # drift the moment one of them changed.
+        return self.metrics.should_log(self.step)
 
     def should_continue_training(self) -> bool:
         return self.step < self.cfg.steps
@@ -390,35 +468,51 @@ class Trainer:
                 logger.info(f"Resuming from step {self.step}")
 
             data_iterator = self._data_iterator()
-            while self.should_continue_training():
-                self.step += 1
+            # Entered around the loop rather than around a single step: the
+            # torch profiler's schedule counts iterations across the whole run
+            # and only dumps a trace at the end of a cycle, so a per-step
+            # context would never reach one. Left open when profiling is off --
+            # the Profiler holds no handles in that case.
+            with Profiler(
+                self.cfg.profiler,
+                global_step=self.step,
+                base_folder=self.cfg.dump_folder,
+            ) as profiler:
+                while self.should_continue_training():
+                    self.step += 1
 
-                try:
-                    metrics = self.train_step(data_iterator)
-                except DataLoaderExhausted:
-                    logger.warning("Ran out of data; the last step was canceled.")
-                    break
+                    try:
+                        step_metrics = self.train_step(data_iterator)
+                    except DataLoaderExhausted:
+                        logger.warning("Ran out of data; the last step was canceled.")
+                        break
 
-                if metrics is not None:
-                    logger.info(
-                        f"step {self.step:4d} | loss {metrics['loss']:.6f} "
-                        f"| max {metrics['max_loss']:.6f} "
-                        f"| grad_norm {metrics['grad_norm']:.4f} "
-                        f"| tokens {self.ntokens_seen}"
-                    )
+                    if step_metrics is not None:
+                        self.metrics.log(
+                            self.step,
+                            global_avg_loss=step_metrics["loss"],
+                            global_max_loss=step_metrics["max_loss"],
+                            grad_norm=step_metrics["grad_norm"],
+                        )
 
-                # The manager owns the interval policy: ``save`` decides for
-                # itself whether this step is a checkpointing step. The final
-                # step is forced so a run that ends off-interval still leaves a
-                # resumable artifact rather than only a mid-run one.
-                last_step = self.step == self.cfg.steps
-                if self.checkpointer.save(self.step, last_step=last_step):
-                    logger.info(f"Saved checkpoint for step {self.step}")
+                    # The manager owns the interval policy: ``save`` decides for
+                    # itself whether this step is a checkpointing step. The final
+                    # step is forced so a run that ends off-interval still leaves
+                    # a resumable artifact rather than only a mid-run one.
+                    last_step = self.step == self.cfg.steps
+                    if self.checkpointer.save(self.step, last_step=last_step):
+                        logger.info(f"Saved checkpoint for step {self.step}")
+
+                    # Advances the schedule. After the save, so the profiler's
+                    # active iteration covers an ordinary step rather than one
+                    # that also wrote a checkpoint.
+                    profiler.step()
         finally:
             # Drain any async save still in flight and stop the purge thread.
             # In a ``finally`` so a run that dies mid-loop still finishes the
             # checkpoint it had already started writing.
             self.checkpointer.close()
+            self.metrics.close()
 
         if dist.is_initialized():
             dist.destroy_process_group()
