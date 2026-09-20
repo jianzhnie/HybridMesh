@@ -28,17 +28,19 @@ the first two plus whatever the caller passes in ``states``:
   ``torch.optim.Optimizer`` satisfies DCP's ``Stateful``, but it cannot restore
   into a *fresh* optimizer: Adam's moments do not exist until the first
   ``step()``, and DCP writes into the tensors a state dict reports rather than
-  calling ``load_state_dict``. The wrapper materializes them first. (No FQN
-  flattening is needed alongside it: hpmesh rejects ``pp > 1``, the only
-  configuration that would collide two optimizers' positional param group
-  indices -- see ``OptimizerWrapper``.)
+  calling ``load_state_dict``. The wrapper materializes them first. Under PP it
+  also re-keys state by parameter FQN (``model_parts=...``), because two
+  stages' positional indices would otherwise collide in one checkpoint.
 * ``train_state`` -- the ``Trainer`` itself. torchtitan's ``Trainer`` is a
   ``Stateful`` exposing ``step`` and ``ntokens_seen``; hpmesh's trainer exposes
   the same two through ``state_dict``/``load_state_dict`` for the same reason:
   they are the counters a resumed run needs.
-
-``lr_scheduler`` and ``dataloader`` exist here as key names and nothing more --
-hpmesh has neither component, so no run populates them yet.
+* ``lr_scheduler`` -- the ``LRScheduler`` from ``components/lr_scheduler.py``,
+  registered only when the run has a non-constant schedule. A constant lr is a
+  function of nothing, so saving it would be a key that can only disagree with
+  the optimizer it already sits beside.
+* ``dataloader`` -- the ``BaseDataLoader``, registered only when it is loadable.
+  See the trainer's ``_build_dataloader`` for why the synthetic one is not.
 """
 
 from .base import (

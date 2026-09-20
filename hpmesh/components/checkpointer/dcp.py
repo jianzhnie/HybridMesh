@@ -129,15 +129,17 @@ class CheckpointManager(BaseCheckpointManager):
        collide and one of them is lost. Then on reload only one stage can restore
        its optimizer state and the others error.
 
-       The solution is optimizer flattening, which ``components/optimizer.py``
-       does: optimizer state dicts are keyed by FQN and flattened into one dict.
+       The solution is keying optimizer state by FQN instead of position, which
+       ``OptimizerWrapper`` does when constructed with ``model_parts`` -- pass
+       ``optimizer_fqn_keying=True`` (the trainer does, when pp > 1).
+       torchtitan's equivalent is its ``OptimizersContainer`` flattening.
 
     2. With complex PP schedules there are multiple model chunks per PP rank,
        which compounds (1) by also requiring us to reason about multiple local
        ``optim`` objects. ``ModelWrapper`` flattens the state dicts from each
        chunk into one before saving or loading, relying on the individual
        state dicts not to collide -- guaranteed for the model by correct
-       pipeline splitting, and for the optimizer by the flattening in (1).
+       pipeline splitting, and for the optimizer by the FQN keying in (1).
 
     3. LR schedulers index model state like optimizers do, so they are flattened
        the same way, under the assumption that all of them share a state dict.
@@ -154,6 +156,9 @@ class CheckpointManager(BaseCheckpointManager):
         sd_adapter: converts model state dicts between the native layout and
             another format (HF safetensors). Required for the HF export paths.
             hpmesh ships none yet, so those paths reject at construction.
+        optimizer_fqn_keying: key optimizer state by parameter FQN rather than
+            positional index. Required under pipeline parallelism (see above);
+            off otherwise, so existing checkpoints keep their format.
     """
 
     @dataclass(kw_only=True)
@@ -181,6 +186,7 @@ class CheckpointManager(BaseCheckpointManager):
         states: dict[str, Any],
         folder: str,
         sd_adapter: Any | None = None,
+        optimizer_fqn_keying: bool = False,
     ) -> None:
         self.enable = config.enable
         if not self.enable:
@@ -197,7 +203,9 @@ class CheckpointManager(BaseCheckpointManager):
                 # Wrapped rather than passed bare: see OptimizerWrapper. DCP
                 # writes into the tensors a Stateful reports, so a resumed run's
                 # fresh optimizer needs its Adam moments materialized first.
-                OPTIMIZER: OptimizerWrapper(optimizer),
+                OPTIMIZER: OptimizerWrapper(
+                    optimizer, model_parts=model_parts if optimizer_fqn_keying else None
+                ),
             }
         )
 
@@ -651,7 +659,7 @@ class CheckpointManager(BaseCheckpointManager):
 # Bound late so the module attribute ``CheckpointManager`` (used by the
 # ``from .dcp import CheckpointManager`` export and by tests) stays the class,
 # while DATALOADER and LR_SCHEDULER remain importable from here for callers that
-# build a fuller ``states`` dict.
+# build a fuller ``states`` dict -- the trainer puts one of each under those keys.
 __all__ = [
     "AsyncMode",
     "CheckpointManager",
