@@ -79,6 +79,23 @@ def test_input_and_output_weights_shift_the_boundary() -> None:
     assert count_layers(heavy[0]) < count_layers(light[0])
 
 
+def test_looped_schedule_split_gives_every_virtual_stage_a_layer() -> None:
+    """The 4-virtual-stage split the Interleaved1F1B equivalence check runs on.
+
+    A looped schedule over pp=2 defaults to two stages per rank (4 stages), so
+    the model must be deep enough that no stage is left holding only the
+    embedding or only the head.
+    """
+    parts = generate_llm_fqn_per_model_part(4, 6)
+
+    assert parts == [
+        ["tok_embeddings", "layers.0", "rotary_emb"],
+        ["layers.1", "layers.2", "rotary_emb"],
+        ["layers.3", "layers.4", "rotary_emb"],
+        ["layers.5", "norm", "lm_head", "rotary_emb"],
+    ]
+
+
 def test_zero_stages_is_rejected() -> None:
     with pytest.raises(ValueError, match="at least 1"):
         generate_llm_fqn_per_model_part(0, 4)

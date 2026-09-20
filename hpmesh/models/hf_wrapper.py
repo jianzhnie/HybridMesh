@@ -42,7 +42,13 @@ from transformers.configuration_utils import PretrainedConfig
 from transformers.integrations.flex_attention import flex_attention_forward
 from transformers.modeling_utils import AttentionInterface
 
-from ..parallel.context_parallel import shard_attention_mask_for_cp
+from ..components.loss import next_token_targets
+from ..datasets.random_data import Batch
+from ..parallel.context_parallel import (
+    shard_attention_mask_for_cp,
+    shard_batch_for_cp,
+)
+from ..parallel.parallel_dims import ParallelDims
 from ..utils.batch_invariant import is_in_batch_invariant_mode
 from .common.masks import (
     create_attention_mask,
@@ -283,6 +289,41 @@ def _first_present(module: nn.Module, names: tuple[str, ...], what: str) -> str:
     )
 
 
+def _collapse_batch_dims(
+    inputs: torch.Tensor, labels: torch.Tensor
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Flatten a ``(B, T)`` batch into the ``(B*T,)`` shape the forward takes.
+
+    The wrapper is a single-sequence entry point -- it adds and removes its own
+    batch dim around the decoder call. The synthetic source yields one document
+    per row of length ``max_seq_len``, so the concatenation is exactly the
+    single causal document the fallback attention path expects; RoPE is driven
+    per row because positions restart at each row boundary.
+
+    A packed (Grain) batch already arrives as a flat token stream, so for it
+    this is the identity -- which is what makes the two sources one code path
+    from here on. Used by both the training path (``preprocess_inputs``) and the
+    pipeline path, which chunks rows before collapsing; keeping it in one place
+    is what makes the two chunkings agree.
+    """
+    return inputs.reshape(-1), labels.reshape(-1)
+
+
+def _document_shift(labels: torch.Tensor, *, seq_len: int) -> torch.Tensor:
+    """Next-token targets within a row, ``IGNORE_INDEX`` at each row end.
+
+    The synthetic source hands over labels equal to its inputs, so the shift is
+    the model's. Rows are independent documents of length ``seq_len``, so the
+    shift has to stay *within* a row: the row-final position would predict the
+    next document's first token, which the model had no context for. Those
+    positions come back ``IGNORE_INDEX`` and are excluded from the loss.
+
+    The packed source arrives already shifted and already masked at its document
+    boundaries, so it never calls this.
+    """
+    return next_token_targets(labels.reshape(-1), seq_len=seq_len)
+
+
 class HFTransformerModel(nn.Module):
     """A HF decoder stack behind a uniform training forward.
 
@@ -437,6 +478,123 @@ class HFTransformerModel(nn.Module):
             yield "lm_head", self.lm_head
         if self.rotary_emb is not None:
             yield "rotary_emb", self.rotary_emb
+
+    def preprocess_inputs(
+        self,
+        input_dict: dict[str, torch.Tensor],
+        *,
+        parallel_dims: ParallelDims | None,
+        parallelism=None,
+        max_num_documents: int | None = None,
+        max_context_length: int | None = None,
+    ) -> tuple[torch.Tensor, torch.Tensor, dict[str, Any]]:
+        """Turn a dataloader batch into ``(inputs, labels, extra_kwargs)``.
+
+        The seam torchtitan's trainer calls, and the reason it is on the model
+        rather than in the loop: every step below is a statement about *this*
+        architecture's input contract, and one of them needs the full-length
+        positions that only exist before the sequence is sharded.
+
+        1. **Normalize the batch shape.** The two loaders disagree about what a
+           batch is -- the synthetic one yields ``(B, T)`` rows of one document
+           each, a Grain one a flat packed stream -- so they are reconciled
+           here. ``num_valid_tokens`` is *not* read: the trainer pops it before
+           this call, because the loss denominator has to be the pre-shard count
+           and reduced across DP before the first backward.
+        2. **Collapse the batch dim**, turning ``(B, T)`` into the flat ``(B*T,)``
+           the forward takes.
+        3. **Build the attention mask**, when the batch carries ``positions``.
+           This has to happen before step 5: the document structure of a packed
+           batch is a global property, so the mask is built over the FULL
+           sequence and only then Q-sharded.
+        4. **Shard for context parallelism**, positions included, so RoPE
+           follows each token to its rank.
+        5. **Return the leftover dict as ``extra_kwargs``.** Those are splatted
+           into ``forward``, so anything left here must be one of its keyword
+           parameters -- ``positions`` and ``attention_masks``, and nothing else.
+
+        ``positions`` is optional: the synthetic source has none and the forward
+        falls back to its own ``arange``, which is right for a single document
+        but must not be relied on for a packed one. ``parallelism`` and
+        ``max_num_documents`` are accepted for signature parity with the
+        reference but unused: hpmesh's CP load-balancer string is latched onto
+        this wrapper by ``apply_cp`` (see ``set_cp_mesh``), and document
+        splitting is the collator's job.
+
+        Tensors arrive on the trainer's device; the trainer moves them before
+        calling, so this is pure structure and stays device-free.
+        """
+        del parallelism, max_num_documents
+        extra_kwargs: dict[str, Any] = {}
+        positions = None
+
+        if isinstance(input_dict, Batch):
+            # Rows are independent documents of length T.
+            labels = _document_shift(
+                input_dict.labels, seq_len=input_dict.labels.shape[-1]
+            )
+            inputs = input_dict.input_ids
+        else:
+            # Packed stream: the collator already shifted and masked the labels
+            # at every document boundary, so for this path the shift is a read.
+            inputs, labels = input_dict["input"], input_dict["labels"]
+            positions = input_dict.get("positions")
+
+        inputs, labels = _collapse_batch_dims(inputs, labels)
+        if positions is not None:
+            positions = positions.reshape(-1)
+
+        # A packed batch restarts its position counter at every document, which
+        # is the only thing that distinguishes "many documents in one sequence"
+        # from "one long document" once the rows are collapsed.
+        packed = positions is not None and bool((positions[1:] < positions[:-1]).any())
+
+        # Built before the CP shard, always from the FULL-length positions --
+        # which is exactly why this lives here and not in the loop: after the
+        # shard below, no rank holds a positions vector that can describe the
+        # document structure. When the mask is built there is no need to hand
+        # it to the forward: ``_apply_attention`` builds one from ``positions``
+        # anyway, so passing it would be a second copy rather than a saving.
+        cp_mesh = (
+            None if parallel_dims is None else parallel_dims.get_optional_mesh("cp")
+        )
+        if cp_mesh is None and positions is not None:
+            mask = self.get_attention_masks(positions=positions)
+            if self.model.config._attn_implementation == _ATTN_IMPLEMENTATION:
+                extra_kwargs["attention_masks"] = mask
+
+        if cp_mesh is not None:
+            if positions is None:
+                # The forward's own ``arange`` default would restart at 0 on
+                # every rank; the shard needs positions that describe the whole
+                # sequence.
+                positions = torch.arange(inputs.numel(), device=inputs.device)
+            # A causal-only mask (a single document) can be rebuilt from this
+            # rank's positions shard, which is what ``_get_cp_attention_masks``
+            # does. Packed cannot: ``positions`` is about to be sharded and the
+            # document structure is not recoverable from a shard of it, so the
+            # full-length mask is built first and Q-sharded to match. The GQA
+            # head count still divides by cp -- sharding Q does not change how
+            # many Q heads a rank owns.
+            if packed:
+                attention_masks = shard_attention_mask_for_cp(
+                    self.get_attention_masks(positions=positions),
+                    cp_mesh,
+                    self._cp_load_balancer,
+                )
+                if self.model.config._attn_implementation == _ATTN_IMPLEMENTATION:
+                    extra_kwargs["attention_masks"] = attention_masks
+            inputs, labels, positions = shard_batch_for_cp(
+                inputs,
+                labels,
+                positions,
+                cp_mesh,
+                load_balancer=self._cp_load_balancer,
+            )
+
+        if positions is not None:
+            extra_kwargs["positions"] = positions
+        return inputs, labels, extra_kwargs
 
     def get_attention_masks(self, positions: torch.Tensor):
         """Build the flex BlockMask for this batch.

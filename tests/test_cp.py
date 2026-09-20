@@ -16,12 +16,12 @@ import pytest
 import spmd_types as spmd
 import torch
 
-from hpmesh.parallel.cp_ep import (
+from hpmesh.parallel.context_parallel import (
     HEAD_DIM,
     TOKEN_DIM,
     KVAllGatherContextParallel,
     UlyssesContextParallel,
-    apply_cp_ep,
+    apply_cp,
     cp_group,
     cp_redistribute,
 )
@@ -80,30 +80,17 @@ def test_default_reduce_dtype_is_float32() -> None:
     )
 
 
-def test_apply_cp_ep_is_a_no_op_when_both_axes_are_off() -> None:
-    """CP=1/EP=1 must hand the model back untouched rather than raise."""
+def test_apply_cp_is_a_no_op_when_cp_is_off() -> None:
+    """CP=1 must hand the model back untouched rather than raise."""
     model = torch.nn.Linear(4, 4)
 
     class _Cfg:
         cp = 1
-        ep = 1
 
-    assert apply_cp_ep(model, None, _Cfg()) is model
-
-
-def test_apply_cp_ep_requires_an_ep_group_when_ep_is_on() -> None:
-    """EP is wired now; without the sparse mesh's EP group it must refuse
-    loudly rather than silently swap to a replicated (local) dispatcher."""
-
-    class _Cfg:
-        cp = 1
-        ep = 2
-
-    with pytest.raises(ValueError, match="EP process group"):
-        apply_cp_ep(torch.nn.Linear(4, 4), None, _Cfg())
+    assert apply_cp(model, None, _Cfg()) is model
 
 
-def test_apply_cp_ep_requires_the_flex_backend() -> None:
+def test_apply_cp_requires_the_flex_backend() -> None:
     """CP expresses the sharded mask as a BlockMask, which only flex consumes.
 
     A plain module has no HF config at all, so it fails the backend check --
@@ -113,7 +100,6 @@ def test_apply_cp_ep_requires_the_flex_backend() -> None:
 
     class _Cfg:
         cp = 2
-        ep = 1
 
     with pytest.raises(RuntimeError, match="attention backend"):
-        apply_cp_ep(torch.nn.Linear(4, 4), None, _Cfg())
+        apply_cp(torch.nn.Linear(4, 4), None, _Cfg())

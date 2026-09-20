@@ -5,7 +5,7 @@ Run under torchrun with 2 ranks:
     torchrun --nproc_per_node=2 tests/cp_ulysses_equivalence.py
 
 Where ``cp_wiring_equivalence.py`` pins the kv_allgather strategy, this pins
-the ulysses one end to end: a tiny offline qwen3 goes through ``apply_cp_ep``
+the ulysses one end to end: a tiny offline qwen3 goes through ``apply_cp``
 with ``context_parallel_strategy="ulysses"``, gets fed contiguously CP-sharded
 inputs (ulysses forbids the load balancer -- the all-to-all reassembles the
 sequence by concatenating rank shards in rank order), and every rank's forward
@@ -39,13 +39,12 @@ import torch.nn.functional as F
 from torch.distributed.device_mesh import init_device_mesh
 
 from hpmesh.models.hf_wrapper import HFTransformerModel, build_model_config_for
-from hpmesh.parallel.context_parallel import shard_batch_for_cp
+from hpmesh.parallel.context_parallel import apply_cp, shard_batch_for_cp
 from hpmesh.parallel.context_parallel.cp_kernel import (
     CPFlexKernel,
     _HeadToSeq,
     _SeqToHead,
 )
-from hpmesh.parallel.cp_ep import apply_cp_ep
 from hpmesh.trainer import (
     HybridMeshConfig,
     ModelConfig,
@@ -134,7 +133,7 @@ def _run_ulysses(
     cfg = _cfg(num_kv_heads)
     model = _build_model(cfg, flex=True)
     ref = _build_model(cfg, flex=False)
-    apply_cp_ep(model, mesh, cfg)
+    apply_cp(model, mesh, cfg)
 
     ids, labels, positions = _data()
     ids_sh, labels_sh, pos_sh = shard_batch_for_cp(
@@ -270,7 +269,7 @@ def _check_refusals(mesh, failures: list[str]) -> None:
         ValueError,
         "num_key_value_heads",
         "attach with indivisible kv heads",
-        lambda: apply_cp_ep(model, mesh, cfg),
+        lambda: apply_cp(model, mesh, cfg),
     )
     model = _build_model(_cfg(), flex=True)
     model.model.config.attn_mask_type = "block_causal"
@@ -278,7 +277,7 @@ def _check_refusals(mesh, failures: list[str]) -> None:
         ValueError,
         "packed",
         "attach with packed sequences",
-        lambda: apply_cp_ep(model, mesh, _cfg()),
+        lambda: apply_cp(model, mesh, _cfg()),
     )
 
 

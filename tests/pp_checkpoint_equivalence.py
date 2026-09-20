@@ -107,9 +107,7 @@ def _cfg(workdir: str) -> HybridMeshConfig:
     )
 
 
-def _train_steps(
-    trainer: Trainer, data_iterator, num_steps: int
-) -> list[float]:
+def _train_steps(trainer: Trainer, data_iterator, num_steps: int) -> list[float]:
     """Drive ``num_steps`` optimizer steps; return the last-stage losses."""
     losses = []
     for _ in range(num_steps):
@@ -128,12 +126,14 @@ def _phase_full(workdir: str) -> None:
     )
 
     data_iterator = trainer._data_iterator()
-    losses = _train_steps(trainer, data_iterator, TOTAL_STEPS)
+    losses = _train_steps(trainer, data_iterator, SPLIT_STEP)
 
     # The interval policy agrees this is a checkpointing step; a full state
     # (not the model-only last-step export) because ``last_step`` is False.
     saved = trainer.checkpointer.save(SPLIT_STEP)
     assert saved, "the split-step checkpoint was not written"
+
+    losses += _train_steps(trainer, data_iterator, EXTRA_STEPS)
 
     checkpoint_dir = os.path.join(workdir, "checkpoint", f"step-{SPLIT_STEP}")
     if trainer.pp_has_last_stage:

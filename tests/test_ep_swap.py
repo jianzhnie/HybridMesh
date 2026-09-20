@@ -22,7 +22,7 @@ from transformers import AutoConfig
 from hpmesh.models.common.aux_loss import AuxLoss
 from hpmesh.models.common.moe import MoE
 from hpmesh.models.hf_wrapper import HFTransformerModel
-from hpmesh.parallel.ep import swap_hf_moe_blocks
+from hpmesh.parallel.expert_parallel import swap_hf_moe_blocks
 
 TOL = 1e-6
 
