@@ -1,13 +1,17 @@
-"""PP>1 check: a 2-stage pipeline must train like the unpipelined model.
+"""PP>1 check: a split pipeline must train like the unpipelined model.
 
-Run under torchrun with 2 ranks:
+Run under torchrun with 2 ranks, one schedule per invocation:
 
-    torchrun --nproc_per_node=2 tests/pp_equivalence.py
+    torchrun --nproc_per_node=2 tests/pp_equivalence.py            # 1F1B
+    torchrun --nproc_per_node=2 tests/pp_equivalence.py Interleaved1F1B
 
 A tiny offline qwen3 (random init, fixed seed) goes through the real
-``Trainer`` with ``pp=2``, schedule 1F1B, 4 micro-batches per step, for 4
-optimizer steps. The loss on the last-stage rank must track, step for step, a
-reference computed on the whole model with no pipeline.
+``Trainer`` with ``pp=2``, 4 micro-batches per step, for 4 optimizer steps,
+under either a single-stage schedule (1F1B: one stage per rank) or a looped
+one (Interleaved1F1B: two virtual stages per rank, over a deeper model so
+every stage holds at least one layer). The loss on the last-stage rank must
+track, step for step, a reference computed on the whole model with no
+pipeline.
 
 What the reference is, and why it is not just the ``pp=1`` trainer: the
 trainer's non-PP body flattens the whole batch into ONE causal sequence, while
@@ -19,9 +23,8 @@ divergence is attributable to the pipeline machinery (stage split, p2p
 activations/grads, schedule, cross-stage grad-norm reduction), not to a
 different attention pattern.
 
-Non-vacuity: each rank must hold only its own stage's layers (rank 0: the
-embedding and the first layer; rank 1: the second layer, norm and head), and
-the per-rank parameter counts must sum to the whole model's.
+Non-vacuity: each rank must hold only its own stages' layers, and the per-rank
+parameter counts must sum to the whole model's.
 
 Everything runs in fp32 on CPU/gloo. The tolerance sits above the only
 intended difference: the gradient norm is reduced per stage and combined,
@@ -29,6 +32,8 @@ which is a different floating-point summation order than one whole-model norm.
 """
 
 from __future__ import annotations
+
+import sys
 
 import torch
 import torch.distributed as dist
@@ -60,20 +65,32 @@ SEED = 42
 TOL = 1e-5
 
 
-def _cfg() -> HybridMeshConfig:
+# Per-schedule scenario: a looped schedule runs two virtual stages per rank
+# (4 stages over pp=2), so the model is deepened to give every stage at least
+# one layer. The reference trajectory is schedule-independent -- it applies
+# the same row chunking either way -- so only the split changes.
+SCENARIOS = {
+    # schedule: (num_hidden_layers, stages_per_rank)
+    "1F1B": (2, 1),
+    "Interleaved1F1B": (6, 2),
+}
+
+
+def _cfg(schedule: str) -> HybridMeshConfig:
+    num_layers, _ = SCENARIOS[schedule]
     return HybridMeshConfig(
         model=ModelConfig(
             model_name_or_path="qwen3",  # offline: AutoConfig.for_model("qwen3", ...)
             vocab_size=VOCAB,
             hidden_size=64,
             intermediate_size=128,
-            num_hidden_layers=2,
+            num_hidden_layers=num_layers,
             num_attention_heads=4,
             num_key_value_heads=4,
         ),
         parallel=ParallelConfig(
             pipeline_parallel_degree=2,
-            pipeline_parallel_schedule="1F1B",
+            pipeline_parallel_schedule=schedule,
             num_pp_microbatches=MICROBATCHES,
             # -1 derives the shard degree from the world size; with pp=2 on 2
             # ranks that leaves dp=1, so both stages see the whole batch.
@@ -140,7 +157,13 @@ def _reference_trajectory(cfg: HybridMeshConfig) -> list[float]:
 
 
 def main() -> None:
-    cfg = _cfg()
+    schedule = sys.argv[1] if len(sys.argv) > 1 else "1F1B"
+    if schedule not in SCENARIOS:
+        raise ValueError(
+            f"unknown schedule {schedule!r}; expected one of {sorted(SCENARIOS)}"
+        )
+    _, stages_per_rank = SCENARIOS[schedule]
+    cfg = _cfg(schedule)
     failures: list[str] = []
 
     # Trainer init owns the process group (torchrun env); pp=2 over 2 ranks.
@@ -150,10 +173,9 @@ def main() -> None:
         f"this check assumes 2 ranks, got {trainer.world_size}"
     )
 
-    # -- non-vacuity: this rank holds one stage and only its own layers ------
-    assert len(trainer.model_parts) == 1  # 1F1B: one stage per rank
-    part = trainer.model_parts[0]
-    num_layers_held = len(part.layers)
+    # -- non-vacuity: this rank holds its stages and only their layers -------
+    assert len(trainer.model_parts) == stages_per_rank
+    num_layers_held = sum(len(part.layers) for part in trainer.model_parts)
     if num_layers_held >= cfg.num_hidden_layers:
         failures.append(
             f"rank {rank}: holds {num_layers_held} of {cfg.num_hidden_layers} "
@@ -162,16 +184,24 @@ def main() -> None:
     if trainer.pp_has_first_stage == trainer.pp_has_last_stage:
         failures.append(
             f"rank {rank}: has_first={trainer.pp_has_first_stage} "
-            f"has_last={trainer.pp_has_last_stage} -- a 2-stage pipeline "
+            f"has_last={trainer.pp_has_last_stage} -- a 2-rank pipeline "
             "assigns exactly one of them"
         )
-    if trainer.pp_has_first_stage and isinstance(part.tok_embeddings, nn.Identity):
+    # Both layouts keep the first stage first and the last stage last in the
+    # rank's part list ("loop" stages ascend; the single-stage case has one).
+    if trainer.pp_has_first_stage and isinstance(
+        trainer.model_parts[0].tok_embeddings, nn.Identity
+    ):
         failures.append(f"rank {rank}: first stage lost its embedding")
-    if trainer.pp_has_last_stage and isinstance(part.lm_head, nn.Identity):
+    if trainer.pp_has_last_stage and isinstance(
+        trainer.model_parts[-1].lm_head, nn.Identity
+    ):
         failures.append(f"rank {rank}: last stage lost its lm_head")
 
     # The stages' parameter sets are disjoint and cover the whole model.
-    local_numel = sum(p.numel() for p in part.parameters())
+    local_numel = sum(
+        p.numel() for part in trainer.model_parts for p in part.parameters()
+    )
     total_numel = torch.tensor([local_numel])
     dist.all_reduce(total_numel, op=dist.ReduceOp.SUM)
     reference_numel = sum(
@@ -198,7 +228,7 @@ def main() -> None:
     reference = _reference_trajectory(cfg)
 
     # The real losses live on the last-stage rank; collect them on rank 0 for
-    # the report. With a single-stage schedule the last stage is the last rank.
+    # the report. In both layouts the last stage sits on the last rank.
     gathered = [pp_losses]
     dist.broadcast_object_list(gathered, src=trainer.world_size - 1)
     pp_losses = gathered[0]
@@ -221,7 +251,7 @@ def main() -> None:
 
     if rank == 0:
         print(
-            f"pp=2 schedule=1F1B steps={STEPS} microbatches={MICROBATCHES} "
+            f"pp=2 schedule={schedule} steps={STEPS} microbatches={MICROBATCHES} "
             f"global_batch={GLOBAL_BATCH} seq={SEQ} tol={TOL:.0e}"
         )
         print(f"reference losses = {[f'{x:.6f}' for x in reference]}")
