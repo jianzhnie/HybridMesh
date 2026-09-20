@@ -41,8 +41,9 @@ Four deliberate departures, all subtractions:
 One addition: ``OptimizerWrapper`` and ``init_optim_state``. torchtitan has no
 equivalent here because its ``components/optimizer.py`` supplies both, as part
 of an ``OptimizersContainer`` that also re-keys state dicts by FQN to survive
-pipeline parallelism. hpmesh rejects ``pp > 1``, so the re-keying has nothing
-to do, but the *materialization* is load-bearing in both directions -- see
+pipeline parallelism. hpmesh keeps the two concerns in this wrapper instead:
+the *materialization* is load-bearing in both directions, and the FQN re-keying
+is an optional mode (``model_parts=...``) the trainer turns on under PP -- see
 ``OptimizerWrapper``.
 
 ``MODEL`` / ``OPTIMIZER`` / ``LR_SCHEDULER`` / ``DATALOADER`` / ``TRAIN_STATE``
@@ -281,15 +282,32 @@ class OptimizerWrapper(Stateful):
     values into whatever it manages. hpmesh hands DCP this wrapper instead of
     the bare optimizer, so the contract is met.
 
-    Only one optimizer is wrapped, so no key flattening is needed: hpmesh
-    rejects ``pp > 1`` (see ``parallel/parallelize_hf._reject_pp``), which is
-    the only configuration that would put two optimizers in one checkpoint under
-    colliding positional ``param_groups`` indices, and the only reason
-    torchtitan's ``OptimizersContainer`` re-keys state dicts by FQN.
+    Args:
+        optimizer: the optimizer to wrap.
+        model_parts: when given, optimizer state is keyed by parameter FQN
+            rather than by positional index. Pipeline parallelism needs this:
+            every stage's optimizer numbers its own parameters from 0, so the
+            positional keys of two stages collide in one shared checkpoint
+            (torchtitan solves the same collision with its
+            ``OptimizersContainer``'s FQN flattening). The FQNs are read off
+            ``model_parts`` in parameter order, so the caller must have built
+            the optimizer over exactly those parameters in that order -- the
+            trainer does (``chain(*(part.parameters() ...))``). ``None`` keeps
+            the positional format, which every non-PP checkpoint already on
+            disk uses.
     """
 
-    def __init__(self, optimizer: torch.optim.Optimizer) -> None:
+    def __init__(
+        self,
+        optimizer: torch.optim.Optimizer,
+        model_parts: list[nn.Module] | None = None,
+    ) -> None:
         self.optimizer = optimizer
+        self._fqns = (
+            None
+            if model_parts is None
+            else [name for part in model_parts for name, _ in part.named_parameters()]
+        )
 
     def state_dict(self) -> dict[str, Any]:
         # Materialize first, on both directions. On a save, DCP reads whatever
@@ -300,13 +318,33 @@ class OptimizerWrapper(Stateful):
         # version that materialized lazily would be a step too late for the
         # planner to have anywhere to put ``exp_avg``.
         init_optim_state(self.optimizer)
-        return self.optimizer.state_dict()
+        state_dict = self.optimizer.state_dict()
+        if self._fqns is None:
+            return state_dict
+        return {
+            "state": {
+                # ``state_dict`` packs state positionally; the FQN order is the
+                # same parameter order, so the re-keying is a rename only.
+                self._fqns[index]: state
+                for index, state in state_dict["state"].items()
+            },
+            "param_groups": state_dict["param_groups"],
+        }
 
     def load_state_dict(self, state_dict: dict[str, Any]) -> None:
         # Already materialized by the ``state_dict()`` call that precedes this
         # one on the DCP path; idempotent here, and load-bearing for any caller
         # that restores without going through DCP.
         init_optim_state(self.optimizer)
+        if self._fqns is not None:
+            fqn_to_index = {fqn: i for i, fqn in enumerate(self._fqns)}
+            state_dict = {
+                "state": {
+                    fqn_to_index[fqn]: state
+                    for fqn, state in state_dict["state"].items()
+                },
+                "param_groups": state_dict["param_groups"],
+            }
         self.optimizer.load_state_dict(state_dict)
 
 
