@@ -36,7 +36,6 @@ __all__ = [
 ]
 
 
-
 @dataclass
 class Batch:
     """One micro-batch, on CPU: ``input_ids`` and ``labels`` of shape ``(B, T)``."""
@@ -195,4 +194,3 @@ class RandomTokenDataLoader(BaseDataLoader):
                 input_ids=batch.input_ids[start : start + self._rows_per_rank],
                 labels=batch.labels[start : start + self._rows_per_rank],
             )
-

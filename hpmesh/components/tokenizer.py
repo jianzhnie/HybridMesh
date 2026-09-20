@@ -108,17 +108,19 @@ class HuggingFaceTokenizer(BaseTokenizer):
     """A tokenizer wrapper that handles BOS/EOS token inference and encoding.
 
     This class loads tokenizer files and automatically infers BOS/EOS tokens from
-    a configuration file (tokenizer_config.json) as well as specific formatting related to
-    chat templates. Its encode method suppresses the tokenizer's own special tokens
-    and adds BOS/EOS itself, controlled by the add_bos/add_eos arguments.
+    a configuration file (tokenizer_config.json) as well as specific formatting
+    related to chat templates. Its encode method suppresses the tokenizer's own
+    special tokens and adds BOS/EOS itself, controlled by the add_bos/add_eos
+    arguments.
 
     Args:
         tokenizer_path: Path to directory containing tokenizer files.
     """
 
-    # Following HF transformers convention (CHAT_TEMPLATE_FILE in transformers/utils/hub.py),
-    # a standalone Jinja file at the model root takes priority over an inline template in
-    # tokenizer_config.json. Models like GPT-OSS use this pattern.
+    # Following HF transformers convention (CHAT_TEMPLATE_FILE in
+    # transformers/utils/hub.py), a standalone Jinja file at the model root
+    # takes priority over an inline template in tokenizer_config.json. Models
+    # like GPT-OSS use this pattern.
     CHAT_TEMPLATE_FILE = "chat_template.jinja"
 
     def __init__(self, *, tokenizer_path: str):
@@ -250,13 +252,15 @@ class HuggingFaceTokenizer(BaseTokenizer):
             raise FileNotFoundError(
                 f"No supported tokenizer files found in '{tokenizer_path}'. "
                 f"Available files: {available_files}. "
-                "Looking for: tokenizer.json, vocab.txt+merges.txt, or vocab.json+merges.txt"
+                "Looking for: tokenizer.json, vocab.txt+merges.txt, or "
+                "vocab.json+merges.txt"
             )
 
     def _get_token_from_config(self, config: dict[str, Any], key: str) -> str | None:
         """
         Parse special tokens from config that can be either strings or dicts.
-        HF tokens are stored as either {'bos_token': '<bos>'} or {'bos_token': {'content': '<bos>', ...}}.
+        HF tokens are stored as either ``{'bos_token': '<bos>'}`` or
+        ``{'bos_token': {'content': '<bos>', ...}}``.
         """
         token = config.get(key)
         if isinstance(token, dict):
@@ -451,7 +455,8 @@ class HuggingFaceTokenizer(BaseTokenizer):
 
         Args:
             token_ids (list[int]): List of token IDs to decode
-            **kwargs: Additional arguments passed to the underlying tokenizer's decode method
+            **kwargs: Additional arguments passed to the underlying
+                tokenizer's decode method
                      (e.g., skip_special_tokens)
 
         Returns:

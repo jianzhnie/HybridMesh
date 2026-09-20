@@ -78,7 +78,7 @@ class GrainDataLoader(BaseDataLoader):
         streaming_shuffle_buffer_size: int = 1_000
         """Streaming rows retained per rank for approximate shuffling."""
         read_options: grain.ReadOptions = field(default_factory=grain.ReadOptions)
-        """Concurrent indexed reads used when a `MapDataset` becomes an `IterDataset`."""
+        """Concurrent reads used when a `MapDataset` becomes an `IterDataset`."""
         num_prefetch_batches: int = 2
         """Collated batches queued per rank for trainer consumption."""
         max_num_documents: int | None = None

@@ -67,7 +67,8 @@ class MultiModalCollator(Collator):
         """Process image/video tensors into packed patches and grid dimensions.
 
         Args:
-            all_images: Non-empty list of image/video tensors, each of shape (T, H, W, C)
+            all_images: Non-empty list of image/video tensors, each of shape
+                (T, H, W, C)
 
         Returns:
             pixel_values: Packed patches (num_patches, patch_dim)
