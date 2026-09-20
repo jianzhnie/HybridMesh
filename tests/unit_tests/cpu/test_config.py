@@ -36,7 +36,7 @@ from hpmesh.trainer.config import (
     ],
 )
 def test_a_size_below_one_is_rejected(field: str) -> None:
-    """A zero degree is a division by zero three layers down; catch it at parse."""
+    """A zero size is a division by zero three layers down; catch it at parse."""
     with pytest.raises(ValueError, match=f"{field} must be >= 1"):
         ParallelConfig(**{field: 0})
 

@@ -73,7 +73,7 @@ def test_sharding_is_total_and_disjoint() -> None:
 def test_bad_bounds_arguments_are_rejected(
     vocab: int, tp: int, rank: int, match: str
 ) -> None:
-    """A zero/negative degree or an out-of-range rank is a config bug, not a slice."""
+    """A zero/negative size or an out-of-range rank is a config bug, not a slice."""
     with pytest.raises(ValueError, match=match):
         vocab_shard_bounds(vocab, tp, rank)
 
