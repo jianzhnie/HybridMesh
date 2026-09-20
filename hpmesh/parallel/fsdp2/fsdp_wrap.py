@@ -56,30 +56,40 @@ def apply_fsdp(
     cfg: HybridMeshConfig,
     parallel_dims: ParallelDims | None = None,
 ) -> torch.nn.Module:
-    """Fully-shard ``model`` (FSDP2). No-op when data parallelism is disabled.
+    """Fully-shard ``model`` (FSDP2). No-op when neither DP-shard nor CP is enabled.
+
+    CP must enable FSDP even when ``dp_shard == 1``: every CP rank computes the
+    loss over its own sequence shard, so its gradients are partial and only
+    become global once reduced across the CP group. ``resolve_fsdp_mesh`` puts
+    ``cp`` on the FSDP shard axis for exactly that reason -- parameters are
+    sharded over the CP group too, which is the same semantic torchtitan uses
+    for CP (``cp`` sits in its FSDP shard axes as well).
 
     Delegates the wrapping to torchtitan's ``apply_fsdp_to_decoder``; this
     function only decides whether to shard at all, fixes the policy values, and
     applies the backend workaround.
     """
-    if parallel_dims is None or not parallel_dims.dp_shard_enabled:
-        return model
-
-    dp_mesh = parallel_dims.get_optional_mesh("dp_shard")
-    if dp_mesh is None or dp_mesh.size() == 1:
+    if parallel_dims is None or not parallel_dims.fsdp_enabled:
         return model
 
     storage_mesh, dp_mesh_dims = resolve_fsdp_mesh(parallel_dims)
+    if storage_mesh.size() == 1:
+        return model
+
     edp_mesh, _edp_mesh_dims = resolve_sparse_fsdp_mesh(parallel_dims)
 
     # torch rejects ``dp_mesh_dims`` unless every parameter is already a DTensor
     # on the full SPMD mesh ("When dp_mesh_dims is provided, all parameters must
     # be DTensors ... via distribute_module"). Meeting that precondition means
     # converting each declared state into a DTensor before FSDP is applied;
-    # hpmesh's HF models hold plain tensors. So we hand FSDP a plain 1-D DP mesh
-    # and let it do its own sharding -- the mode torch supports out of the box.
-    # Wiring the DTensor path is a prerequisite for composing FSDP with
-    # tp/cp/ep on one mesh, and is not done here.
+    # hpmesh's HF models hold plain tensors. So we hand FSDP the storage mesh
+    # without mesh dims and let it do its own sharding -- the mode torch
+    # supports out of the box. A 1-D mesh means plain FSDP; the 2-D
+    # ``(dp_shard, cp)`` mesh of a pure-CP run is read as HSDP with the size-1
+    # ``dp_shard`` axis as the replicate group, which degenerates to sharding
+    # (and gradient reduce-scatter) over ``cp``. Wiring the DTensor path is a
+    # prerequisite for composing FSDP with tp/cp/ep on one mesh, and is not
+    # done here.
     dp_mesh_dims = None
     edp_mesh_dims = None
 

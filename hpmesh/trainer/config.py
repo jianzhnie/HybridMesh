@@ -234,6 +234,17 @@ class ParallelConfig:
     context_parallel_degree: int = 1
     """Context parallelism degree. 1 means disabled."""
 
+    context_parallel_strategy: str = "kv_allgather"
+    """
+    CP attention redistribution strategy. Options:
+    - "kv_allgather": all-gather K/V; Q stays token-sharded
+    - "ulysses": all-to-all between the token and head shards, so attention
+      runs on the full sequence with num_heads / cp heads per rank. Requires
+      num_attention_heads and num_key_value_heads divisible by cp, and
+      context_parallel_load_balancer=None (the all-to-all reassembles the
+      sequence by concatenating rank shards in rank order).
+    """
+
     context_parallel_load_balancer: str | None = "headtail"
     """
     Load balancer type for context parallelism. Options:
@@ -326,6 +337,24 @@ class ParallelConfig:
             raise ValueError(
                 "parallelism.context_parallel_load_balancer must be one of: "
                 f"None, 'headtail', 'ptrr' "
+                f"(got {self.context_parallel_load_balancer!r})"
+            )
+        allowed_strategies = frozenset({"kv_allgather", "ulysses"})
+        if self.context_parallel_strategy not in allowed_strategies:
+            raise ValueError(
+                "parallelism.context_parallel_strategy must be one of: "
+                f"'kv_allgather', 'ulysses' "
+                f"(got {self.context_parallel_strategy!r})"
+            )
+        if (
+            self.context_parallel_strategy == "ulysses"
+            and self.context_parallel_load_balancer is not None
+        ):
+            raise ValueError(
+                "parallelism.context_parallel_strategy='ulysses' requires "
+                "context_parallel_load_balancer=None: the all-to-all "
+                "reassembles the sequence by concatenating rank shards in rank "
+                "order, which only the contiguous split satisfies. "
                 f"(got {self.context_parallel_load_balancer!r})"
             )
         if self.enable_fsdp_symm_mem and (
