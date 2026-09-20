@@ -91,14 +91,15 @@ def test_apply_cp_ep_is_a_no_op_when_both_axes_are_off() -> None:
     assert apply_cp_ep(model, None, _Cfg()) is model
 
 
-def test_apply_cp_ep_still_reports_ep_as_unimplemented() -> None:
-    """CP is wired now; EP still has no dispatcher and must refuse loudly."""
+def test_apply_cp_ep_requires_an_ep_group_when_ep_is_on() -> None:
+    """EP is wired now; without the sparse mesh's EP group it must refuse
+    loudly rather than silently swap to a replicated (local) dispatcher."""
 
     class _Cfg:
         cp = 1
         ep = 2
 
-    with pytest.raises(NotImplementedError, match="EP"):
+    with pytest.raises(ValueError, match="EP process group"):
         apply_cp_ep(torch.nn.Linear(4, 4), None, _Cfg())
 
 
