@@ -38,7 +38,7 @@ class ColorfulFormatter(Formatter):
         return self.COLORS.get(record.levelname, "") + log_message + Fore.RESET
 
     def _get_rank(self) -> int:
-        return _get_distributed_rank()
+        return get_distributed_rank()
 
 
 def get_logger(
@@ -61,7 +61,7 @@ def get_logger(
         return logger
 
     # Get current rank safely
-    rank = _get_distributed_rank()
+    rank = get_distributed_rank()
     is_main_process = rank == 0
 
     # Fix PyTorch DDP duplicate logging issue
@@ -118,8 +118,13 @@ def get_logger(
     return logger
 
 
-def _get_distributed_rank() -> int:
-    """Return the current distributed rank, falling back to the RANK env var or 0."""
+def get_distributed_rank() -> int:
+    """Return the current distributed rank, falling back to the RANK env var or 0.
+
+    Public because components outside the logging stack have to ask the same
+    question -- the metrics processor's rank and the report it decorates are
+    separate things, and it needs the first to decide the second.
+    """
     try:
         if dist.is_available() and dist.is_initialized():
             return dist.get_rank()
