@@ -71,12 +71,63 @@ def test_derive_dp_matches_parallel_dims_resolution() -> None:
     assert cfg.derive_dp(world_size=8) == pd.dp_shard
 
 
+def test_cp_only_still_needs_a_loss_reduction() -> None:
+    """cp > 1 with dp = 1 shards the sequence but leaves the DP axis empty.
+
+    The loss is summed over each rank's own *slice* of the sequence, so with
+    only CP on a dp-only reduction would be over a size-1 group: every rank
+    would report its own shard's loss as the whole batch's. The trainer
+    therefore gates the loss reduce-group on ``dp_cp_enabled`` (dp *or* cp)
+    rather than on how dense the mesh is.
+
+    Only the flags are asserted here -- the group sizes they select need a live
+    process group (``get_optional_mesh`` builds meshes). The sizes themselves
+    are pinned by the ``expected_sizes`` table in ``parallel_dims.py``, which
+    is what makes the property sufficient: ``loss`` is defined there as
+    ``dp_replicate * dp_shard * cp``, so choosing it is choosing a group that
+    spans the cp axis. The end-to-end version runs under torchrun in
+    ``tests/cp_wiring_equivalence.py``.
+    """
+    cfg = _cfg(data_parallel_shard_degree=1, context_parallel_degree=2)
+    pd = build_parallel_dims(cfg, world_size=2)
+    assert isinstance(pd, ParallelDims)
+
+    assert pd.cp_enabled
+    assert not pd.dp_enabled
+    # The property the trainer gates on: either axis alone is enough. Gating on
+    # cp alone (or on dp alone) is the bug this pins.
+    assert pd.dp_cp_enabled
+
+
 def test_cp_must_divide_seq_len() -> None:
     with pytest.raises(ValueError):
         HybridMeshConfig(
             parallel=ParallelConfig(context_parallel_degree=3),
             training=TrainingConfig(max_seq_len=64),
         )
+
+
+def test_gradient_accumulation_must_be_at_least_one() -> None:
+    with pytest.raises(ValueError):
+        TrainingConfig(gradient_accumulation_steps=0)
+
+
+def test_accumulation_and_gc_freq_reach_the_flat_view() -> None:
+    """The trainer reads both off ``cfg``, not off ``cfg.training``.
+
+    The flat view is a hand-written list of properties, so a new field on
+    ``TrainingConfig`` stays invisible to the trainer until its passthrough
+    exists. These two are the newest, and the failure mode is an AttributeError
+    on the first training step rather than at parse time.
+    """
+    cfg = HybridMeshConfig(
+        training=TrainingConfig(gradient_accumulation_steps=3, gc_freq=7)
+    )
+    assert cfg.gradient_accumulation_steps == 3
+    assert cfg.gc_freq == 7
+    # The defaults the trainer runs with when nothing is passed.
+    assert HybridMeshConfig().gradient_accumulation_steps == 1
+    assert HybridMeshConfig().gc_freq == 50
 
 
 def _bare_trainer(cfg: HybridMeshConfig) -> Trainer:
@@ -269,9 +320,9 @@ def test_wrapper_forward_returns_logits_the_trainer_can_score() -> None:
     cross-entropy over those rows is a finite scalar.
 
     The labels handed to ``_loss_sum`` are already next-token aligned, which is
-    what ``_as_batch`` produces for both loaders; ``_loss_sum`` does no shifting
-    of its own. A sequence whose every position is predictable therefore
-    contributes one prediction per token.
+    what ``preprocess_inputs`` produces for both loaders; ``_loss_sum`` does no
+    shifting of its own. A sequence whose every position is predictable
+    therefore contributes one prediction per token.
     """
     cfg = HybridMeshConfig(
         training=TrainingConfig(seed=42, max_seq_len=32, global_batch_size=2)
@@ -284,14 +335,18 @@ def test_wrapper_forward_returns_logits_the_trainer_can_score() -> None:
         logits = model(ids)
 
     assert logits.shape == (ids.shape[0], cfg.vocab_size)
-    loss_sum, num_valid_tokens = Trainer._loss_sum(logits, ids)
+    loss_sum = Trainer._loss_sum(logits, ids)
     assert loss_sum.ndim == 0
     assert float(loss_sum) > 0
-    assert num_valid_tokens == ids.shape[0]
 
-    # The trainer's own path marks its row ends IGNORE_INDEX, and those are
-    # then excluded from the denominator rather than silently counted.
+    # The model's own path marks its row ends IGNORE_INDEX, and those are then
+    # excluded from the denominator rather than silently counted. The count
+    # comes from ``_count_valid_tokens``, which sees the unsharded labels -- the
+    # loss itself only skips the ignored rows.
     row_aware = next_token_targets(ids, seq_len=cfg.max_seq_len)
-    _, counted = Trainer._loss_sum(logits, row_aware)
-    assert counted == int((row_aware != IGNORE_INDEX).sum())
+    counted = int((row_aware != IGNORE_INDEX).sum())
     assert counted == ids.shape[0] - cfg.global_batch_size
+    row_loss = Trainer._loss_sum(logits, row_aware)
+    assert row_loss.ndim == 0
+    # Row-final positions predict nothing, so they contribute nothing.
+    assert float(row_loss) < float(loss_sum)

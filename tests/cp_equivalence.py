@@ -32,7 +32,7 @@ import torch
 import torch.distributed as dist
 from torch.distributed.device_mesh import init_device_mesh
 
-from hpmesh.parallel.cp_ep import (
+from hpmesh.parallel.context_parallel.primitives import (
     HEAD_DIM,
     TOKEN_DIM,
     KVAllGatherContextParallel,

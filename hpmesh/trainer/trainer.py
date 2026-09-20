@@ -103,7 +103,6 @@ from ..models.hf_wrapper import (
     num_flops_per_token,
 )
 from ..parallel.collectives import clip_grad_norm_, dist_max, dist_sum, dist_sum_tensor
-from ..parallel.context_parallel import shard_batch_for_cp
 from ..parallel.parallel_dims import ParallelDims
 from ..parallel.pipeline_parallel import PipelineParallelSetup
 from ..parallel.spmd_types import spmd_context
@@ -420,212 +419,147 @@ class Trainer:
             yield batch
 
     @staticmethod
-    def _as_batch(
-        batch: Batch | TrainerBatch,
-    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor | None, int]:
-        """Normalize either loader's batch into the tensors the step consumes.
+    def _count_valid_tokens(batch: Batch | TrainerBatch) -> int:
+        """The number of labels that contribute to the loss, pre-shard.
 
-        The two loaders disagree about what a batch is -- the synthetic one
-        yields ``(B, T)`` rows of one document each, the Grain one a flat
-        packed token stream -- so they are reconciled here, once, rather than
-        at every call site. Returns ``(input_ids, labels, positions,
-        num_valid_tokens)``. ``positions`` is the only optional member: the
-        synthetic source has no use for it and the wrapper falls back to its
-        own ``arange``, whereas a packed stream must supply it to restart the
-        position counter at each document boundary.
+        The trainer's half of the token accounting, and it stays in the trainer
+        for a reason: the count divides the loss *before* the first backward and
+        is reduced across DP before that, so it cannot be produced per
+        micro-batch by a model-side counter.
 
-        The count is never optional. It is the denominator of the loss, which
-        is divided out before the first backward, so a ``None`` here would
-        leave the step with no way to normalize at all -- the synthetic path
-        derives it from the freshly shifted targets, and the Grain path takes
-        the collator's.
+        It is taken from the batch as the loader handed it over -- before the
+        model normalizes shapes, shifts for row ends, or shards for CP -- which
+        is what makes it rank-independent: every CP rank of a DP group holds
+        the same unsharded batch, so the dp-only reduction counts the whole batch
+        once rather than once per sequence shard.
 
-        Both paths leave here holding a flat token stream whose target at
-        position ``t`` is the token at ``t + 1`` *within the same document*,
-        which is the contract ``_loss_sum``'s plain shift assumes. The synthetic
-        path needs real work to reach it (its labels are unshifted, and its
-        rows are separate documents that must not be predicted across); the
-        Grain path arrives already shifted and already ``IGNORE_INDEX``-masked
-        at every document boundary, so for it this is a read.
+        A collator counts its own tokens while it already has the labels in
+        hand; the synthetic source has no collator, so its count is derived here
+        from the row shift. Both agree on what counts: a document's final
+        position predicts nothing and is excluded.
         """
         if isinstance(batch, Batch):
-            # Rows are independent documents of length T, so the shift is
-            # within a row: the row-final position would predict the next
-            # document's first token, which the model had no context for, and
-            # comes back IGNORE_INDEX from ``next_token_targets``.
             seq_len = batch.labels.shape[-1]
             targets = next_token_targets(batch.labels.reshape(-1), seq_len=seq_len)
-            # Counted here, not inside the forward. The loss divides by the
-            # step's global token count before it backwards (see
-            # ``_forward_backward_body``), so the number has to exist before
-            # the first forward of the step -- and this is the only place the
-            # un-sharded synthetic labels are still available to count.
-            return (
-                batch.input_ids,
-                targets,
-                None,
-                int((targets != IGNORE_INDEX).sum()),
-            )
-
-        # Only the tensors the forward and the loss consume are carried out.
-        # The rest of the collator's dict -- notably ``padding_mask``, implied
-        # by the IGNORE_INDEX labels and consumed by nothing on this path --
-        # was already logged by ``batch_generator``, so it is dropped here
-        # rather than held across the accumulation window.
-        #
-        # Tensors stay on the CPU, as the reference's ``batch_generator``
-        # documents: the move happens per micro-batch, in
-        # ``_forward_backward_body``, so holding the rest of the step's batches
-        # costs host memory rather than device memory.
-        input_ids = batch["input"]
-        labels = batch["labels"]
-        # Counted by the collator, which had the labels in hand; ``_loss_sum``
-        # does not rescore the batch. Recounted here when absent rather than
-        # permissively defaulted, so a dict that silently lacks the key still
-        # produces a correct denominator.
+            return int((targets != IGNORE_INDEX).sum())
         num_valid_tokens = batch.get("num_valid_tokens")
         if num_valid_tokens is None:
+            # Recounted rather than permissively defaulted, so a dict that
+            # silently lacks the key still produces a correct denominator.
+            labels = batch["labels"]
             num_valid_tokens = int((labels != IGNORE_INDEX).sum())
-        # ``positions`` is the one optional extra kwarg the wrapper understands
-        # (RoPE's argument); it is what lets a packed stream restart its
-        # position counter at each document boundary.
-        return input_ids, labels, batch.get("positions"), num_valid_tokens
+        return num_valid_tokens
 
     # -- the step, one function per level --------------------------------------
 
-    @staticmethod
-    def _flatten(
-        input_ids: torch.Tensor, labels: torch.Tensor
-    ) -> tuple[torch.Tensor, torch.Tensor]:
-        """Flatten ``(B, T)`` into the ``(B*T,)`` shape the wrapper takes.
+    @property
+    def _example_model(self):
+        """The model a batch is normalized against, present on every PP stage.
 
-        The wrapper is a single-sequence entry point -- it adds and removes its
-        own batch dim around the decoder call. The synthetic source yields one
-        document per row of length ``max_seq_len``, so the concatenation is
-        exactly the single causal document the fallback attention path expects;
-        RoPE is driven per row because positions restart at each row boundary.
-
-        The Grain source already hands over a flat token stream, so for it this
-        is the identity -- which is what makes the two sources one code path
-        from here on.
+        Unlike ``self.model`` (``None`` under PP, where this rank holds several
+        chunks and the schedule drives them), every rank keeps a module that can
+        run ``preprocess_inputs``: the first stage owns the embedding chunk. The
+        PP path already assumes as much -- that is how it builds the schedule.
         """
-        return input_ids.reshape(-1), labels.reshape(-1)
+        return self.model if self.model is not None else self.model_parts[0]
 
-    @staticmethod
-    def _loss_sum(
-        logits: torch.Tensor,
-        labels: torch.Tensor,
-        *,
-        num_valid_tokens: int,
-    ) -> torch.Tensor:
-        """Summed next-token cross-entropy over the predictable labels.
+    def _microbatch(self, batch: Batch | TrainerBatch) -> dict[str, Any]:
+        """Everything one accumulation group's forward/backward needs.
 
-        ``labels`` arrives already aligned with ``logits`` -- ``logits[t]``
-        predicts ``labels[t]``, both sources having done their shift upstream
-        (see ``_as_batch``). No shift happens here, which is what lets the two
-        sources share one loss: the synthetic path slots its rows together and
-        the Grain path arrives already packed, and both mark the positions that
-        must not be predicted with ``IGNORE_INDEX`` rather than dropping them.
-        Those positions are the row ends of the synthetic path and the document
-        boundaries and packing padding of the Grain one.
+        The split of responsibility here mirrors torchtitan's ``train_step``,
+        and each half is load-bearing:
 
-        ``num_valid_tokens`` is required even though it is not used here. It is
-        the count of the labels that actually contribute, and passing it in --
-        rather than recomputing it from ``labels`` -- is the contract: it comes
-        from the *unsharded* batch, while ``labels`` may since have been sliced
-        by context parallelism, so recounting here would undercount the
-        denominator by a factor of ``cp``. Requiring the argument makes the
-        wrong version unrepresentable. The parameter is also what the caller
-        threads to the backward, which is where the division actually happens
-        (see ``_forward_backward_body``).
-
-        Not normalized: the denominator is a *global* token count, and it is
-        not knowable until the per-rank counts have been reduced. The caller
-        owns that reduction.
+        * **The count is popped by the trainer.** It is the loss denominator,
+          which must be reduced across DP before the first backward, so it
+          cannot come out of a per-micro-batch model call.
+        * **The accounting is taken by the trainer**, from the loader's own
+          labels, before any reshaping: throughput is a report about the loader
+          ("tokens it produced"), not about the loss. The two numbers differ --
+          a document's final position is loaded but never predicted -- and that
+          is why they are not one field.
+        * **Everything else moves to the device and goes to the model**, whose
+          ``preprocess_inputs`` owns the shapes. Tensors move here, in the step,
+          rather than on read: ``batch_generator`` documents the CPU invariant
+          ``torchtitan`` keeps for the same reason, so holding the rest of the
+          accumulation window costs host memory, not device memory.
         """
-        del num_valid_tokens
-        return F.cross_entropy(
-            logits.float(), labels, reduction="sum", ignore_index=IGNORE_INDEX
+        labels = batch.labels if isinstance(batch, Batch) else batch["labels"]
+        self.ntokens_seen += labels.numel()
+        num_valid_tokens = self._count_valid_tokens(batch)
+
+        if isinstance(batch, dict):
+            # ``num_valid_tokens`` is the model's to ignore, and a plain int
+            # among tensors would be splatted into the forward as a kwarg.
+            batch.pop("num_valid_tokens", None)
+            batch = {
+                key: value.to(self.device, non_blocking=True)
+                if isinstance(value, torch.Tensor)
+                else value
+                for key, value in batch.items()
+            }
+        else:
+            batch = Batch(
+                input_ids=batch.input_ids.to(self.device, non_blocking=True),
+                labels=batch.labels.to(self.device, non_blocking=True),
+            )
+        return {"batch": batch, "num_valid_tokens": num_valid_tokens}
+
+    def _preprocess(
+        self, microbatch: dict[str, Any]
+    ) -> tuple[torch.Tensor, torch.Tensor, dict[str, Any]]:
+        """Ask the model to turn its batch into forward inputs.
+
+        A thin wrapper so the two bodies call the seam the same way and neither
+        has to know which model object is canonical on its stage.
+        """
+        return self._example_model.preprocess_inputs(
+            microbatch["batch"],
+            parallel_dims=self.parallel_dims,
+            parallelism=self.cfg.parallel,
+            max_context_length=self.cfg.max_seq_len,
         )
 
     def forward_backward_step(
         self,
-        input_ids: torch.Tensor,
-        labels: torch.Tensor,
+        microbatch: dict[str, Any],
         *,
-        positions: torch.Tensor | None,
-        num_valid_tokens: int,
         global_valid_tokens: torch.Tensor,
     ) -> torch.Tensor:
-        """Run one micro-batch forward and backward. Returns this rank's loss sum.
+        """Run one accumulation group's forward and backward; return its loss sum.
 
-        Two bodies, matching torchtitan's split: with pipeline parallelism the
-        step drives a *schedule* over several micro-batches rather than calling
-        the model once, so the two share nothing but the return shape.
+        A *group*, not a micro-batch: with pipeline parallelism one group is one
+        schedule step, which internally drives several micro-batches.
 
-        ``num_valid_tokens`` is the count of labels that actually contribute to
-        the loss, taken from the unsharded batch (see ``_loss_sum``). It is
-        only reported onward; the normalization uses ``global_valid_tokens``.
+        Two bodies, matching torchtitan's split. The PP one takes the raw batch
+        and calls ``preprocess_inputs`` itself, once per schedule micro-batch;
+        the non-PP one preprocesses here, because it has exactly one.
 
-        ``global_valid_tokens`` is the step's denominator, reduced across the
-        DP axis. It is passed in rather than computed here because it must be
-        the *same* number for every micro-batch of the step -- under gradient
+        ``global_valid_tokens`` is the step's denominator, reduced across the DP
+        axis. It is passed in rather than computed here because it must be the
+        *same* number for every group of the step -- under gradient
         accumulation the count only exists once all of them have been read, so
         the caller reduces it first and hands it down.
-
-        Returns the summed loss the forward computed. The backward has already
-        divided gradients by the global count, so the returned tensor is for
-        reporting only, and the caller sums it over the accumulation groups.
         """
         if self.parallel_dims is not None and self.parallel_dims.pp_enabled:
             return self._pp_forward_backward_body(
-                input_ids, labels, global_valid_tokens=global_valid_tokens
+                microbatch["batch"], global_valid_tokens=global_valid_tokens
             )
+        inputs, labels, extra_kwargs = self._preprocess(microbatch)
         return self._forward_backward_body(
-            input_ids,
+            inputs,
             labels,
-            positions=positions,
-            num_valid_tokens=num_valid_tokens,
+            extra_kwargs=extra_kwargs,
             global_valid_tokens=global_valid_tokens,
         )
 
     def _forward_backward_body(
         self,
-        input_ids: torch.Tensor,
+        inputs: torch.Tensor,
         labels: torch.Tensor,
         *,
-        positions: torch.Tensor | None,
-        num_valid_tokens: int,
+        extra_kwargs: dict[str, Any],
         global_valid_tokens: torch.Tensor,
     ) -> torch.Tensor:
-        input_ids, labels = self._flatten(input_ids, labels)
-        # To the device first: both the CP shard below and the forward expect
-        # it, and a shard of a CPU tensor placed on a device mesh would mix
-        # placements.
-        input_ids = input_ids.to(self.device)
-        labels = labels.to(self.device)
-        if positions is not None:
-            positions = positions.reshape(-1).to(self.device)
-        cp_mesh = (
-            None
-            if self.parallel_dims is None
-            else self.parallel_dims.get_optional_mesh("cp")
-        )
-        if cp_mesh is not None:
-            # CP shards the sequence: positions are generated explicitly (the
-            # wrapper's arange default would restart at 0 on every rank) and
-            # sharded alongside the tokens, so RoPE follows each token to its
-            # rank. The loss sums over tokens, so the headtail rearrangement
-            # needs no undoing here.
-            if positions is None:
-                positions = torch.arange(input_ids.numel(), device=self.device)
-            input_ids, labels, positions = shard_batch_for_cp(
-                input_ids,
-                labels,
-                positions,
-                cp_mesh,
-                load_balancer=self.cfg.parallel.context_parallel_load_balancer,
-            )
         # ``spmd_context`` is what makes a process group answerable *by name*
         # (``spmd_mesh_group("tp")`` and friends) for the duration of the body.
         # It is entered here, around the forward/backward only, because that is
@@ -633,8 +567,8 @@ class Trainer:
         # the checkpointers take their groups as arguments. On a single process
         # it is a no-op, so the same code runs from one device to a full mesh.
         with self._param_context(), spmd_context(self.parallel_dims):
-            logits = self.model(input_ids, positions=positions)
-            loss_sum = self._loss_sum(logits, labels, num_valid_tokens=num_valid_tokens)
+            logits = self.model(inputs, **extra_kwargs)
+            loss_sum = self._loss_sum(logits, labels)
             del logits
             # Normalize BEFORE backward, while the sum is still differentiable.
             # Dividing after backwarding the raw sum would work for a single
@@ -648,40 +582,91 @@ class Trainer:
             (loss_sum / global_valid_tokens).backward()
         return loss_sum.detach()
 
-    def _pp_microbatches(
-        self, input_ids: torch.Tensor, labels: torch.Tensor
-    ) -> tuple[list[torch.Tensor], list[torch.Tensor]]:
+    @staticmethod
+    def _loss_sum(
+        logits: torch.Tensor,
+        labels: torch.Tensor,
+    ) -> torch.Tensor:
+        """Summed next-token cross-entropy over the predictable labels.
+
+        ``labels`` arrives already aligned with ``logits`` -- ``logits[t]``
+        predicts ``labels[t]``, both sources having done their shift upstream
+        (see ``HFTransformerModel.preprocess_inputs``). No shift happens here,
+        which is what lets the two sources share one loss: the synthetic path
+        slots its rows together and the packed path arrives already shifted, and
+        both mark the positions that must not be predicted with ``IGNORE_INDEX``
+        rather than dropping them. Those positions are the row ends of the
+        synthetic path and the document boundaries and packing padding of the
+        packed one.
+
+        Not normalized, and deliberately not told the token count. The
+        denominator is a *global* count reduced across DP, which the caller
+        owns; the per-rank count that pairs with it is taken upstream from the
+        unsharded batch (``_count_valid_tokens``) precisely so a loss that has
+        since been sliced by context parallelism cannot be recounted. Passing
+        the count in here would suggest this function has a use for it, and a
+        recount would silently undercount by a factor of ``cp``.
+        """
+        return F.cross_entropy(
+            logits.float(), labels, reduction="sum", ignore_index=IGNORE_INDEX
+        )
+
+    def _pp_microbatches(self, batch: Batch | TrainerBatch) -> list[dict[str, Any]]:
         """Split the rank's batch into the schedule's micro-batches.
 
-        Rows are split, never tokens: each micro-batch is flattened with the
-        same ``_flatten`` semantics as the non-PP body, so every micro-batch
-        holds whole documents and the per-micro-batch loss is the same summed
-        CE. Divisibility is enforced at setup (``apply_pp``), so ``chunk``
-        never produces a short final piece.
+        Rows are split, never tokens: each micro-batch is collapsed with the
+        same semantics as the non-PP body, so every micro-batch holds whole
+        documents and its loss is the same summed CE. Divisibility is enforced
+        at setup (``apply_pp``), so ``chunk`` never leaves a short final piece.
+
+        The split happens here rather than inside ``preprocess_inputs``, which
+        is a deliberate divergence from the reference: torchtitan's protocol
+        returns a *list* of micro-batches, but hpmesh's PP path row-chunks one
+        batch after the model has already collapsed it, and splitting inside the
+        model would make every other caller of that method carry a batch dim it
+        does not want. Keeping the loop holding rows also means the model's
+        seam has exactly one shape contract.
         """
+        raw = batch.labels if isinstance(batch, Batch) else batch["labels"]
         num_microbatches = self.cfg.parallel.num_pp_microbatches
-        # ``labels`` arrives flat from ``_as_batch``; ``input_ids`` keeps the
-        # row shape, so re-row the labels against it before chunking -- a flat
-        # chunk would split rows whenever seq_len did not divide evenly.
-        num_rows, seq_len = input_ids.shape
-        labels = labels.reshape(num_rows, seq_len)
-        input_mbs = [mb.reshape(-1) for mb in input_ids.chunk(num_microbatches, dim=0)]
-        label_mbs = [mb.reshape(-1) for mb in labels.chunk(num_microbatches, dim=0)]
-        return input_mbs, label_mbs
+        if isinstance(batch, dict):
+            total_rows = raw.shape[0]
+            rows_per_mb = total_rows // num_microbatches
+            mbs = []
+            for index in range(num_microbatches):
+                chunk = {
+                    key: (
+                        value[index * rows_per_mb : (index + 1) * rows_per_mb]
+                        if isinstance(value, torch.Tensor) and value.ndim > 0
+                        else value
+                    )
+                    for key, value in batch.items()
+                }
+                mbs.append(chunk)
+            return mbs
+        input_chunks = batch.input_ids.chunk(num_microbatches, dim=0)
+        label_chunks = batch.labels.chunk(num_microbatches, dim=0)
+        return [
+            Batch(input_ids=ids, labels=labels)
+            for ids, labels in zip(input_chunks, label_chunks, strict=True)
+        ]
 
     def _pp_forward_backward_body(
         self,
-        input_ids: torch.Tensor,
-        labels: torch.Tensor,
+        batch: Batch | TrainerBatch,
         *,
         global_valid_tokens: torch.Tensor,
     ) -> torch.Tensor:
         """The pipeline-parallel body: drive the schedule instead of the model.
 
-        Only the first stage is handed ``input_ids`` (``arg_mbs``) and only the
+        Only the first stage is handed the inputs (``arg_mbs``) and only the
         last the labels (``target_mbs``); intermediate stages receive the
-        previous stage's activations over the schedule's p2p channel. The
-        schedule's loss is the same summed next-token CE the non-PP body
+        previous stage's activations over the schedule's p2p channel. Every
+        stage preprocesses its own micro-batches, because a non-first stage's
+        chunk holds hidden states rather than token ids and only the model knows
+        which of the two it is looking at.
+
+        The schedule's loss is the same summed next-token CE the non-PP body
         computes (``pipeline_parallel/pp.py:_scalar_loss_fn``), so the return
         keeps the caller's normalization unchanged: the sum over the last
         stage's micro-batches. That sum is over the last stage's *own* shard of
@@ -694,21 +679,26 @@ class Trainer:
         sum/G, and they are multiplied back by G here so the caller keeps
         receiving the raw sum it normalizes and reports.
 
-        Every stage receives the batch -- only the first and last *use* it --
-        but the token count is not taken here: the caller needs it before the
+        The token count is not taken here: the caller needs it before the
         micro-batches are cut, and a stage's count would be over its own slice.
         """
-        input_mbs, label_mbs = self._pp_microbatches(
-            input_ids.to(self.device), labels.to(self.device)
-        )
+        arg_mbs: list[tuple[torch.Tensor, ...]] = []
+        kwarg_mbs: list[dict[str, Any]] = []
+        target_mbs: list[torch.Tensor] | None = [] if self.pp_has_last_stage else None
+        for mb in self._pp_microbatches(batch):
+            inputs, labels, extra_kwargs = self._preprocess({"batch": mb})
+            if self.pp_has_first_stage:
+                arg_mbs.append((inputs,))
+            kwarg_mbs.append(extra_kwargs)
+            if target_mbs is not None:
+                target_mbs.append(labels)
 
         losses: list[torch.Tensor] | None = [] if self.pp_has_last_stage else None
         with self._param_context(), spmd_context(self.parallel_dims):
             self.pp_schedule.step(
-                arg_mbs=(
-                    [(mb,) for mb in input_mbs] if self.pp_has_first_stage else None
-                ),
-                target_mbs=label_mbs if self.pp_has_last_stage else None,
+                arg_mbs=arg_mbs if self.pp_has_first_stage else None,
+                kwarg_mbs=kwarg_mbs,
+                target_mbs=target_mbs,
                 losses=losses,
                 loss_kwargs={"global_valid_tokens": global_valid_tokens},
                 return_outputs=False,
@@ -807,9 +797,6 @@ class Trainer:
         pp_mesh = (
             None if parallel_dims is None else parallel_dims.get_optional_mesh("pp")
         )
-        cp_mesh = (
-            None if parallel_dims is None else parallel_dims.get_optional_mesh("cp")
-        )
         dp_cp_enabled = parallel_dims is not None and parallel_dims.dp_cp_enabled
         loss_mesh = (
             dp_mesh
@@ -829,30 +816,15 @@ class Trainer:
         loss_sums: list[torch.Tensor] = []
         local_valid_tokens = 0
         for _ in range(self.cfg.gradient_accumulation_steps):
-            batch = next(data_iterator)
-            # Accounting happens before the shape is normalized so it is
-            # per-architecture and shared by both loaders: every token the
-            # batch carries counts, whether or not it predicts anything.
-            labels = batch.labels if isinstance(batch, Batch) else batch["labels"]
-            self.ntokens_seen += labels.numel()
-            self.metrics.add_tokens(labels.numel())
-            microbatches.append(
-                dict(
-                    zip(
-                        ("input_ids", "labels", "positions", "num_valid_tokens"),
-                        self._as_batch(batch),
-                        strict=False,
-                    )
-                )
-            )
-            # Both sources count here, before the sequence is sharded for CP.
-            # That is the number the normalization wants: the loss sums over
-            # post-shard tokens, so dividing by a pre-shard global total gives
-            # the mean cross-entropy over the whole batch rather than over each
-            # rank's slice of it, and the result does not move when cp changes.
-            num_valid_tokens = microbatches[-1]["num_valid_tokens"]
-            assert num_valid_tokens is not None
-            local_valid_tokens += num_valid_tokens
+            # ``_microbatch`` owns the split of responsibility: it takes the
+            # count (the denominator) and the accounting off the loader's own
+            # batch, before any reshaping, and leaves everything else to the
+            # model. Both of those have to happen here rather than per
+            # micro-batch: the count has to be reduced across DP before the
+            # first backward, and the account is a report about the loader.
+            microbatch = self._microbatch(next(data_iterator))
+            microbatches.append(microbatch)
+            local_valid_tokens += microbatch["num_valid_tokens"]
 
         # Keep the count on device so normalizing the loss adds no device sync
         # to the training path.
@@ -874,11 +846,7 @@ class Trainer:
         for microbatch in microbatches:
             loss_sums.append(
                 self.forward_backward_step(
-                    microbatch["input_ids"],
-                    microbatch["labels"],
-                    positions=microbatch["positions"],
-                    num_valid_tokens=microbatch["num_valid_tokens"],
-                    global_valid_tokens=global_valid_tokens,
+                    microbatch, global_valid_tokens=global_valid_tokens
                 )
             )
 

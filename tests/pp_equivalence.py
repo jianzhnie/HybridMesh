@@ -39,7 +39,7 @@ import torch
 import torch.distributed as dist
 import torch.nn as nn
 
-from hpmesh.components.loss import IGNORE_INDEX, cross_entropy_loss, next_token_targets
+from hpmesh.components.loss import IGNORE_INDEX, cross_entropy_loss
 from hpmesh.datasets.random_data import RandomTokenSource, batch_iterator
 from hpmesh.models.hf_wrapper import HFTransformerModel, build_model_config_for
 from hpmesh.parallel.collectives import clip_grad_norm_
@@ -113,7 +113,7 @@ def _reference_trajectory(cfg: HybridMeshConfig) -> list[float]:
     """The same training step with no pipeline: same chunks, one process.
 
     Mirrors the trainer's step arithmetic exactly -- the same per-row target
-    shift (``next_token_targets``), the same summed CE per micro-batch, the
+    shift (``preprocess_inputs``), the same summed CE per micro-batch, the
     same clip and optimizer -- with the micro-batch loop unrolled locally
     instead of being driven through a schedule.
     """
@@ -136,10 +136,12 @@ def _reference_trajectory(cfg: HybridMeshConfig) -> list[float]:
     for _ in range(cfg.steps):
         optimizer.zero_grad(set_to_none=True)
         batch = next(batches)
-        # ``_as_batch``'s synthetic-path shift: within a row, row ends ignored.
-        targets = next_token_targets(
-            batch.labels.reshape(-1), seq_len=cfg.max_seq_len
-        ).reshape(cfg.global_batch_size, cfg.max_seq_len)
+        # The model's own synthetic-path shift: within a row, row ends ignored.
+        # Read off the model that actually trains, so the oracle's targets and
+        # the PP body's cannot drift apart.
+        targets = model.preprocess_inputs(batch, parallel_dims=None)[1].reshape(
+            cfg.global_batch_size, cfg.max_seq_len
+        )
         num_valid = int((targets != IGNORE_INDEX).sum())
 
         loss_sum = None
@@ -147,7 +149,14 @@ def _reference_trajectory(cfg: HybridMeshConfig) -> list[float]:
             row = slice(mb * rows_per_mb, (mb + 1) * rows_per_mb)
             logits = model(batch.input_ids[row].reshape(-1))
             loss = cross_entropy_loss(logits, targets[row].reshape(-1))
-            loss.backward()
+            # Normalized BEFORE backward, as the trainer's PP body does -- the
+            # schedule's ``_scalar_loss_fn`` divides by this same count. Not
+            # cosmetic: ``clip_grad_norm_`` below reads the gradient, so
+            # dividing afterwards would clip a gradient ``num_valid`` times too
+            # large against an absolute threshold. The divisor is the whole
+            # batch's count, not this micro-batch's, because it has to be the
+            # same number for every micro-batch of the step.
+            (loss / num_valid).backward()
             loss_sum = loss.detach() if loss_sum is None else loss_sum + loss.detach()
 
         clip_grad_norm_(model.parameters(), max_norm=cfg.max_norm, foreach=True)

@@ -1,4 +1,4 @@
-"""EP wiring check: ep=2 through ``apply_cp_ep`` must match the HF model.
+"""EP wiring check: ep=2 through ``apply_ep`` must match the HF model.
 
 Run under torchrun with 2 ranks:
 
@@ -6,7 +6,7 @@ Run under torchrun with 2 ranks:
 
 Where ``ep_equivalence.py`` checks the dispatcher arithmetic on hand-built
 MoEs, this checks the WIRING end to end: a real (tiny, offline, randomly
-initialized) qwen3_moe goes through ``apply_cp_ep`` with a 2-rank EP group,
+initialized) qwen3_moe goes through ``apply_ep`` with a 2-rank EP group,
 and each rank's forward over its own token shard must reproduce
 (a) the unmodified HF model's forward and (b) the EP=1 swap's forward.
 
@@ -33,8 +33,7 @@ from transformers import AutoConfig
 from hpmesh.models.common.aux_loss import AuxLoss
 from hpmesh.models.common.moe import MoE
 from hpmesh.models.hf_wrapper import HFTransformerModel
-from hpmesh.parallel.cp_ep import apply_cp_ep
-from hpmesh.parallel.ep import swap_hf_moe_blocks
+from hpmesh.parallel.expert_parallel import apply_ep, swap_hf_moe_blocks
 
 NUM_EXPERTS = 8
 TOKENS = 40
@@ -42,7 +41,7 @@ TOL = 1e-6
 
 
 class _Cfg:
-    """``apply_cp_ep`` reads exactly these two attributes on the EP path."""
+    """``apply_ep`` reads exactly this one attribute."""
 
     cp = 1
     ep = 2
@@ -94,7 +93,7 @@ def main() -> None:
     ep1 = _model()
     swap_hf_moe_blocks(ep1)
     ep2 = _model()
-    apply_cp_ep(ep2, None, _Cfg(), ep_group=ep_group)
+    apply_ep(ep2, _Cfg(), ep_group=ep_group)
 
     ids, positions = _data(rank)
     with torch.no_grad():

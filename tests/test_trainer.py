@@ -39,6 +39,7 @@ from hpmesh.datasets.random_data import (
     RandomTokenSource,
     batch_iterator,
 )
+from hpmesh.models.hf_wrapper import HFTransformerModel, build_model_config
 from hpmesh.parallel.collectives import (
     clip_grad_norm_,
     dist_max,
@@ -420,9 +421,10 @@ def test_step_discovery_ignores_unparseable_directory_names(tmp_path) -> None:
 # The trainer drives whichever ``BaseDataLoader`` the config names, and the two
 # implementations disagree about what a batch is: the synthetic one yields
 # ``(B, T)`` rows of one document each, the Grain one a flat packed stream. The
-# tests below pin the reconciliation, because everything downstream -- the
-# shift, the denominator, the attention backend's packing check -- is written
-# against what ``_as_batch`` returns.
+# trainer reconciles the *count* and asks the model to reconcile the *shape*:
+# the denominator is a whole-batch property that has to be reduced across DP
+# before the first backward, so it cannot come from a per-micro-batch model
+# call. The tests below pin both halves of that split.
 
 
 def _random_batch(batch_size: int = 4, seq_len: int = 6) -> Batch:
@@ -431,91 +433,155 @@ def _random_batch(batch_size: int = 4, seq_len: int = 6) -> Batch:
     return Batch(input_ids=ids, labels=ids.clone())
 
 
-def test_as_batch_passes_the_synthetic_shape_through_unchanged() -> None:
+def _wrapper() -> HFTransformerModel:
+    """The smallest real wrapper: the shape/shift path reads no model weights."""
+    config = build_model_config(
+        "qwen3",
+        seq_len=8,
+        arch_overrides={
+            "vocab_size": 32,
+            "hidden_size": 16,
+            "intermediate_size": 32,
+            "num_hidden_layers": 1,
+            "num_attention_heads": 2,
+            "num_key_value_heads": 2,
+        },
+    )
+    return HFTransformerModel(config).eval()
+
+
+def test_count_valid_tokens_passes_the_synthetic_shape_through_unchanged() -> None:
     batch = _random_batch()
-    input_ids, labels, positions, num_valid = Trainer._as_batch(batch)
-    assert torch.equal(input_ids, batch.input_ids)
-    # Positions are the wrapper's arange default, and the synthetic source
-    # counts its own tokens.
-    assert positions is None
-    assert num_valid is None
+    num_valid = Trainer._count_valid_tokens(batch)
+    # The synthetic source has no collator, so the trainer counts the
+    # predictable labels itself. It must: the loss divides by the step's token
+    # count *before* it backwards, so a ``None`` here would leave the
+    # denominator unknown at the one point it is still needed.
+    assert num_valid == int(
+        (next_token_targets(batch.labels.reshape(-1), seq_len=6) != IGNORE_INDEX).sum()
+    )
 
 
-def test_as_batch_shifts_the_synthetic_labels_within_a_row() -> None:
+def test_count_valid_tokens_prefers_the_collators_count() -> None:
+    """The count is the loss denominator, so a missing one is recomputed.
+
+    Nothing in the current collators omits it; the fallback exists so that a
+    loader written against the ``BaseDataLoader`` contract alone still gets a
+    correct denominator rather than a zero divide on the first backward.
+    """
+    labelled = {
+        "input": torch.arange(5),
+        "labels": torch.tensor([1, 2, IGNORE_INDEX, 4, IGNORE_INDEX]),
+    }
+    assert Trainer._count_valid_tokens(labelled) == 3
+
+    counted = {**labelled, "num_valid_tokens": 5}
+    assert Trainer._count_valid_tokens(counted) == 5
+
+
+def test_count_valid_tokens_reports_the_row_final_mask_the_loss_skips() -> None:
+    """The two halves of "the count is not the loss's business".
+
+    A synthetic batch loses one prediction per row to the shift, so the count
+    the trainer reports and the labels ``_loss_sum`` scores disagree by exactly
+    that many positions -- and the count is the smaller, correct one.
+    """
+    batch = _random_batch(batch_size=3, seq_len=4)
+
+    num_valid = Trainer._count_valid_tokens(batch)
+
+    assert num_valid == batch.labels.numel() - batch.labels.shape[0]
+
+
+def test_preprocess_inputs_shifts_the_synthetic_labels_within_a_row() -> None:
     """Row ``r`` must never predict row ``r + 1``'s first token.
 
     The synthetic source hands over labels equal to its inputs; the shift is
-    the trainer's. Doing it globally would pair each row's last position with
+    the model's now. Doing it globally would pair each row's last position with
     the next document's first token -- a target the model had no context for.
     """
     batch = _random_batch(batch_size=3, seq_len=4)
-    _, labels, _, _ = Trainer._as_batch(batch)
+    inputs, labels, extra_kwargs = _wrapper().preprocess_inputs(
+        batch, parallel_dims=None
+    )
 
-    expected = next_token_targets(batch.labels.reshape(-1), seq_len=4)
-    assert torch.equal(labels, expected)
+    assert torch.equal(inputs, batch.labels.reshape(-1))
+    assert torch.equal(labels, next_token_targets(batch.labels.reshape(-1), seq_len=4))
     # Every row-final position is excluded, one per row.
     assert int((labels == IGNORE_INDEX).sum()) == 3
     # And the surviving pairs are the intra-row ones.
-    flat = labels.reshape(-1, 4)
-    assert torch.equal(flat[:, :3], batch.labels[:, 1:])
+    assert torch.equal(labels.reshape(-1, 4)[:, :3], batch.labels[:, 1:])
+    # The synthetic source carries no positions, so the forward's own arange
+    # default applies -- right for one document, and not for a packed one.
+    assert extra_kwargs == {}
 
 
-def test_as_batch_consumes_the_grain_batch_without_consuming_its_tensors() -> None:
-    """The collator's counts and mask are read here, so the model never sees them.
+def test_preprocess_inputs_reads_the_grain_batch_without_consuming_it() -> None:
+    """The collator already shifted and masked the labels; the shift is a read.
 
-    Anything left in the dict becomes a model kwarg, so ``num_valid_tokens``
-    (a plain int) and ``padding_mask`` (which the forward would reject) both
-    have to be taken out rather than merely read.
+    ``num_valid_tokens`` never reaches the model -- the trainer pops it first,
+    because the denominator is the whole-batch count and ``positions`` is the
+    one entry the forward takes.
     """
     grain_batch = {
         "input": torch.arange(8),
-        "labels": torch.full((8,), IGNORE_INDEX),
+        "labels": torch.tensor([1, 2, IGNORE_INDEX, 4, IGNORE_INDEX, 6, 7, 8]),
         "positions": torch.arange(8),
-        "padding_mask": torch.zeros(8, dtype=torch.bool),
-        "num_valid_tokens": 5,
     }
 
-    input_ids, labels, positions, num_valid = Trainer._as_batch(grain_batch)
+    inputs, labels, extra_kwargs = _wrapper().preprocess_inputs(
+        grain_batch, parallel_dims=None
+    )
 
-    assert torch.equal(input_ids, torch.arange(8))
-    assert positions is not None and torch.equal(positions, torch.arange(8))
-    assert num_valid == 5
-    # Only the model's own kwargs survive.
-    assert set(grain_batch) == {"input", "labels"}
-    assert labels is not None
+    assert torch.equal(inputs, torch.arange(8))
+    assert torch.equal(labels, grain_batch["labels"])
+    assert torch.equal(extra_kwargs["positions"], torch.arange(8))
+    # Nothing was consumed: the loader owns the batch, and a second pass over
+    # it must see the same dict.
+    assert set(grain_batch) == {"input", "labels", "positions"}
 
 
-def test_as_batch_leaves_the_grain_labels_alone() -> None:
-    """The collator already shifted and masked them; shifting again would be wrong."""
+def test_preprocess_inputs_drops_a_padding_mask_the_forward_would_reject() -> None:
+    """Anything left in the dict is splatted into ``forward`` as a kwarg.
+
+    The wrapper takes exactly two of them, so an unclaimed ``padding_mask``
+    would reach the decoder as ``padding_mask=...`` and raise. Dropping it here
+    is the whole reason the return value is a dict rather than the batch.
+    """
     grain_batch = {
-        "input": torch.arange(5),
-        "labels": torch.tensor([1, 2, IGNORE_INDEX, 4, IGNORE_INDEX]),
-        "num_valid_tokens": 2,
+        "input": torch.arange(4),
+        "labels": torch.arange(4),
+        "positions": torch.arange(4),
+        "padding_mask": torch.zeros(4, dtype=torch.bool),
     }
-    _, labels, _, _ = Trainer._as_batch(grain_batch)
-    assert torch.equal(labels, torch.tensor([1, 2, IGNORE_INDEX, 4, IGNORE_INDEX]))
+
+    _, _, extra_kwargs = _wrapper().preprocess_inputs(grain_batch, parallel_dims=None)
+
+    assert set(extra_kwargs) == {"positions"}
 
 
-def test_loss_sum_does_not_count_ignored_positions() -> None:
-    """The denominator must be the predictable labels, not every label."""
+def test_loss_sum_scores_every_label_ignored_ones_included() -> None:
+    """The shift, not the loss, is what removes positions from the denominator.
+
+    ``_loss_sum`` returns the raw summed CE; the count that normalizes it is
+    taken upstream, from the *unsharded* batch, because context parallelism
+    slices ``labels`` after the fact and a recount here would undercount by
+    ``cp``. So the loss itself only skips the ignored rows.
+    """
     logits = torch.randn(6, 8)
     labels = torch.tensor([1, 2, IGNORE_INDEX, 4, IGNORE_INDEX, IGNORE_INDEX])
 
-    loss_sum, num_valid = Trainer._loss_sum(logits, labels)
+    loss_sum = Trainer._loss_sum(logits, labels)
 
-    assert loss_sum.ndim == 0
-    assert num_valid == 3
-    # Passing the count explicitly must agree with recounting it.
-    _, again = Trainer._loss_sum(logits, labels, num_valid_tokens=3)
-    assert again == num_valid
+    expected = F.cross_entropy(logits.float(), labels, reduction="sum")
+    assert torch.allclose(loss_sum, expected)
 
 
 def test_loss_sum_makes_one_prediction_per_predictable_label() -> None:
     """``logits[t]`` scores ``labels[t]``: the two are already aligned."""
     logits = torch.randn(4, 8)
     labels = torch.tensor([1, 2, 3, 4])
-    loss_sum, num_valid = Trainer._loss_sum(logits, labels)
-    assert num_valid == 4
+    loss_sum = Trainer._loss_sum(logits, labels)
 
     expected = F.cross_entropy(logits.float(), labels, reduction="sum")
     assert torch.allclose(loss_sum, expected)
