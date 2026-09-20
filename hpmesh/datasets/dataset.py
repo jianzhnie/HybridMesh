@@ -6,11 +6,11 @@
 
 """Composable dataset recipes backed by Grain.
 
-Vendored from torchtitan ``components/data/dataset.py``. What was dropped is
-``Configurable``: each node here is a plain dataclass -- the same shape as the
-checkpointer and metrics configs -- that implements its own ``build()``. A
-``SampleProcessor`` gets its runtime values, the tokenizer above all, as
-``__init__(*, context)`` rather than through a config indirection.
+Vendored from torchtitan ``components/data/dataset.py``. Each node here is a
+plain dataclass that implements its own ``build()``, the same shape as every
+other config in hpmesh (see ``trainer/config.py``). A ``SampleProcessor`` gets
+its runtime values, the tokenizer above all, as ``__init__(*, context)`` rather
+than through a config indirection.
 
 The ordering in ``_build_map_dataset`` is the part that must not move. It runs
 pre-filters, then the processor, then post-filters, and only then shuffles,

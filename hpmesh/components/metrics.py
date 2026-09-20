@@ -15,9 +15,6 @@ TensorBoard writer or a GPU in the room.
 
 Departures from torchtitan, all subtractions:
 
-* **No ``Configurable``.** ``MetricsProcessor.Config`` is a plain dataclass, as
-  with the checkpointer's config. See the checkpointer's ``base.py`` for why.
-
 * **No fault tolerance.** torchtitan threads ``ft_enable``/``ft_replica_id``
   into both the log directory layout and the metrics rank. hpmesh has no
   replica concept, so both are gone rather than carried as dead flags.
@@ -86,6 +83,7 @@ if TYPE_CHECKING:
     # imports the checkpointer, so importing it for real here would close a
     # cycle back into the components package that only exists to name a type.
     from ..parallel.parallel_dims import ParallelDims
+    from ..trainer.config import MetricsConfig
 
 # hpmesh configures handlers per module, rather than on the root logger the
 # way torchtitan does, so this has to be get_logger for the metrics lines to
@@ -386,33 +384,9 @@ class MetricsProcessor:
             project or event directory. The console line is not tagged.
     """
 
-    @dataclass(kw_only=True)
-    class Config:
-        log_freq: int = 10
-        """How often to log metrics, in steps."""
-
-        enable_tensorboard: bool = False
-        """Whether to write TensorBoard event files."""
-
-        disable_color_printing: bool = False
-        """Whether to drop colour from the console line."""
-
-        save_tb_folder: str = "tb"
-        """TensorBoard folder, relative to the dump folder."""
-
-        save_for_all_ranks: bool = False
-        """Whether every rank logs, rather than only the metrics rank."""
-
-        enable_wandb: bool = False
-        """Whether to stream metrics to Weights & Biases."""
-
-        def __post_init__(self) -> None:
-            if self.log_freq <= 0:
-                raise ValueError("metrics.log_freq must be greater than 0.")
-
     def __init__(
         self,
-        config: Config,
+        config: MetricsConfig,
         *,
         parallel_dims: ParallelDims | None,
         dump_folder: str = "./outputs",
@@ -480,7 +454,7 @@ class MetricsProcessor:
     def _build_metric_logger(
         self,
         *,
-        config: Config,
+        config: MetricsConfig,
         parallel_dims: ParallelDims | None,
         dump_folder: str,
         pp_schedule: str,

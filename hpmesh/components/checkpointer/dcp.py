@@ -45,8 +45,7 @@ import queue
 import threading
 import time
 from concurrent.futures import Future
-from dataclasses import dataclass
-from typing import Any, Literal
+from typing import TYPE_CHECKING, Any
 
 import torch
 import torch.distributed as dist
@@ -64,13 +63,16 @@ from torch.distributed.checkpoint.state_dict_saver import (
 
 from ...utils import filesystem
 from ...utils.gc import GarbageCollection
+
+if TYPE_CHECKING:
+    from ...trainer.config import CheckpointManagerConfig
+
 from .base import (
     DATALOADER,
     LR_SCHEDULER,
     MODEL,
     OPTIMIZER,
     BaseCheckpointManager,
-    BaseCheckpointManagerConfig,
     ModelWrapper,
     OptimizerWrapper,
     purge_thread,
@@ -161,25 +163,9 @@ class CheckpointManager(BaseCheckpointManager):
             off otherwise, so existing checkpoints keep their format.
     """
 
-    @dataclass(kw_only=True)
-    class Config(BaseCheckpointManagerConfig):
-        async_mode: Literal["disabled", "async", "async_with_pinned_mem"] = "disabled"
-        """DCP save mode: synchronous, threaded async, or pinned-memory async."""
-
-        def __post_init__(self) -> None:
-            super().__post_init__()
-            async_lowered = self.async_mode.lower()
-            if async_lowered not in (
-                "disabled",
-                "async",
-                "async_with_pinned_mem",
-            ):
-                raise ValueError(f"Invalid async_mode: {async_lowered}")
-            self.async_mode = async_lowered
-
     def __init__(
         self,
-        config: Config,
+        config: CheckpointManagerConfig,
         *,
         model_parts: list[nn.Module],
         optimizer: Any,

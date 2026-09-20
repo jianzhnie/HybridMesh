@@ -60,10 +60,10 @@ Workflow overview::
                      pixel_values_videos, grid_thw_videos,
                      special_tokens: dict[str, int]}, labels
 
-Vendored from torchtitan ``hf_datasets/multimodal/mm_datasets.py``. What was
-dropped is ``Configurable`` -- the per-dataset sample function is a constructor
-argument, which is why ``MM_DATASETS`` binds it with ``functools.partial``
-instead of wrapping each one in a config subclass.
+Vendored from torchtitan ``hf_datasets/multimodal/mm_datasets.py``. The
+per-dataset sample function is a constructor argument, which is why
+``MM_DATASETS`` binds it with ``functools.partial`` rather than wrapping each
+one in its own config subclass.
 """
 
 from __future__ import annotations

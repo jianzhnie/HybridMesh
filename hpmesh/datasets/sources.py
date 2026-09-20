@@ -6,10 +6,9 @@
 
 """Storage adapters for Grain datasets.
 
-Vendored from torchtitan ``components/data/sources.py``. What was dropped is
-``Configurable``: each source's ``Config`` is now the source class itself, so
-the class carries its own fields and implements ``build()``. That is the shape
-``SourceConfig`` was already describing -- a ``build()`` that returns either a
+Vendored from torchtitan ``components/data/sources.py``. Each source is its own
+config: the class carries its own fields and implements ``build()``, which is
+the shape ``SourceConfig`` describes -- a ``build()`` that returns either a
 random-access source or a ``grain.IterDataset``.
 
 Note the asymmetry, which is deliberate and load-bearing: the two Hugging Face

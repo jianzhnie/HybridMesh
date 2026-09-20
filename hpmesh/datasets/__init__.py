@@ -27,6 +27,7 @@ from .loader import (
     BaseDataLoader,
     DataloaderExhaustedError,
     GrainDataLoader,
+    GrainDataLoaderConfig,
     build_dataset_iteration_policy,
 )
 from .packing import ConcatThenSplitPackingConfig, FirstFitPackingConfig
@@ -51,6 +52,7 @@ __all__ = [
     "DataloaderExhaustedError",
     "FirstFitPackingConfig",
     "GrainDataLoader",
+    "GrainDataLoaderConfig",
     "GrainDataset",
     "HAS_PIN_MEMORY",
     "HuggingFaceRandomAccessSource",
