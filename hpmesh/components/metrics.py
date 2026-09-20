@@ -34,12 +34,23 @@ Departures from torchtitan, all subtractions:
   avoids. Only the missing-package case is caught, because that one is an
   installable dependency rather than a misconfiguration.
 
+* **No ``has_quantization``.** torchtitan suppresses MFU when the run is
+  quantized, since the peak it divides by is a dense BF16 figure. hpmesh has no
+  quantization path, so the flag has no producer and a value it could never be
+  set to is a branch nothing can exercise.
+
 * **Colour is vetoed by the terminal, not only by the config.** See
   ``utils/monitoring.colors_enabled``.
 
 * **MFU is suppressed when the device is unknown**, rather than assuming A100
   peak. A ratio measured against the wrong denominator is worse than no ratio,
   and on a laptop CPU the denominator is not a number at all.
+
+* **A window with no recorded data-loading time reports zero**, rather than
+  dividing by the number of samples it has (which is zero). torchtitan's
+  trainer times every fetch, so it never meets the empty list; anything that
+  logs without one -- a validation pass before the first training step, or a
+  caller that does not instrument its loader -- crashes there.
 
 One addition: ``MetricsProcessor.log`` never calls into ``torch.distributed``.
 torchtitan's ``_get_metrics_rank`` returns rank 0 unconditionally outside the
@@ -370,9 +381,9 @@ class MetricsProcessor:
         pp_schedule: the pipeline schedule name, which decides the metrics rank.
         num_flops_per_token: model FLOPs per token, used for tflops and MFU. The
             caller sets this once the model exists; ``0`` suppresses both.
-        config_dict: the full job config, handed to wandb.
-        tag: prefix applied to every metric key, for sharing one project across
-            runs that differ in a way worth separating.
+        config_dict: the full job config, handed to wandb. Only wandb reads it.
+        tag: prefix applied to every recorded key, so two runs can share one
+            project or event directory. The console line is not tagged.
     """
 
     @dataclass(kw_only=True)
@@ -524,14 +535,20 @@ class MetricsProcessor:
         return logger_container
 
     def _derive(self, step: int) -> _Derived:
-        """Compute the windowed numbers that both log paths share."""
+        """Compute the windowed numbers that both log paths share.
+
+        The keys these become carry no tag: a sensor is what the tag belongs to,
+        and it applies it once on the way out. Applying it here as well would
+        produce ``tag/tag/throughput(tps)`` in the recorded output.
+        """
         time_delta = time.perf_counter() - self.time_last_log
 
         tps = self.ntokens_since_last_log / (time_delta * self._non_data_parallel_size)
         tflops = self.num_flops_per_token * tps / 1e12
-        # MFU is a ratio against datasheet peak BF16, which overstates the
-        # achievable rate on a quantized model; report nothing there rather than
-        # a number that looks like a utilization but is not comparable.
+        # MFU is a ratio against a datasheet dense-BF16 peak, so it is only
+        # meaningful where the hardware actually achieves that. Where the peak
+        # is unknown the measurement is suppressed rather than reported against
+        # a guess -- see get_peak_flops.
         # https://arxiv.org/abs/2204.02311 for the definition.
         mfu = (
             None
@@ -541,8 +558,15 @@ class MetricsProcessor:
 
         assert self.step_last_log is not None, "should_log must run before log"
         time_end_to_end = time_delta / (step - self.step_last_log)
-        num_data_loading = len(self.data_loading_times)
-        time_data_loading = sum(self.data_loading_times) / num_data_loading
+        # Zero rather than a division: a window with no recorded fetch spent no
+        # time fetching, which is the number. torchtitan reports the mean only,
+        # so a caller that does not time its loader -- or a log before the first
+        # training step -- divides by zero there.
+        time_data_loading = (
+            sum(self.data_loading_times) / len(self.data_loading_times)
+            if self.data_loading_times
+            else 0.0
+        )
         time_data_loading_pct = 100 * sum(self.data_loading_times) / time_delta
 
         return _Derived(
@@ -569,20 +593,18 @@ class MetricsProcessor:
         global_max_loss: float,
         grad_norm: float,
         extra_metrics: dict[str, Any] | None = None,
-        has_quantization: bool = False,
     ) -> None:
         """Report one training step.
 
         Args:
             step: the current training step.
-            global_avg_loss: mean loss across all ranks, i.e. total loss over
-                total valid tokens, so it is independent of the batch split.
+            global_avg_loss: total loss over total valid tokens, so it is
+                independent of how the batch was split across ranks.
             global_max_loss: the worst rank's per-token loss. Equal to
                 ``global_avg_loss`` when averaging over rank means rather than
                 tokens -- see the note in the trainer.
             grad_norm: gradient norm, measured after clipping.
             extra_metrics: additional numbers the caller wants recorded.
-            has_quantization: suppress MFU, whose baseline is a BF16 peak.
         """
         if self.step_last_log is None:
             # The first log has no previous step to measure against. Anchoring
@@ -609,7 +631,7 @@ class MetricsProcessor:
             "memory/num_alloc_retries": device_mem_stats.num_alloc_retries,
             "memory/num_ooms": device_mem_stats.num_ooms,
         }
-        if derived.mfu is not None and not has_quantization:
+        if derived.mfu is not None:
             metrics["mfu(%)"] = derived.mfu
         if extra_metrics:
             metrics.update(extra_metrics)

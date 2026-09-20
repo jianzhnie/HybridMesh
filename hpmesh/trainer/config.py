@@ -19,6 +19,8 @@ import torch
 from transformers import AutoConfig
 
 from hpmesh.components.checkpointer.dcp import CheckpointManager
+from hpmesh.components.metrics import MetricsProcessor
+from hpmesh.components.profiler import Profiler
 from hpmesh.utils.logger_utils import get_logger
 
 logger = get_logger(__name__)
@@ -26,9 +28,11 @@ logger = get_logger(__name__)
 __all__ = [
     "CheckpointArguments",
     "HybridMeshConfig",
+    "MetricsArguments",
     "ModelArguments",
     "OptimizerArguments",
     "ParallelArguments",
+    "ProfilerArguments",
     "TrainingArguments",
 ]
 
@@ -387,6 +391,58 @@ class CheckpointArguments(CheckpointManager.Config):
     """
 
 
+@dataclass(kw_only=True)
+class MetricsArguments(MetricsProcessor.Config):
+    """CLI view of the metrics config.
+
+    Built like ``CheckpointArguments``: subclass the component's own ``Config``
+    so the defaults and the validation live in one place, and let ``train.py``
+    parse it as its own group rather than as a nested field.
+    """
+
+    log_freq: int = field(
+        default=1,
+        metadata={
+            "help": "Console log frequency, in steps. Also the TensorBoard/WandB "
+            "frequency -- one window feeds both."
+        },
+    )
+    tag: str | None = field(
+        default=None,
+        metadata={
+            "help": "Prefix applied to every recorded key in TensorBoard/WandB. The "
+            "console line is not prefixed: it is read live, never merged."
+        },
+    )
+
+    def __post_init__(self) -> None:
+        # Explicit two-arg super(): see ParallelArguments.
+        super().__post_init__()
+
+
+@dataclass(kw_only=True)
+class ProfilerArguments(Profiler.Config):
+    """CLI view of the profiler config.
+
+    Built like ``CheckpointArguments`` and ``MetricsArguments``: subclass the
+    component's own ``Config`` so the defaults and the validation live in one
+    place, and let ``train.py`` parse it as its own group.
+    """
+
+    def __post_init__(self) -> None:
+        # Explicit two-arg super(): see ParallelArguments.
+        super().__post_init__()
+
+
+# HfArgumentParser cannot turn a nested dataclass into a set of flags -- it
+# collapses it to one opaque `--<field>` argument and never consults the fields
+# inside. The `<x>_config` field is that escape hatch, and each config's own
+# group is parsed separately in train.py and grafted back on. Naming the field
+# for the dataclass it holds keeps the parser's `--help` from advertising a
+# value nobody should set. A plain `checkpoint` field would be nicer to read,
+# but a dataclass field and the class it types cannot share a name.
+
+
 @dataclass
 class TrainingArguments:
     """Training loop hyperparameters and reproducibility."""
@@ -404,7 +460,6 @@ class TrainingArguments:
             "help": "Deterministic algorithms -- required for bit-exact comparison"
         },
     )
-    log_freq: int = field(default=1, metadata={"help": "Log every N steps"})
     max_norm: float = field(
         default=1.0,
         metadata={
@@ -415,39 +470,43 @@ class TrainingArguments:
     dump_folder: str = field(
         default="./outputs",
         metadata={
-            "help": "Root directory for this run's outputs. The checkpoint folder "
-            "is resolved against it."
+            "help": "Root directory for this run's outputs. The checkpoint, "
+            "TensorBoard and profiling folders are resolved against it."
         },
     )
-    arguments: CheckpointArguments = field(
+    checkpoint_config: CheckpointArguments = field(
         default_factory=CheckpointArguments,
-        metadata={
-            "help": "Checkpointing (see components/checkpointer). A nested "
-            "dataclass, so the parser exposes it as one opaque --arguments "
-            "value; the checkpoint flags live on the CheckpointArguments group "
-            "instead, which train.py parses and grafts back in."
-        },
+        metadata={"help": "Checkpointing (see components/checkpointer)."},
+    )
+    metrics_config: MetricsArguments = field(
+        default_factory=MetricsArguments,
+        metadata={"help": "Metrics reporting (see components/metrics)."},
+    )
+    profiler_config: ProfilerArguments = field(
+        default_factory=ProfilerArguments,
+        metadata={"help": "Profiling (see components/profiler)."},
     )
 
     @property
     def checkpoint(self) -> CheckpointArguments:
-        """The checkpoint manager's config, spelled the way callers expect.
+        """The checkpoint manager's config.
 
-        A property rather than a field, for two reasons.
-
-        The binding one: dataclasses reject an instance as a field default
-        ("mutable default"), and ``default_factory=CheckpointArguments`` would
-        construct a *fresh* default on every use -- which means
-        ``BaseCheckpointManagerConfig.__post_init__`` runs its
-        ``initial_load_model_only`` warning each time, including on the
-        parser's own ``--help``. Nesting the dataclass under ``arguments`` makes
-        it a constructor argument that the escape hatch absorbs, and the
-        property keeps the flat ``cfg.checkpoint`` spelling at the call site.
-
-        The incidental one: a property is not a field, so ``HfArgumentParser``
-        never turns it into a flag.
+        A property backed by ``checkpoint_config`` rather than a field of its own
+        so the flat ``cfg.checkpoint`` spelling works at the call site. A
+        property is not a dataclass field, so the parser never turns it into a
+        flag.
         """
-        return self.arguments
+        return self.checkpoint_config
+
+    @property
+    def metrics(self) -> MetricsArguments:
+        """The metrics processor's config. See ``checkpoint`` for the shape."""
+        return self.metrics_config
+
+    @property
+    def profiler(self) -> ProfilerArguments:
+        """The profiler's config. See ``checkpoint`` for the shape."""
+        return self.profiler_config
 
     def __post_init__(self) -> None:
         if self.global_batch_size < 1:
@@ -564,8 +623,14 @@ class HybridMeshConfig:
         return self.training.deterministic
 
     @property
+    def pipeline_parallel_schedule(self) -> str:
+        return self.parallel.pipeline_parallel_schedule
+
+    @property
     def log_freq(self) -> int:
-        return self.training.log_freq
+        # Owned by the metrics group: the same number gates both the console
+        # line and the TensorBoard/WandB write, so one knob controls them.
+        return self.training.metrics.log_freq
 
     @property
     def max_norm(self) -> float:
@@ -578,6 +643,14 @@ class HybridMeshConfig:
     @property
     def checkpoint(self) -> CheckpointArguments:
         return self.training.checkpoint
+
+    @property
+    def metrics(self) -> MetricsArguments:
+        return self.training.metrics
+
+    @property
+    def profiler(self) -> ProfilerArguments:
+        return self.training.profiler
 
     def derive_dp(self, world_size: int) -> int:
         """Flat passthrough so callers use cfg.derive_dp(world_size) uniformly."""
