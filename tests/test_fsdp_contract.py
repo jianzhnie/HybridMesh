@@ -23,7 +23,7 @@ import torch.nn as nn
 from torch.nn import ModuleDict, ModuleList
 
 from hpmesh.models.hf_wrapper import HFTransformerModel, build_model_config
-from hpmesh.parallel.fsdp2.fsdp import iter_transformer_layers
+from hpmesh.parallel.fully_shard.fsdp import iter_transformer_layers
 
 _VOCAB = 32
 _HIDDEN = 8
