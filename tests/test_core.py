@@ -312,6 +312,38 @@ def test_build_model_config_for_offline_arch() -> None:
     assert config.max_position_embeddings >= cfg.max_seq_len
 
 
+def test_the_mask_type_follows_the_corpus_rather_than_being_configured() -> None:
+    """Packed corpora need the document mask; the synthetic one must not pay for it.
+
+    ``build_model_config_for`` derives ``attn_mask_type`` from the dataset
+    selector because the two cannot be set independently without one of them
+    being wrong: every non-random corpus is packed by ``datasets/build.py``, and
+    nothing in the config names packing separately. Setting it by hand -- which
+    is what the equivalence tests used to do -- is the drift this prevents.
+    """
+    from dataclasses import replace
+
+    from hpmesh.trainer.config import DataloaderConfig
+
+    training = TrainingConfig(seed=42)
+    synthetic = build_model_config_for(HybridMeshConfig(training=training))
+    assert synthetic.attn_mask_type == "causal"
+
+    packed = build_model_config_for(
+        HybridMeshConfig(
+            training=replace(
+                training,
+                dataloader_config=DataloaderConfig(
+                    dataset="local_jsonl",
+                    tokenizer_path="/tmp/tokenizer",
+                    dataset_path="/tmp/corpus",
+                ),
+            )
+        )
+    )
+    assert packed.attn_mask_type == "block_causal"
+
+
 def test_wrapper_forward_returns_logits_the_trainer_can_score() -> None:
     """The contract the training loop relies on: flat ids in, flat logits out.
 

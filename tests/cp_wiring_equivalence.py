@@ -318,7 +318,9 @@ def _check_preprocess_inputs_matches(mesh, failures: list[str]) -> float:
     # The batch is packed, so the model has to be told to mask document
     # boundaries; ``get_attention_masks`` picks its mods off this config, and
     # left at the default it would build a causal-only mask and quietly attend
-    # across documents.
+    # across documents. In a real run ``build_model_config_for`` derives this
+    # from the corpus (any non-random dataset is packed); here the model is
+    # built without one, so it is set explicitly to the same value.
     model.model.config.attn_mask_type = "block_causal"
     apply_cp(model, mesh, cfg)
     ids, labels, positions = _data(packed=True)

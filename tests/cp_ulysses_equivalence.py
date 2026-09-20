@@ -272,6 +272,8 @@ def _check_refusals(mesh, failures: list[str]) -> None:
         lambda: apply_cp(model, mesh, cfg),
     )
     model = _build_model(_cfg(), flex=True)
+    # As in a packed run: ``build_model_config_for`` derives this from the
+    # corpus, and the attach guard below reads it.
     model.model.config.attn_mask_type = "block_causal"
     _expect(
         ValueError,

@@ -18,7 +18,7 @@ from __future__ import annotations
 
 import pytest
 
-from hpmesh.parallel.spmd_types import (
+from hpmesh.utils.spmd_context import (
     current_spmd_mesh,
     spmd_context,
     spmd_mesh_group,

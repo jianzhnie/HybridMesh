@@ -22,7 +22,8 @@ arithmetic exactly.
 
 The FQN keying is what pp > 1 exercises that a single-rank round-trip does
 not: every stage's optimizer numbers its own parameters from 0, so positional
-keys collide across ranks in one shared checkpoint (see ``OptimizerWrapper``).
+keys collide across ranks in one shared checkpoint (the flat FQN-keyed
+optimizer state dict is what prevents that).
 
 Known seam, worked around rather than fixed here: the synthetic random corpus
 carries no cursor in the checkpoint (``Trainer._build_dataloader`` drops it --
@@ -172,11 +173,17 @@ def _phase_resume(workdir: str) -> None:
 
     # Non-vacuity: the optimizer must have come back warm -- a cold Adam (no
     # or zeroed moments) is exactly the failure a loss match would then catch,
-    # so assert it directly for a clearer message.
-    optim_state = trainer.optimizer.state_dict()["state"]
-    if not optim_state:
+    # so assert it directly for a clearer message. The container's state dict is
+    # flat and FQN-keyed, so the moments are the ``state.<fqn>.exp_avg`` entries.
+    optim_state = trainer.optimizer.state_dict()
+    moments = {
+        key: value
+        for key, value in optim_state.items()
+        if key.startswith("state.") and key.endswith("exp_avg")
+    }
+    if not moments:
         failures.append(f"rank {trainer.rank}: optimizer state is empty")
-    elif not any(float(s["exp_avg"].abs().sum()) > 0 for s in optim_state.values()):
+    elif not any(float(moment.abs().sum()) > 0 for moment in moments.values()):
         failures.append(f"rank {trainer.rank}: optimizer moments are all zero")
 
     # The synthetic source is not checkpointed (see module docstring): replay

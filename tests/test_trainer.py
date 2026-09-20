@@ -32,6 +32,7 @@ from hpmesh.components.loss import (
     next_token_targets,
     vocab_shard_bounds,
 )
+from hpmesh.components.optimizer import OptimizersContainer
 from hpmesh.datasets.random_data import (
     Batch,
     DataLoaderExhausted,
@@ -46,7 +47,6 @@ from hpmesh.parallel.collectives import (
     dist_sum,
     dist_sum_tensor,
 )
-from hpmesh.components.optimizer import OptimizersContainer
 from hpmesh.trainer.config import CheckpointConfig, OptimizerConfig, ParamGroupConfig
 from hpmesh.trainer.trainer import Trainer
 
