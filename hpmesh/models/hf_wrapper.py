@@ -42,6 +42,7 @@ from transformers.configuration_utils import PretrainedConfig
 from transformers.integrations.flex_attention import flex_attention_forward
 from transformers.modeling_utils import AttentionInterface
 
+from ..parallel.context_parallel import shard_attention_mask_for_cp
 from ..utils.batch_invariant import is_in_batch_invariant_mode
 from .common.masks import (
     create_attention_mask,
@@ -51,7 +52,12 @@ from .common.masks import (
 
 logger = logging.getLogger(__name__)
 
-__all__ = ["HFTransformerModel", "build_model_config", "build_model_config_for"]
+__all__ = [
+    "HFTransformerModel",
+    "build_model_config",
+    "build_model_config_for",
+    "num_flops_per_token",
+]
 
 # HF picks its attention function off ``config._attn_implementation``. Registering
 # a name of our own lets us route through ``_flex_attention_hf`` without tripping
@@ -149,6 +155,62 @@ def build_model_config_for(cfg) -> PretrainedConfig:
     )
 
 
+def num_flops_per_token(cfg) -> int:
+    """Training FLOPs per token for the model ``cfg`` describes.
+
+    This is the denominator MFU divides into, so it has to describe the model
+    that actually runs rather than a textbook transformer. It is derived from
+    the same arch config the model is built from (``build_model_config_for``),
+    which is what keeps the two from drifting.
+
+    The convention, matching torchtitan's:
+
+    * Every linear layer applied to every token costs ``2 * in * out`` FLOPs per
+      token (one multiply and one add per weight), counted three times -- once
+      for the forward pass and twice for the backward. That ``3 * 2 = 6`` is
+      where the familiar ``6N`` comes from.
+    * Attention adds ``6 * num_heads * (qk_head_dim + v_head_dim) * seq_len``
+      per layer, which is the two attention contractions, not counted in the
+      parameter term above. Causal sparsity and the recomputed backward pass are
+      deliberately not discounted, following the same convention -- discounting
+      them would produce an MFU above 100%, since the hardware peak is quoted
+      against full dense matmuls.
+    * Embedding lookups are not matmuls and cost nothing here, but the output
+      projection is a matmul and is counted, whether or not its weight is tied
+      to the embedding table: tying is a storage decision, not a compute one.
+
+    Returns 0 for a model whose config does not expose the sizes the formula
+    needs, which suppresses MFU rather than reporting a number derived from
+    guessed geometry.
+    """
+    arch = _unwrap_text_config(build_model_config_for(cfg))
+    hidden = getattr(arch, "hidden_size", None)
+    intermediate = getattr(arch, "intermediate_size", None)
+    num_layers = getattr(arch, "num_hidden_layers", None)
+    vocab_size = getattr(arch, "vocab_size", None)
+    num_heads = getattr(arch, "num_attention_heads", None)
+    if None in (hidden, intermediate, num_layers, vocab_size, num_heads):
+        return 0
+
+    num_kv_heads = getattr(arch, "num_key_value_heads", None) or num_heads
+    head_dim = getattr(arch, "head_dim", None) or hidden // num_heads
+
+    # Per token, in units of one multiply-add -- doubled at the end.
+    per_layer = (
+        2 * hidden * num_heads * head_dim  # q_proj
+        + 2 * hidden * num_kv_heads * head_dim  # k_proj
+        + 2 * hidden * num_kv_heads * head_dim  # v_proj
+        + 2 * num_heads * head_dim * hidden  # o_proj
+        + 3 * 2 * hidden * intermediate  # gate, up, down
+    )
+    lm_head = 2 * vocab_size * hidden
+    # qk_head_dim and v_head_dim are both head_dim for the decoder-only models
+    # this wrapper builds.
+    attention = 6 * num_heads * 2 * head_dim * cfg.max_seq_len
+
+    return 3 * (num_layers * per_layer + lm_head) + num_layers * attention
+
+
 def _unwrap_text_config(config: PretrainedConfig) -> PretrainedConfig:
     """Return the text sub-config of a composite (vision-language) model.
 
@@ -241,6 +303,7 @@ class HFTransformerModel(nn.Module):
 
         self.max_seq_len = getattr(config, "max_position_embeddings", None)
         self.cp_mesh = None
+        self._cp_load_balancer = None
 
         # The decoder is the text stack; lm_head is its sibling on the CausalLM.
         # Stored with object.__setattr__ on purpose: a plain ``self._decoder = ...``
@@ -325,9 +388,15 @@ class HFTransformerModel(nn.Module):
 
     # -- HF integration hooks --------------------------------------------------
 
-    def set_cp_mesh(self, mesh) -> None:
-        """Record the CP mesh so logit dumps can tag their CP coordinate."""
+    def set_cp_mesh(self, mesh, *, load_balancer: str | None = None) -> None:
+        """Record the CP mesh so logit dumps can tag their CP coordinate.
+
+        Also records the CP load-balancer type: the trainer shards the batch
+        with it, and the forward's BlockMask Q-shard must rearrange Q the same
+        way or the mask indexes the wrong queries.
+        """
         self.cp_mesh = mesh
+        self._cp_load_balancer = load_balancer
 
     @property
     def tp_plan(self) -> dict[str, str]:
@@ -398,6 +467,37 @@ class HFTransformerModel(nn.Module):
             separate_full_blocks=not is_in_batch_invariant_mode(),
         )
 
+    def _get_cp_attention_masks(self, positions: torch.Tensor):
+        """Build the BlockMask for a CP forward: full-length, then Q-sharded.
+
+        Under CP, ``positions`` is this rank's shard of the sequence (possibly
+        load-balancer-rearranged), so it cannot describe the full document
+        structure: the mask is built over the FULL sequence and then sharded
+        along its Q axis, matching how the CP kernel's gathered K/V stay
+        full-length. ``get_attention_masks`` builds the full mask from an
+        arange -- valid because only the causal mod is taken here.
+
+        Packed batches (``block_causal``) cannot take this path: the document
+        mask needs the full positions, which only the caller has. Build the
+        full-length mask with ``get_attention_masks(full_positions)``, Q-shard
+        it with ``shard_attention_mask_for_cp``, and pass it as
+        ``attention_masks``.
+        """
+        if getattr(self.model.config, "attn_mask_type", "causal") == "block_causal":
+            raise ValueError(
+                "Context parallel with packed sequences needs a prebuilt mask: "
+                "build the full-length BlockMask with get_attention_masks from "
+                "the FULL positions, Q-shard it with shard_attention_mask_for_cp, "
+                "and pass it to forward as attention_masks. The positions this "
+                "forward receives are already CP-sharded and cannot describe the "
+                "full document structure."
+            )
+        cp_size = self.cp_mesh.size()
+        full_len = positions.shape[0] * cp_size
+        full_positions = torch.arange(full_len, device=positions.device)
+        mask = self.get_attention_masks(positions=full_positions)
+        return shard_attention_mask_for_cp(mask, self.cp_mesh, self._cp_load_balancer)
+
     # -- forward ---------------------------------------------------------------
 
     def forward(
@@ -410,13 +510,16 @@ class HFTransformerModel(nn.Module):
         """Run the decoder over one packed sequence and return logits.
 
         Args:
-            input_ids: ``(T,)`` flat token ids.
+            input_ids: ``(T,)`` flat token ids. Under CP, this rank's sequence
+                shard -- ``(T/cp,)``.
             positions: ``(T,)`` per-token positions, resetting at document
                 boundaries. Drives RoPE. Defaults to ``arange``, which is correct
-                only when the sequence is a single document.
+                only when the sequence is a single document. Under CP, the
+                matching shard of the full positions.
             attention_masks: a prebuilt BlockMask. Only the flex backend consumes
                 it (see ``_apply_attention``); with sdpa the decoder is left to
-                its own causal default.
+                its own causal default. Under CP, a full-length mask already
+                Q-sharded by ``shard_attention_mask_for_cp``.
         """
         local_seq_len = input_ids.shape[0]
         if positions is None:
@@ -460,7 +563,10 @@ class HFTransformerModel(nn.Module):
         leaves open.
         """
         if attention_masks is None:
-            attention_masks = self.get_attention_masks(positions=positions)
+            if self.cp_mesh is None:
+                attention_masks = self.get_attention_masks(positions=positions)
+            else:
+                attention_masks = self._get_cp_attention_masks(positions)
 
         # is_causal is the flex-only spelling: it selects which mod the BlockMask
         # runs, so it is withheld from every other backend (see below).

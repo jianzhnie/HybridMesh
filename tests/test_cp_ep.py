@@ -91,16 +91,28 @@ def test_apply_cp_ep_is_a_no_op_when_both_axes_are_off() -> None:
     assert apply_cp_ep(model, None, _Cfg()) is model
 
 
-def test_apply_cp_ep_still_reports_cp_as_unimplemented() -> None:
-    """The primitives above exist, but no caller wires them up yet.
+def test_apply_cp_ep_still_reports_ep_as_unimplemented() -> None:
+    """CP is wired now; EP still has no dispatcher and must refuse loudly."""
 
-    Turning a configured CP degree into a silently ignored one would be worse
-    than the explicit failure: the run would succeed with a wrong attention.
+    class _Cfg:
+        cp = 1
+        ep = 2
+
+    with pytest.raises(NotImplementedError, match="EP"):
+        apply_cp_ep(torch.nn.Linear(4, 4), None, _Cfg())
+
+
+def test_apply_cp_ep_requires_the_flex_backend() -> None:
+    """CP expresses the sharded mask as a BlockMask, which only flex consumes.
+
+    A plain module has no HF config at all, so it fails the backend check --
+    the same check that stops a CPU-run model (whose wrapper selected 'sdpa')
+    from silently computing attention over its own shard only.
     """
 
     class _Cfg:
         cp = 2
         ep = 1
 
-    with pytest.raises(NotImplementedError, match="step 4"):
+    with pytest.raises(RuntimeError, match="attention backend"):
         apply_cp_ep(torch.nn.Linear(4, 4), None, _Cfg())
