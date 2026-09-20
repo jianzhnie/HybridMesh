@@ -1,0 +1,119 @@
+"""Wire CP onto a model: attach the CP flex kernel to every decoder layer."""
+
+from __future__ import annotations
+
+import logging
+
+import torch.nn as nn
+from torch.distributed.device_mesh import DeviceMesh
+
+from ...trainer.config import HybridMeshConfig
+from .cp_kernel import CPFlexKernel
+
+logger = logging.getLogger(__name__)
+
+__all__ = ["apply_cp"]
+
+# HF names the attention submodule differently across model families; probe in
+# the style of hf_wrapper's ``_first_present`` rather than hardcoding one
+# family's spelling.
+_ATTN_MODULE_NAMES = ("self_attn", "attn", "attention")
+
+
+def apply_cp(
+    model: nn.Module,
+    mesh: DeviceMesh | None,
+    cfg: HybridMeshConfig,
+) -> nn.Module:
+    """Attach a CP flex kernel to every decoder layer's attention module.
+
+    No-op when ``cfg.cp == 1`` (the model is handed back untouched), so the
+    caller needs no degree check of its own.
+
+    The kernel declares the CP region: q/k/v reach it sequence-sharded and it
+    redistributes them per the configured strategy (K/V all-gather, or ulysses
+    all-to-all onto the head axis). The model inputs still have to be sharded
+    along the sequence axis -- that is the trainer's half of the wiring
+    (``shard_batch_for_cp``).
+    """
+    if cfg.cp == 1:
+        return model
+
+    # Lazy: parallel/ is imported before models/ in the trainer, and hf_wrapper
+    # itself imports the CP input sharding, so a module-level import here would
+    # close an import cycle.
+    from ...models.hf_wrapper import _ATTN_IMPLEMENTATION
+
+    impl = getattr(getattr(model, "model", None), "config", None)
+    impl = getattr(impl, "_attn_implementation", None)
+    if impl != _ATTN_IMPLEMENTATION:
+        raise RuntimeError(
+            f"CP requires the {_ATTN_IMPLEMENTATION!r} attention backend, but "
+            f"this model runs {impl!r}. CP expresses the sharded attention mask "
+            "as a BlockMask, which only the flex path consumes -- the same "
+            "reason the sdpa fallback cannot run packed sequences. On a "
+            "CPU-only machine the wrapper selects 'sdpa', so CP needs CUDA."
+        )
+    if mesh is None or "cp" not in (mesh.mesh_dim_names or ()):
+        raise ValueError(
+            f"cp={cfg.cp} requires a device mesh with a 'cp' axis, got "
+            f"{None if mesh is None else mesh.mesh_dim_names}."
+        )
+    cp_mesh = mesh["cp"]
+    if cp_mesh.size() != cfg.cp:
+        raise ValueError(
+            f"mesh 'cp' axis has size {cp_mesh.size()}, but cfg requests cp={cfg.cp}."
+        )
+
+    strategy = cfg.parallel.context_parallel_strategy
+    load_balancer = cfg.parallel.context_parallel_load_balancer
+    if strategy == "ulysses":
+        model_config = getattr(getattr(model, "model", None), "config", None)
+        if load_balancer is not None:
+            raise ValueError(
+                "Ulysses CP requires context_parallel_load_balancer=None: the "
+                "all-to-all reassembles the sequence by concatenating rank "
+                "shards in rank order, which only the contiguous split "
+                "satisfies -- a load balancer's rearrangement would permute "
+                "the full sequence every rank attends over."
+            )
+        if getattr(model_config, "attn_mask_type", "causal") == "block_causal":
+            raise ValueError(
+                "Ulysses CP does not support packed sequences "
+                "(attn_mask_type='block_causal'): the wrapper hands every CP "
+                "kernel a Q-sharded BlockMask, but ulysses attends the full "
+                "sequence and cannot recover the unsharded document mask. "
+                "Use strategy='kv_allgather' for packed runs."
+            )
+        for field_name in ("num_attention_heads", "num_key_value_heads"):
+            heads = getattr(model_config, field_name, None) or getattr(
+                model_config, "num_attention_heads", None
+            )
+            if heads is None or heads % cp_mesh.size() != 0:
+                raise ValueError(
+                    f"Ulysses CP shards heads across the group: {field_name} "
+                    f"({heads}) must be divisible by cp={cp_mesh.size()}."
+                )
+
+    layers = getattr(model, "layers", None)
+    if layers is None:
+        raise TypeError(
+            f"apply_cp expects a HFTransformerModel (with .layers); got "
+            f"{type(model).__name__}."
+        )
+    for idx, layer in enumerate(layers):
+        for name in _ATTN_MODULE_NAMES:
+            if hasattr(layer, name):
+                attn_mod = getattr(layer, name)
+                break
+        else:
+            raise AttributeError(
+                f"{type(layer).__name__} (layer {idx}) has no attention module "
+                f"under any of {_ATTN_MODULE_NAMES}. Add the model's spelling "
+                "to the probe in apply_cp."
+            )
+        attn_mod._titan_flex_kernel = CPFlexKernel(cp_mesh=cp_mesh, strategy=strategy)
+
+    model.set_cp_mesh(cp_mesh, load_balancer=load_balancer)
+    logger.info("Applied CP (%s) with degree %d", strategy, cfg.cp)
+    return model

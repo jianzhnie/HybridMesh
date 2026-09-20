@@ -14,8 +14,10 @@ What the migration added, and why each earned its place:
 * **The denominator is a whole-batch property.** It counts the tokens of the
   *unsharded* batch -- before context parallelism slices it and before pipeline
   parallelism cuts it into micro-batches -- so it is the same number on every
-  rank of the workload and for every micro-batch of a step. Sharding the
-  sequence must not change the reported loss.
+  rank of the workload and for every micro-batch of a step, and it is reduced
+  over the DP axis alone. Sharding the sequence must not change the reported
+  loss, which is why the *loss* reduce-group is chosen differently: it follows
+  the sequence, so it spans dp * cp whenever either is enabled.
 * **Gradient accumulation.** ``gradient_accumulation_steps`` runs the
   forward/backward once per group and advances the optimizer once. The division
   happens *inside* each group's backward -- the group's summed loss over every
@@ -777,41 +779,42 @@ class Trainer:
         #
         # The token count is taken from the unsharded batch, so every CP rank
         # of a DP group holds the same number: summing over dp (replicate *
-        # shard) is the whole batch's count, once.
+        # shard) is the whole batch's count, once. The groups that would be
+        # wrong are the pure-cp axis (multiplying the count by cp) and the
+        # ``loss`` axis (by dp * cp) -- both over-count a batch no rank ever
+        # held in full.
         #
         # The loss is summed over each rank's own *slice* of the sequence, so
         # it needs the dp * cp group -- that sum reaches every token exactly
         # once, whereas a dp-only sum would miss the shards held by the other
         # CP ranks and report an average cp times too large. The two coincide
-        # when CP is off, which is why one mesh serves both. Divides by a
-        # multiple of the true total either way, so any correct-enough group
-        # gives the same *average*; correctness is what rules out the
-        # alternatives, not the arithmetic.
+        # when CP is off, which is why one mesh serves both averages. Under PP
+        # each stage's subgroup reduces independently and only the last stage's
+        # (the metrics rank's) is ever logged, so a size-1 loss axis is nothing
+        # to reduce over rather than an error -- hence ``get_optional_mesh``
+        # rather than ``get_mesh``.
         #
-        # ``get_optional_mesh``, not ``get_mesh``: a pure-PP run has a size-1
-        # loss axis, which ``get_mesh`` rejects, and a size-1 axis has nothing
-        # to reduce over anyway. Under PP each stage's subgroup reduces
-        # independently and only the last stage's (the metrics rank's) is ever
-        # logged.
+        # When the loss mesh *is* used is not "is CP on" but "is the loss split
+        # across ranks at all": with cp on and dp = 1 the sequence is sharded
+        # and dp alone is a size-1 group, so skipping the reduction would
+        # report one rank's shard as the whole batch's loss. Gate on
+        # ``dp_cp_enabled`` (dp or cp), which is the property torchtitan gates
+        # on, not on the density of the mesh.
+        parallel_dims = self.parallel_dims
         dp_mesh = (
-            None
-            if self.parallel_dims is None
-            else self.parallel_dims.get_optional_mesh("dp")
+            None if parallel_dims is None else parallel_dims.get_optional_mesh("dp")
         )
         pp_mesh = (
-            None
-            if self.parallel_dims is None
-            else self.parallel_dims.get_optional_mesh("pp")
+            None if parallel_dims is None else parallel_dims.get_optional_mesh("pp")
         )
         cp_mesh = (
-            None
-            if self.parallel_dims is None
-            else self.parallel_dims.get_optional_mesh("cp")
+            None if parallel_dims is None else parallel_dims.get_optional_mesh("cp")
         )
+        dp_cp_enabled = parallel_dims is not None and parallel_dims.dp_cp_enabled
         loss_mesh = (
             dp_mesh
-            if pp_mesh is None and cp_mesh is None
-            else self.parallel_dims.get_optional_mesh("loss")
+            if pp_mesh is None and not dp_cp_enabled
+            else parallel_dims.get_optional_mesh("loss")
         )
 
         # Read the whole step's data up front. The denominator must be known

@@ -1,9 +1,11 @@
 """Parallelism: one ``apply_*`` per dimension, composed by one entry point.
 
-Each dimension gets its own module, except the two that come as a pair and are
-therefore subpackages: ``tensor_parallel/{tp,linear}`` (the declaration and the
-fused GEMMs it realizes into) and ``fully_shard/{fsdp,fsdp_wrap}`` (torchtitan's
-vendored sharding logic behind a thin driver).
+Each dimension gets its own module or subpackage: ``tensor_parallel/{tp,linear}``
+(the declaration and the fused GEMMs it realizes into), ``fully_shard/{fsdp,
+fsdp_wrap}`` (torchtitan's vendored sharding logic behind a thin driver),
+``context_parallel/`` (CP redistribution primitives, flex kernel, input
+sharding, ``apply_cp``) and ``expert_parallel/`` (the HF MoE swap and
+``apply_ep``).
 
 Every ``apply_*`` is a no-op when its degree is 1. That is what lets the same
 trainer code run from step 0 (single device) through step 4 (full hybrid
@@ -18,13 +20,15 @@ the stage split and ``pp.py`` builds the schedule over this rank's stages.
 
 from __future__ import annotations
 
-from .cp_ep import apply_cp_ep
+from .context_parallel import apply_cp
+from .expert_parallel import apply_ep
 from .fully_shard.fsdp_wrap import apply_fsdp
 from .parallelize_hf import parallelize_hf_transformers
 from .tensor_parallel.tp import apply_tp
 
 __all__ = [
-    "apply_cp_ep",
+    "apply_cp",
+    "apply_ep",
     "apply_fsdp",
     "apply_tp",
     "parallelize_hf_transformers",
