@@ -42,7 +42,7 @@ __all__ = ["parallelize_hf_transformers"]
 def _reject_pp(parallel_dims) -> None:
     """Fail loudly on ``pp > 1``, which no code here can honour.
 
-    ``pepeline_parallel/pipeline.py`` can split a model into stages, but nothing
+    ``pipeline_parallel/pipeline.py`` can split a model into stages, but nothing
     builds a schedule over them, so a PP run would train every rank on the whole
     model and look like a working job. Raising here -- before the loop starts --
     is the only outcome that is not silently wrong.
@@ -53,7 +53,7 @@ def _reject_pp(parallel_dims) -> None:
     if parallel_dims is not None and parallel_dims.pp_enabled:
         raise NotImplementedError(
             "pipeline parallelism is not wired: "
-            "parallel/pepeline_parallel/pipeline.py splits the model into "
+            "parallel/pipeline_parallel/pipeline.py splits the model into "
             "stages, but no schedule drives them. Set pp=1, or see "
             "docs/hybridmesh_design.md, stage 4."
         )
