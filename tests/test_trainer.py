@@ -19,8 +19,10 @@ from __future__ import annotations
 
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 
 from hpmesh.components.checkpointer import (
+    DATALOADER,
     TRAIN_STATE,
     CheckpointManager,
 )
@@ -33,6 +35,7 @@ from hpmesh.components.loss import (
 from hpmesh.datasets.random_data import (
     Batch,
     DataLoaderExhausted,
+    RandomTokenDataLoader,
     RandomTokenSource,
     batch_iterator,
 )
@@ -42,6 +45,7 @@ from hpmesh.parallel.collectives import (
     dist_sum,
     dist_sum_tensor,
 )
+from hpmesh.trainer.trainer import Trainer
 
 # -- losses -------------------------------------------------------------------
 
@@ -408,3 +412,166 @@ def test_step_discovery_ignores_unparseable_directory_names(tmp_path) -> None:
     resumed = _manager(str(tmp_path), fresh_model, fresh_optimizer, _TrainState())
     assert resumed.load(-1) is True
     resumed.close()
+
+
+# -- the dataloader seam ------------------------------------------------------
+#
+# The trainer drives whichever ``BaseDataLoader`` the config names, and the two
+# implementations disagree about what a batch is: the synthetic one yields
+# ``(B, T)`` rows of one document each, the Grain one a flat packed stream. The
+# tests below pin the reconciliation, because everything downstream -- the
+# shift, the denominator, the attention backend's packing check -- is written
+# against what ``_as_batch`` returns.
+
+
+def _random_batch(batch_size: int = 4, seq_len: int = 6) -> Batch:
+    generator = torch.Generator().manual_seed(0)
+    ids = torch.randint(0, 32, (batch_size, seq_len), generator=generator)
+    return Batch(input_ids=ids, labels=ids.clone())
+
+
+def test_as_batch_passes_the_synthetic_shape_through_unchanged() -> None:
+    batch = _random_batch()
+    input_ids, labels, positions, num_valid = Trainer._as_batch(batch)
+    assert torch.equal(input_ids, batch.input_ids)
+    # Positions are the wrapper's arange default, and the synthetic source
+    # counts its own tokens.
+    assert positions is None
+    assert num_valid is None
+
+
+def test_as_batch_shifts_the_synthetic_labels_within_a_row() -> None:
+    """Row ``r`` must never predict row ``r + 1``'s first token.
+
+    The synthetic source hands over labels equal to its inputs; the shift is
+    the trainer's. Doing it globally would pair each row's last position with
+    the next document's first token -- a target the model had no context for.
+    """
+    batch = _random_batch(batch_size=3, seq_len=4)
+    _, labels, _, _ = Trainer._as_batch(batch)
+
+    expected = next_token_targets(batch.labels.reshape(-1), seq_len=4)
+    assert torch.equal(labels, expected)
+    # Every row-final position is excluded, one per row.
+    assert int((labels == IGNORE_INDEX).sum()) == 3
+    # And the surviving pairs are the intra-row ones.
+    flat = labels.reshape(-1, 4)
+    assert torch.equal(flat[:, :3], batch.labels[:, 1:])
+
+
+def test_as_batch_consumes_the_grain_batch_without_consuming_its_tensors() -> None:
+    """The collator's counts and mask are read here, so the model never sees them.
+
+    Anything left in the dict becomes a model kwarg, so ``num_valid_tokens``
+    (a plain int) and ``padding_mask`` (which the forward would reject) both
+    have to be taken out rather than merely read.
+    """
+    grain_batch = {
+        "input": torch.arange(8),
+        "labels": torch.full((8,), IGNORE_INDEX),
+        "positions": torch.arange(8),
+        "padding_mask": torch.zeros(8, dtype=torch.bool),
+        "num_valid_tokens": 5,
+    }
+
+    input_ids, labels, positions, num_valid = Trainer._as_batch(grain_batch)
+
+    assert torch.equal(input_ids, torch.arange(8))
+    assert positions is not None and torch.equal(positions, torch.arange(8))
+    assert num_valid == 5
+    # Only the model's own kwargs survive.
+    assert set(grain_batch) == {"input", "labels"}
+    assert labels is not None
+
+
+def test_as_batch_leaves_the_grain_labels_alone() -> None:
+    """The collator already shifted and masked them; shifting again would be wrong."""
+    grain_batch = {
+        "input": torch.arange(5),
+        "labels": torch.tensor([1, 2, IGNORE_INDEX, 4, IGNORE_INDEX]),
+        "num_valid_tokens": 2,
+    }
+    _, labels, _, _ = Trainer._as_batch(grain_batch)
+    assert torch.equal(labels, torch.tensor([1, 2, IGNORE_INDEX, 4, IGNORE_INDEX]))
+
+
+def test_loss_sum_does_not_count_ignored_positions() -> None:
+    """The denominator must be the predictable labels, not every label."""
+    logits = torch.randn(6, 8)
+    labels = torch.tensor([1, 2, IGNORE_INDEX, 4, IGNORE_INDEX, IGNORE_INDEX])
+
+    loss_sum, num_valid = Trainer._loss_sum(logits, labels)
+
+    assert loss_sum.ndim == 0
+    assert num_valid == 3
+    # Passing the count explicitly must agree with recounting it.
+    _, again = Trainer._loss_sum(logits, labels, num_valid_tokens=3)
+    assert again == num_valid
+
+
+def test_loss_sum_makes_one_prediction_per_predictable_label() -> None:
+    """``logits[t]`` scores ``labels[t]``: the two are already aligned."""
+    logits = torch.randn(4, 8)
+    labels = torch.tensor([1, 2, 3, 4])
+    loss_sum, num_valid = Trainer._loss_sum(logits, labels)
+    assert num_valid == 4
+
+    expected = F.cross_entropy(logits.float(), labels, reduction="sum")
+    assert torch.allclose(loss_sum, expected)
+
+
+def test_checkpoint_carries_a_dataloader_read_position(tmp_path) -> None:
+    """Resuming a real corpus must resume the *data*, not just the weights.
+
+    Without this the run would restore trained weights and then re-read the
+    corpus from the beginning, silently training a second pass over the start
+    of the data while the step counter said otherwise.
+    """
+    model, optimizer = _model_and_optimizer()
+    loader = RandomTokenDataLoader(
+        seed=3, vocab_size=16, batch_size=4, seq_len=6, dp_rank=0, dp_world_size=1
+    )
+
+    manager = CheckpointManager(
+        CheckpointManager.Config(
+            enable=True, folder="checkpoint", keep_latest_k=0, interval=1
+        ),
+        model_parts=[model],
+        optimizer=optimizer,
+        states={TRAIN_STATE: _TrainState(), DATALOADER: loader},
+        folder=str(tmp_path),
+    )
+    for _ in range(3):
+        next(iter(loader))
+    assert manager.save(3)
+    manager.close()
+
+    # A fresh loader restored from the checkpoint must continue where the old
+    # one stopped rather than restart.
+    resumed_loader = RandomTokenDataLoader(
+        seed=3, vocab_size=16, batch_size=4, seq_len=6, dp_rank=0, dp_world_size=1
+    )
+    fresh_model, fresh_optimizer = _model_and_optimizer()
+    resumed = CheckpointManager(
+        CheckpointManager.Config(
+            enable=True, folder="checkpoint", keep_latest_k=0, interval=1
+        ),
+        model_parts=[fresh_model],
+        optimizer=fresh_optimizer,
+        states={TRAIN_STATE: _TrainState(), DATALOADER: resumed_loader},
+        folder=str(tmp_path),
+    )
+    assert resumed.load(-1) is True
+    resumed.close()
+
+    # Where the original would have gone next.
+    reference = RandomTokenDataLoader(
+        seed=3, vocab_size=16, batch_size=4, seq_len=6, dp_rank=0, dp_world_size=1
+    )
+    for _ in range(3):
+        next(iter(reference))
+    expected = next(iter(reference))
+
+    got = next(iter(resumed_loader))
+    assert torch.equal(got.input_ids, expected.input_ids)
+    assert torch.equal(got.labels, expected.labels)
