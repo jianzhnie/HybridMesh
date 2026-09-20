@@ -21,6 +21,10 @@ actually uses. Two departures:
   and the probe buys nothing on a machine where the GPU is not an H100. The
   variant-less name selects the SXM figure, which is what the comment in
   ``get_peak_flops`` already calls the default.
+
+* **The memory-history probes live here too.** They are the same kind of thing
+  (a question about the machine) and they carry the same trap: they must be
+  called on the device module, not on ``torch``. See :func:`record_memory_history`.
 """
 
 from __future__ import annotations
@@ -40,6 +44,8 @@ __all__ = [
     "get_peak_flops",
     "get_device_name",
     "get_device_capacity_bytes",
+    "record_memory_history",
+    "read_memory_snapshot",
 ]
 
 
@@ -211,3 +217,47 @@ def get_peak_flops(device_name: str) -> float:
             return 275e12
 
     return 0.0
+
+
+def _memory_module():
+    """The module that owns memory history for the training device, or None.
+
+    Not ``torch.cuda.memory`` unconditionally, the way torchtitan does it: its
+    fallback for a non-CUDA device is ``torch.memory``, which is not a real
+    module. Calling these on a CPU-only machine would raise AttributeError from
+    a probe that is supposed to be optional.
+    """
+    if device_type == "cpu":
+        # The CPU allocator keeps no history to record or snapshot.
+        return None
+    memory = getattr(device_module, "memory", None)
+    if memory is not None and hasattr(memory, "_record_memory_history"):
+        return memory
+    return None
+
+
+def record_memory_history(*, max_entries: int) -> bool:
+    """Begin collecting the allocator's history; report whether it started.
+
+    ``stacks="python"`` records Python frames only. That is a deliberate
+    narrowing of what the default ``stacks="all"`` captures: symbolizing C++
+    frames is slow enough that dumping a snapshot mid-training can take
+    minutes, which turns a diagnostic into a stall. The Python frames are
+    what names the training code in the resulting report anyway.
+
+    Returns False when the device has no allocator history, so the caller can
+    say the snapshot is unavailable rather than write an empty file.
+    """
+    memory = _memory_module()
+    if memory is None:
+        return False
+    memory._record_memory_history(stacks="python", max_entries=max_entries)
+    return True
+
+
+def read_memory_snapshot():
+    """The accumulated allocator history, for writing to a snapshot file."""
+    memory = _memory_module()
+    if memory is None:
+        return None
+    return memory._snapshot()
