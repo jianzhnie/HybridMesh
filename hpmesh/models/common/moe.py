@@ -9,6 +9,10 @@ changed:
   ``remat.region(..., recompute=False)``, which only tells the activation-
   checkpointing pass not to recompute it; calling ``_select_experts`` directly is
   the same arithmetic.
+* ``RouterGateLinear`` moved to ``linear.py`` and now pins the *backward* GEMMs to
+  fp32 too, through the autograd Function upstream uses (this file previously
+  rested with an explicit-cast forward that matched it only in precision, not in
+  dtype). The router imports it from there, as upstream does.
 * the ``spmd_types`` blocks are gone (no runtime effect), and
   ``MicrobatchWiseLoadBalanceLoss``'s Partial -> Invariant reduction is a plain
   autograd-aware ``all_reduce`` (see its ``_reduce_token_partials``) instead of
@@ -37,6 +41,7 @@ from hpmesh.parallel.spmd_types import spmd_mesh_group, spmd_sparse_mesh
 
 from .aux_loss import AuxLoss
 from .grouped_experts import GroupedExperts
+from .linear import RouterGateLinear
 from .token_dispatcher import LocalTokenDispatcher
 
 __all__ = [
@@ -45,32 +50,6 @@ __all__ = [
     "RoutedExperts",
     "TokenChoiceTopKRouter",
 ]
-
-
-class RouterGateLinear(nn.Module):
-    """The router's projection: one score per expert, always in fp32.
-
-    A plain ``nn.Linear`` would return the input dtype. Routing decisions are
-    made on these scores, and a bf16 score can reorder a top-k on close calls,
-    so the projection is computed in fp32 regardless of the model's dtype.
-
-    Upstream reaches the same result through a custom autograd Function that also
-    pins the backward GEMMs to fp32. The explicit casts here give the identical
-    forward; autograd then derives the backward from those casts.
-
-    Args:
-        dim: model dimension (D).
-        num_experts: number of experts (E).
-    """
-
-    def __init__(self, dim: int, num_experts: int) -> None:
-        super().__init__()
-        self.in_features = dim
-        self.out_features = num_experts
-        self.weight = nn.Parameter(torch.empty(num_experts, dim))
-
-    def forward(self, x_TD: torch.Tensor) -> torch.Tensor:
-        return F.linear(x_TD.float(), self.weight.float())
 
 
 class TokenChoiceTopKRouter(nn.Module):
