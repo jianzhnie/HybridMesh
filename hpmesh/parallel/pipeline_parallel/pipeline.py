@@ -202,7 +202,7 @@ def split_model_into_stages(
 
         for module_name, module_value in model.named_children():
             # Layer-like containers (e.g. "layers.0", "layers.1").
-            if isinstance(module_value, (nn.ModuleDict, nn.ModuleList)):
+            if isinstance(module_value, nn.ModuleDict | nn.ModuleList):
                 layers_to_keep = {
                     name.split(".", 1)[1]
                     for name in modules_to_keep

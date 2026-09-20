@@ -186,7 +186,7 @@ def init_optim_state(optimizer: torch.optim.Optimizer) -> None:
     # A zero lr leaves parameters alone, but Adam still advances its step count,
     # and coupled weight decay can move its moments. Reset the state that was
     # just materialized so the first real update is Adam step 1.
-    if isinstance(optimizer, (torch.optim.Adam, torch.optim.AdamW)):
+    if isinstance(optimizer, torch.optim.Adam | torch.optim.AdamW):
         for param in missing:
             state = optimizer.state[param]
             state["step"].zero_()

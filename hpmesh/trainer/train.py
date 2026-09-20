@@ -22,6 +22,14 @@ Data parallel, 2 ranks (step 1):
 
 Checkpointing (disabled unless --enable is passed):
     python -m hpmesh --steps 20 --enable --interval 10 --dump_folder ./outputs
+
+Metrics (stdout always; TensorBoard and WandB are opt-in):
+    python -m hpmesh --steps 20 --enable_tensorboard
+    python -m hpmesh --steps 20 --enable_wandb --tag baseline
+
+Profiling (off unless enabled; both write under --dump_folder):
+    python -m hpmesh --steps 20 --enable_profiling --profile_freq 4
+    python -m hpmesh --steps 20 --enable_memory_snapshot --memory_snapshot_freq 5
 """
 
 from __future__ import annotations
@@ -31,9 +39,11 @@ from transformers import HfArgumentParser
 from .config import (
     CheckpointArguments,
     HybridMeshConfig,
+    MetricsArguments,
     ModelArguments,
     OptimizerArguments,
     ParallelArguments,
+    ProfilerArguments,
     TrainingArguments,
 )
 from .trainer import Trainer
@@ -47,6 +57,8 @@ def parse_config() -> HybridMeshConfig:
             OptimizerArguments,
             TrainingArguments,
             CheckpointArguments,
+            MetricsArguments,
+            ProfilerArguments,
         ]
     )
     (
@@ -55,12 +67,16 @@ def parse_config() -> HybridMeshConfig:
         optimizer,
         training,
         checkpoint,
+        metrics,
+        profiler,
     ) = parser.parse_args_into_dataclasses()
     # Each group is its own parser group, so every scalar field becomes a flag.
-    # The one nested group (the checkpoint Config, reachable as
-    # ``training.checkpoint``) is grafted on here; its __post_init__ already ran
-    # as part of the parser's construction.
-    training.arguments = checkpoint
+    # The nested configs (reachable as ``training.checkpoint`` and friends) are
+    # grafted on here; their __post_init__ already ran as part of the parser's
+    # construction.
+    training.checkpoint_config = checkpoint
+    training.metrics_config = metrics
+    training.profiler_config = profiler
     cfg = HybridMeshConfig(
         model=model, parallel=parallel, optimizer=optimizer, training=training
     )

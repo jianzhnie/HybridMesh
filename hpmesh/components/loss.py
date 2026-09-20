@@ -66,9 +66,7 @@ def vocab_shard_bounds(
     if tp_world_size < 1:
         raise ValueError(f"tp_world_size must be >= 1, got {tp_world_size}")
     if not 0 <= tp_rank < tp_world_size:
-        raise ValueError(
-            f"tp_rank {tp_rank} is outside [0, {tp_world_size})"
-        )
+        raise ValueError(f"tp_rank {tp_rank} is outside [0, {tp_world_size})")
     chunk_size = (global_vocab_size + tp_world_size - 1) // tp_world_size
     start = min(global_vocab_size, chunk_size * tp_rank)
     end = min(global_vocab_size, start + chunk_size)
