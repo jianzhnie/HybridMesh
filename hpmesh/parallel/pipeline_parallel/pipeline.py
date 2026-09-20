@@ -194,7 +194,7 @@ def split_model_into_stages(
         their corresponding model chunks.
     """
     pp_rank = pp_mesh.get_local_rank()
-    pp_degree = pp_mesh.size()
+    pp_size = pp_mesh.size()
 
     def _build_stage_from_modules(
         stage_idx: int, module_names: list[str], num_stages: int
@@ -261,20 +261,20 @@ def split_model_into_stages(
 
     def _get_stage_indices() -> tuple[int, ...]:
         """Stage ids this rank runs, for a looped or a V schedule."""
-        assert num_stages % pp_degree == 0, (
-            f"num_stages {num_stages} must be evenly divisible by pp_degree {pp_degree}"
+        assert num_stages % pp_size == 0, (
+            f"num_stages {num_stages} must be evenly divisible by pp_size {pp_size}"
         )
-        stages_per_rank = num_stages // pp_degree
+        stages_per_rank = num_stages // pp_size
         if style == "loop":
-            return tuple(pp_rank + s * pp_degree for s in range(stages_per_rank))
+            return tuple(pp_rank + s * pp_size for s in range(stages_per_rank))
         # "v": the rank takes one stage from each half, paired front-to-back.
         assert stages_per_rank == 2, (
             f"v schedules assume 2 stages per rank, got {stages_per_rank}"
         )
         stage_v_pairs = list(
             zip(
-                range(pp_degree),
-                range(num_stages - 1, pp_degree - 1, -1),
+                range(pp_size),
+                range(num_stages - 1, pp_size - 1, -1),
                 strict=True,
             )
         )

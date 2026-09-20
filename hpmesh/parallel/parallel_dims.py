@@ -86,12 +86,12 @@ class ParallelDims:
         cls, parallelism_config: ParallelConfig, world_size: int
     ) -> ParallelDims:
         return cls(
-            dp_replicate=parallelism_config.data_parallel_replicate_degree,
-            dp_shard=parallelism_config.data_parallel_shard_degree,
-            cp=parallelism_config.context_parallel_degree,
-            tp=parallelism_config.tensor_parallel_degree,
-            pp=parallelism_config.pipeline_parallel_degree,
-            ep=parallelism_config.expert_parallel_degree,
+            dp_replicate=parallelism_config.data_parallel_replicate_size,
+            dp_shard=parallelism_config.data_parallel_shard_size,
+            cp=parallelism_config.context_parallel_size,
+            tp=parallelism_config.tensor_parallel_size,
+            pp=parallelism_config.pipeline_parallel_size,
+            ep=parallelism_config.expert_parallel_size,
             world_size=world_size,
         )
 
@@ -123,11 +123,11 @@ class ParallelDims:
         sparse_region = dp_shard * cp * tp
         if sparse_region % ep != 0:
             raise ValueError(
-                f"expert_parallel_degree ({ep}) must divide "
+                f"expert_parallel_size ({ep}) must divide "
                 f"dp_shard * cp * tp ({sparse_region})"
             )
 
-    def _mesh_exist(self, name: str, degree: int) -> bool:
+    def _mesh_exist(self, name: str, size: int) -> bool:
         if name == "dp_shard":
             # Keep the DP storage axis alive at size 1 so ``fully_shard`` can
             # install MixedPrecisionPolicy and discriminate the DP submesh on
@@ -137,7 +137,7 @@ class ParallelDims:
             # We always keep the efsdp if EP is larger than 1 because we need
             # FSDP wrapping to help the MoE layers do mixed precision training.
             return True if self.ep > 1 else False
-        return degree > 1
+        return size > 1
 
     def build_mesh(self) -> DeviceMesh:
         """
@@ -180,7 +180,7 @@ class ParallelDims:
         def unflatten_mesh(
             world_mesh: DeviceMesh,
             dim_names: tuple[str, ...],
-            dim_degrees: tuple[int, ...],
+            dim_sizes: tuple[int, ...],
         ):
             """Unflatten the world mesh to create the required mesh dimensions.
 
@@ -188,13 +188,13 @@ class ParallelDims:
             to avoid unnecessary process group creation.
             """
             backend_override = {}
-            for name, degree in zip(dim_names, dim_degrees, strict=True):
-                if not self._mesh_exist(name, degree):
+            for name, size in zip(dim_names, dim_sizes, strict=True):
+                if not self._mesh_exist(name, size):
                     backend_override[name] = "fake"
 
             return world_mesh._unflatten(
                 0,
-                dim_degrees,
+                dim_sizes,
                 dim_names,
                 backend_override=backend_override,
             )

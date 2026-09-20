@@ -189,7 +189,7 @@ def apply_fsdp_to_decoder(
     pp_enabled: bool,
     cpu_offload: bool = False,
     reshard_after_forward_policy: str = "default",
-    ep_degree: int = 1,
+    ep_size: int = 1,
     edp_mesh: DeviceMesh | None = None,
     dp_mesh_dims: "DataParallelMeshDims | None" = None,
     edp_mesh_dims: "DataParallelMeshDims | None" = None,
@@ -200,7 +200,7 @@ def apply_fsdp_to_decoder(
 
     Shared by all dense and MoE decoders (llama3, qwen3, deepseek_v3,
     gpt_oss, qwen3_vl, ...). The MoE handling is a strict superset of the dense
-    case: a dense model leaves ``ep_degree=1`` / ``edp_mesh=None`` and has no
+    case: a dense model leaves ``ep_size=1`` / ``edp_mesh=None`` and has no
     ``moe_enabled`` blocks, so every transformer block is sharded as a single
     FSDP unit and the expert-parallel prefetching below is skipped.
 
@@ -219,10 +219,10 @@ def apply_fsdp_to_decoder(
               "smart defaults" for known optimal scenarios.
             - "always" enables ``reshard_after_forward`` for all forward passes.
             - "never" disables ``reshard_after_forward`` for all forward passes.
-        ep_degree (int, optional): Expert-parallel degree. Defaults to 1 (no EP),
+        ep_size (int, optional): Expert-parallel degree. Defaults to 1 (no EP),
             in which case the MoE-specific sharding and prefetching are no-ops.
         edp_mesh (DeviceMesh | None, optional): The FSDP mesh for routed experts
-            when EP > 1. Required (non-None) iff ``ep_degree > 1``.
+            when EP > 1. Required (non-None) iff ``ep_size > 1``.
         dp_mesh_dims: Under spmd_types, ``fully_shard`` must flatten
             ``dp_shard`` and ``cp`` into a single FSDP shard dim, so it
             needs to know which axes of the multi-dimensional SPMD mesh are
@@ -295,9 +295,9 @@ def apply_fsdp_to_decoder(
             expert_params = set(experts.parameters())
             num_experts = experts.num_experts
 
-            if ep_degree > 1:
+            if ep_size > 1:
                 assert edp_mesh is not None
-                efsdp_ep_size = edp_mesh["efsdp"].size() * ep_degree
+                efsdp_ep_size = edp_mesh["efsdp"].size() * ep_size
             else:
                 efsdp_ep_size = fsdp_config["mesh"].size()
 
@@ -306,16 +306,16 @@ def apply_fsdp_to_decoder(
             else:
                 expert_shard_placement = Shard(0)
 
-            # When ep_degree == 1 and no Shard(1) override needed, skip
+            # When ep_size == 1 and no Shard(1) override needed, skip
             # shard_placement_fn entirely for simplicity
-            if ep_degree == 1 and expert_shard_placement == Shard(0):
+            if ep_size == 1 and expert_shard_placement == Shard(0):
                 fully_shard(
                     transformer_block,
                     **fsdp_config,
                     reshard_after_forward=reshard_after_forward,
                 )
-            elif ep_degree == 1:
-                # ep_degree == 1 but need Shard(1) for experts to avoid padding
+            elif ep_size == 1:
+                # ep_size == 1 but need Shard(1) for experts to avoid padding
                 def _experts_shard_placement_fn(
                     param: nn.Parameter,
                     _expert_params: set = expert_params,
@@ -331,7 +331,7 @@ def apply_fsdp_to_decoder(
                     shard_placement_fn=_experts_shard_placement_fn,
                 )
             else:
-                # ep_degree > 1: per-param mesh
+                # ep_size > 1: per-param mesh
                 from torch.distributed.fsdp._fully_shard._fsdp_common import (
                     FSDPMeshInfo,
                     ShardPlacementResult,
@@ -399,7 +399,7 @@ def apply_fsdp_to_decoder(
 
     # NOTE: set up explicit prefetching when EP is enabled, as D2H syncs
     # in EP could interfere with implicit prefetching in FSDP
-    if ep_degree == 1:
+    if ep_size == 1:
         return
 
     # set up explicit prefetching when EP is enabled for forward
