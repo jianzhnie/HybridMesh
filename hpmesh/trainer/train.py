@@ -1,16 +1,30 @@
 """Console entry point: parse the config groups and run the Trainer.
 
-HfArgumentParser is given the argument GROUPS (not the composed config), so each
+Deciding which group a config belongs to
+
+HfArgumentParser is given the config GROUPS (not the composed config), so each
 field becomes a clean flat CLI flag (--steps, --data_parallel_shard_degree,
 --learning_rate, --dump_folder, ...) and each group runs its own __post_init__
 validation. We then compose them into the single HybridMeshConfig. A YAML/JSON
 file can also be passed positionally.
 
-The checkpoint options are their own group, so every one of the manager
-Config's fields becomes a flag and Config.__post_init__ validates the parsed
-values. The flags keep their bare field names (--enable, --interval, --folder,
---load_step, --keep_latest_k, ...) because that is what HfArgumentParser derives
-them from -- it has no way to prefix one group's fields, and hpmesh's other
+All ten classes in ``config.py`` are named ``*Config`` and each is parsed as its
+own group here. Five of them are nested inside another config (reachable as
+``cfg.training.checkpoint`` and friends), so which one they graft onto is a
+deliberate choice, and this is the table of it:
+
+  model          ModelConfig            top level
+  parallel       ParallelConfig         top level
+  optimizer      OptimizerConfig        top level (LRSchedulerConfig grafts here)
+  training       TrainingConfig         top level (the rest graft here)
+                 CheckpointConfig
+                 DataloaderConfig
+                 MetricsConfig
+                 ProfilerConfig
+
+Grafting happens after parsing, so a nested config's fields still reach the user
+as bare flags: --enable, --interval, --log_freq, --dataset, --profile_freq.
+HfArgumentParser has no way to prefix one group's fields, and hpmesh's top-level
 groups are flat too (--backend, --learning_rate).
 
 Single process (step 0):
@@ -41,15 +55,16 @@ from __future__ import annotations
 from transformers import HfArgumentParser
 
 from .config import (
-    CheckpointArguments,
-    DataloaderArguments,
+    CheckpointConfig,
+    DataloaderConfig,
     HybridMeshConfig,
-    MetricsArguments,
-    ModelArguments,
-    OptimizerArguments,
-    ParallelArguments,
-    ProfilerArguments,
-    TrainingArguments,
+    LRSchedulerConfig,
+    MetricsConfig,
+    ModelConfig,
+    OptimizerConfig,
+    ParallelConfig,
+    ProfilerConfig,
+    TrainingConfig,
 )
 from .trainer import Trainer
 
@@ -57,20 +72,22 @@ from .trainer import Trainer
 def parse_config() -> HybridMeshConfig:
     parser = HfArgumentParser(
         [
-            ModelArguments,
-            ParallelArguments,
-            OptimizerArguments,
-            TrainingArguments,
-            CheckpointArguments,
-            DataloaderArguments,
-            MetricsArguments,
-            ProfilerArguments,
+            ModelConfig,
+            ParallelConfig,
+            OptimizerConfig,
+            LRSchedulerConfig,
+            TrainingConfig,
+            CheckpointConfig,
+            DataloaderConfig,
+            MetricsConfig,
+            ProfilerConfig,
         ]
     )
     (
         model,
         parallel,
         optimizer,
+        lr_scheduler,
         training,
         checkpoint,
         dataloader,
@@ -80,7 +97,10 @@ def parse_config() -> HybridMeshConfig:
     # Each group is its own parser group, so every scalar field becomes a flag.
     # The nested configs (reachable as ``training.checkpoint`` and friends) are
     # grafted on here; their __post_init__ already ran as part of the parser's
-    # construction.
+    # construction. The schedule grafts onto the OPTIMIZER group, not onto
+    # ``training``: it scales the learning rate that group sets, and splitting
+    # them would let a run halve one without touching the other.
+    optimizer.lr_scheduler_config = lr_scheduler
     training.checkpoint_config = checkpoint
     training.dataloader_config = dataloader
     training.metrics_config = metrics

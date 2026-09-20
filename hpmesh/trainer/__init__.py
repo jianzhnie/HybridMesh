@@ -6,17 +6,21 @@ avoid a circular import with the model layer.
 """
 
 from .config import (
+    DataloaderConfig,
     HybridMeshConfig,
-    ModelArguments,
-    OptimizerArguments,
-    ParallelArguments,
-    TrainingArguments,
+    LRSchedulerConfig,
+    ModelConfig,
+    OptimizerConfig,
+    ParallelConfig,
+    TrainingConfig,
 )
 
 __all__ = [
+    "DataloaderConfig",
     "HybridMeshConfig",
-    "ModelArguments",
-    "OptimizerArguments",
-    "ParallelArguments",
-    "TrainingArguments",
+    "LRSchedulerConfig",
+    "ModelConfig",
+    "OptimizerConfig",
+    "ParallelConfig",
+    "TrainingConfig",
 ]

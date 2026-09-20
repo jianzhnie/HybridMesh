@@ -33,7 +33,7 @@ from torch.distributed.pipelining.schedules import (
 )
 
 from ...components.loss import cross_entropy_loss
-from ...trainer.config import HybridMeshConfig, ParallelismConfig
+from ...trainer.config import HybridMeshConfig, ParallelConfig
 from ..fsdp2.fsdp_wrap import apply_fsdp
 from ..parallel_dims import ParallelDims
 from ..tensor_parallel.tp import apply_tp
@@ -75,7 +75,7 @@ def _scalar_loss_fn(pred: torch.Tensor, labels: torch.Tensor) -> torch.Tensor:
 
 def _get_pipeline_metadata(
     parallel_dims: ParallelDims,
-    parallelism: ParallelismConfig,
+    parallelism: ParallelConfig,
     num_layers: int,
 ) -> tuple[int, int, int]:
     """Decide the stage count, from the schedule class and the config.

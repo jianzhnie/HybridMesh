@@ -33,7 +33,7 @@ What the migration added, and why each earned its place:
   schedule and allocator memory snapshots are written periodically -- plus one
   more if the run dies of an OOM, which is the one that is usually wanted.
 
-What was NOT ported: the component system (``Configurable``, ``model_spec``,
+What was NOT ported: torchtitan's component system (``model_spec``,
 ``sdc_replayer``, validator, CUDA graphs). Those are infrastructure the loop
 calls into, not loop logic, and hpmesh has no counterparts to call.
 """
@@ -42,6 +42,7 @@ from __future__ import annotations
 
 from collections.abc import Iterator
 from contextlib import nullcontext
+from itertools import chain
 from time import perf_counter
 from typing import Any
 
@@ -52,6 +53,7 @@ import torch.nn.functional as F
 from .. import parallel
 from ..components.checkpointer import DATALOADER, TRAIN_STATE, CheckpointManager
 from ..components.loss import IGNORE_INDEX, next_token_targets
+from ..components.lr_scheduler import LRScheduler
 from ..components.metrics import MetricsProcessor
 from ..components.profiler import Profiler
 from ..datasets.loader import BaseDataLoader, DataloaderExhaustedError, TrainerBatch
@@ -69,6 +71,7 @@ from ..models.hf_wrapper import (
 )
 from ..parallel.collectives import clip_grad_norm_, dist_max, dist_sum, dist_sum_tensor
 from ..parallel.context_parallel import shard_batch_for_cp
+from ..parallel.pipeline_parallel import PipelineParallelSetup
 from ..parallel.spmd_types import spmd_context
 from ..utils.logger_utils import get_logger
 from .config import HybridMeshConfig
@@ -81,11 +84,13 @@ __all__ = ["Trainer"]
 
 
 class Trainer:
-    # Class-level default so a Trainer built with ``__new__`` -- which is how
+    # Class-level defaults so a Trainer built with ``__new__`` -- which is how
     # the tests exercise the pure helpers without a process group -- sees the
-    # same "source not built yet" state as an attribute would give, rather than
-    # an AttributeError. ``None`` means "fall back to the synthetic source".
+    # same "not built yet" state an attribute would give, rather than an
+    # AttributeError. ``dataloader=None`` means "fall back to the synthetic
+    # source"; the schedule always exists once ``__init__`` has run.
     dataloader: BaseDataLoader | None = None
+    lr_scheduler: LRScheduler
 
     def __init__(self, cfg: HybridMeshConfig):
         self.cfg = cfg
@@ -103,29 +108,69 @@ class Trainer:
         #    is the same resolved degrees the mesh was built from, kept so the
         #    trainer can ask "how many DP ranks?" without re-indexing the mesh.
         self.parallel_dims = build_parallel_dims(cfg, self.world_size)
-        self.mesh = build_mesh(self.parallel_dims)
+        if self.parallel_dims is not None and self.parallel_dims.pp_enabled:
+            # The dense (dp, cp, tp) mesh does not cover the world under PP,
+            # so ``build_mesh``'s coverage backstop would reject it. The same
+            # view over this rank's non-PP coordinates exists per stage and is
+            # what the per-part apply_* functions index (apply_pp resolves it
+            # off parallel_dims itself); keep the attribute consistent.
+            self.mesh = self.parallel_dims.spmd_dense_mesh()
+        else:
+            self.mesh = build_mesh(self.parallel_dims)
 
         # 2. the model -- HF's own initialization, wrapped for this loop
         model = HFTransformerModel(build_model_config_for(cfg)).to(self.device)
 
         # 3. parallelism, in Titan's order: tp/pp/cp/ep declared first, fsdp last
         #    (outer wraps inner). Each is a no-op when its degree is 1.
-        self.model = parallel.parallelize_hf_transformers(
+        orchestration = parallel.parallelize_hf_transformers(
             model,
             cfg=cfg,
             mesh=self.mesh,
             parallel_dims=self.parallel_dims,
+            device=self.device,
         )
+        if isinstance(orchestration, PipelineParallelSetup):
+            # pp > 1: no single model survives the split -- this rank holds its
+            # stages' chunks only, and the schedule drives them in
+            # ``_pp_forward_backward_body``.
+            self.model = None
+            self.model_parts = orchestration.model_parts
+            self.pp_schedule = orchestration.schedule
+            self.pp_has_first_stage = orchestration.has_first_stage
+            self.pp_has_last_stage = orchestration.has_last_stage
+            # The loss exists only on the last stage; every other stage reports
+            # this sentinel, which is finite (the finiteness check runs on every
+            # rank) and never logged (the metrics rank is a last-stage rank).
+            self._pp_loss_sentinel = torch.full((1,), -1.0, device=self.device)
+        else:
+            self.model = orchestration
+            self.model_parts = [orchestration]
 
         self.optimizer = torch.optim.AdamW(
-            self.model.parameters(), lr=cfg.lr, weight_decay=cfg.weight_decay
+            chain.from_iterable(part.parameters() for part in self.model_parts),
+            lr=cfg.lr,
+            weight_decay=cfg.weight_decay,
+        )
+
+        # The lr schedule. Built regardless of whether the knobs were touched:
+        # the default is warmup_steps=0 with no decay, so the factor is a
+        # constant 1.0 and step 1 runs at exactly ``cfg.lr``. That costs one
+        # multiply per step and removes the branch that would otherwise decide
+        # whether the lr is scheduled -- a branch whose two sides would have to
+        # be kept numerically identical forever.
+        self.lr_scheduler = cfg.lr_scheduler_config.build(
+            optimizer=self.optimizer,
+            training_steps=cfg.steps,
         )
 
         # Aux losses (the MoE load-balance loss a swapped-in MoE carries)
         # accumulate per forward; this pre-hook rolls the per-instance sums
         # into the step registers at each optimizer step. Harmless when no
         # aux loss exists.
-        register_aux_loss_zero_hook(self.optimizer, [self.model], self.parallel_dims)
+        register_aux_loss_zero_hook(
+            self.optimizer, self.model_parts, self.parallel_dims
+        )
 
         # 4. the micro-batch source. Built before the checkpointer, which
         #    serializes its read position alongside the model.
@@ -143,15 +188,27 @@ class Trainer:
         #    A loadable dataloader rides along too: resuming without its read
         #    position would resume the weights and restart the data, silently
         #    training a second pass over the beginning of the corpus.
+        #
+        #    The schedule is NOT registered. It holds one integer -- last_epoch --
+        #    and every step's value of it is the step number, which the trainer
+        #    above already serializes. A second copy could only ever disagree with
+        #    the first, and a resumed run re-derives the lr from ``last_epoch``
+        #    and the optimizer's own ``base_lrs``, which come back with the
+        #    optimizer's state.
         states: dict[str, Any] = {TRAIN_STATE: self}
         if self.dataloader is not None:
             states[DATALOADER] = self.dataloader
         self.checkpointer = CheckpointManager(
             cfg.checkpoint,
-            model_parts=[self.model],
+            model_parts=self.model_parts,
             optimizer=self.optimizer,
             states=states,
             folder=cfg.dump_folder,
+            # Under PP the optimizer's positional state indices collide across
+            # stages (every stage's first parameter is index 0), so the
+            # checkpoint keys optimizer state by parameter FQN instead.
+            optimizer_fqn_keying=self.parallel_dims is not None
+            and self.parallel_dims.pp_enabled,
         )
 
         # Counters the checkpoint carries. Kept as plain ints so a resumed run
@@ -188,15 +245,25 @@ class Trainer:
             torch.use_deterministic_algorithms(True, warn_only=False)
 
     def _dp_rank_world_size(self) -> tuple[int, int]:
-        """This rank's position and extent along the dense DP axis."""
+        """This rank's position and extent along the dataloading (DP) axis."""
         # ``getattr``, not attribute access: a Trainer built with ``__new__``
         # (the tests' way of exercising the pure helpers) has no mesh, and the
         # only correct answer there is "one rank, no sharding".
         if getattr(self, "parallel_dims", None) is None:
             return 0, 1
+        if self.parallel_dims.pp_enabled:
+            # Under PP the dataloading view is the "batch" axis: it spans
+            # dp_replicate * dp_shard and excludes pp, so every stage of one
+            # pipeline reads the same shard of the global batch.
+            batch_mesh = self.parallel_dims.get_optional_mesh(
+                "batch", include_singleton_axes=True
+            )
+            return batch_mesh.get_local_rank(), batch_mesh.size()
         # The dense DP group spans replicate * shard; unsplit on torchrun it is
         # a plain 1-D mesh.
-        dp_mesh = self.parallel_dims.get_optional_mesh("dp", include_singleton_axes=True)
+        dp_mesh = self.parallel_dims.get_optional_mesh(
+            "dp", include_singleton_axes=True
+        )
         return dp_mesh.get_local_rank(), dp_mesh.size()
 
     def _build_dataloader(self) -> BaseDataLoader | None:
@@ -251,8 +318,9 @@ class Trainer:
             )
         )
 
+    @staticmethod
     def _as_batch(
-        self, batch: Batch | TrainerBatch
+        batch: Batch | TrainerBatch,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor | None, int | None]:
         """Normalize either loader's batch into the tensors the step consumes.
 
@@ -429,15 +497,11 @@ class Trainer:
                     else self.parallel_dims.get_mesh("loss")
                 )
             local_count = (
-                labels.numel() - 1
-                if num_valid_tokens is None
-                else num_valid_tokens
+                labels.numel() - 1 if num_valid_tokens is None else num_valid_tokens
             )
             AuxLoss.set_step_denominator(
                 dist_sum_tensor(
-                    torch.tensor(
-                        local_count, dtype=torch.float32, device=self.device
-                    ),
+                    torch.tensor(local_count, dtype=torch.float32, device=self.device),
                     token_mesh,
                 )
             )
@@ -456,40 +520,67 @@ class Trainer:
             loss_sum.backward()
         return loss_sum.detach(), num_valid_tokens
 
+    def _pp_microbatches(
+        self, input_ids: torch.Tensor, labels: torch.Tensor
+    ) -> tuple[list[torch.Tensor], list[torch.Tensor]]:
+        """Split the rank's batch into the schedule's micro-batches.
+
+        Rows are split, never tokens: each micro-batch is flattened with the
+        same ``_flatten`` semantics as the non-PP body, so every micro-batch
+        holds whole documents and the per-micro-batch loss is the same summed
+        CE. Divisibility is enforced at setup (``apply_pp``), so ``chunk``
+        never produces a short final piece.
+        """
+        num_microbatches = self.cfg.parallel.num_pp_microbatches
+        # ``labels`` arrives flat from ``_as_batch``; ``input_ids`` keeps the
+        # row shape, so re-row the labels against it before chunking -- a flat
+        # chunk would split rows whenever seq_len did not divide evenly.
+        num_rows, seq_len = input_ids.shape
+        labels = labels.reshape(num_rows, seq_len)
+        input_mbs = [mb.reshape(-1) for mb in input_ids.chunk(num_microbatches, dim=0)]
+        label_mbs = [mb.reshape(-1) for mb in labels.chunk(num_microbatches, dim=0)]
+        return input_mbs, label_mbs
+
     def _pp_forward_backward_body(
         self, input_ids: torch.Tensor, labels: torch.Tensor
     ) -> tuple[torch.Tensor, int]:
         """The pipeline-parallel body: drive the schedule instead of the model.
 
-        Not implemented, and it fails loudly rather than falling through to the
-        single-rank body -- which would silently train every stage on the whole
-        model, and look like a working run.
-
-        NOTE: unreachable today. ``parallelize_hf_transformers`` rejects ``pp > 1``
-        during ``__init__``, so no Trainer with ``pp > 1`` is ever constructed.
-        It stays because it is the second half of the contract, and the two
-        halves get wired separately: stage 4 can make ``apply_pp`` return real
-        stages before the loop knows how to drive them. At that moment this is
-        what catches the gap.
-
-        What stage 4 has to fill in, in order:
-          1. ``pipeline_parallel/pipeline.py`` splits the layers into this
-             rank's stages; a new ``pp.py`` builds the schedule over them.
-          2. Each stage needs its own ``DeviceMesh`` axis, and the model must be
-             cut into ``model_parts`` rather than kept whole.
-          3. Only the first stage receives ``input_ids`` and only the last
-             produces labels -- the middle stages take activations. That is the
-             "send ``input_ids``/``labels`` only to the stages that want them"
-             note in ``parallelize_hf.py``.
-          4. The returned loss is the sum over the last stage's micro-batches,
-             paired with a token count, so the caller's normalization is
-             unchanged from the non-PP path.
+        Only the first stage is handed ``input_ids`` (``arg_mbs``) and only the
+        last the labels (``target_mbs``); intermediate stages receive the
+        previous stage's activations over the schedule's p2p channel. The
+        schedule's loss is the same summed next-token CE the non-PP body
+        computes (``pipeline_parallel/pp.py:_scalar_loss_fn``), so the return
+        keeps the caller's normalization unchanged: the sum over the last
+        stage's micro-batches, paired with the token count. The count is
+        computable on every rank -- the batch reaches every stage of the
+        pipeline even though only the first and last *use* it -- so non-last
+        stages pair their sentinel loss with the real denominator.
         """
-        raise NotImplementedError(
-            "Pipeline parallelism is not wired: pipeline_parallel/pipeline.py "
-            "splits the model into stages but no schedule drives them. "
-            "See docs/hybridmesh_design.md, stage 4."
+        input_mbs, label_mbs = self._pp_microbatches(
+            input_ids.to(self.device), labels.to(self.device)
         )
+        local_valid_tokens = int(sum((mb != IGNORE_INDEX).sum() for mb in label_mbs))
+
+        losses: list[torch.Tensor] | None = [] if self.pp_has_last_stage else None
+        with self._param_context(), spmd_context(self.parallel_dims):
+            self.pp_schedule.step(
+                arg_mbs=(
+                    [(mb,) for mb in input_mbs] if self.pp_has_first_stage else None
+                ),
+                target_mbs=label_mbs if self.pp_has_last_stage else None,
+                losses=losses,
+                return_outputs=False,
+            )
+
+        if self.pp_has_last_stage:
+            assert losses is not None
+            # Backward has consumed these losses. Report detached views, then
+            # release the originals and their autograd graphs.
+            detached_losses = [loss.detach() for loss in losses]
+            losses.clear()
+            return torch.sum(torch.stack(detached_losses)), local_valid_tokens
+        return self._pp_loss_sentinel, local_valid_tokens
 
     def _param_context(self):
         """The context a forward/backward runs inside.
@@ -514,13 +605,14 @@ class Trainer:
         self.optimizer.zero_grad(set_to_none=True)
 
         # The reduced meshes are resolved once here rather than inline at each
-        # collective: under PP the loss and token count must go to the loss mesh
-        # (which spans PP, where the total only exists on the last stage), and
-        # under CP they must span the CP axis too -- every CP rank holds a
-        # sequence shard, so a dp-only reduction would undercount both the
-        # token total and the loss sum by a factor of cp. The loss mesh is
-        # exactly dp * cp, so it is the right group for both cases; everything
-        # else stays on the dense DP mesh.
+        # collective: under CP the loss and token count must span the CP axis
+        # too -- every CP rank holds a sequence shard, so a dp-only reduction
+        # would undercount both the token total and the loss sum by a factor of
+        # cp. The loss mesh is exactly dp * cp, so it is the right group for
+        # that case; everything else stays on the dense DP mesh. Under PP the
+        # loss lives only on the last stage, and each stage's dp*cp subgroup
+        # reduces independently -- only the last stage's (the metrics rank's)
+        # is ever logged.
         dp_mesh = (
             None
             if self.parallel_dims is None
@@ -539,7 +631,12 @@ class Trainer:
         loss_mesh = (
             dp_mesh
             if pp_mesh is None and cp_mesh is None
-            else self.parallel_dims.get_mesh("loss")
+            # Optional, not required: a pure-PP run (dp = cp = 1) has a size-1
+            # loss axis, which ``get_mesh`` would reject. Each PP stage's loss
+            # subgroup is independent, and only last-stage ranks hold a real
+            # loss, so the reduction is simply skipped when there is nothing
+            # to reduce over.
+            else self.parallel_dims.get_optional_mesh("loss")
         )
 
         data_load_start = perf_counter()
@@ -566,7 +663,7 @@ class Trainer:
         global_valid_tokens = dist_sum_tensor(local_valid_tokens_tensor, token_mesh)
 
         grad_norm = clip_grad_norm_(
-            [p for p in self.model.parameters()],
+            [p for part in self.model_parts for p in part.parameters()],
             max_norm=self.cfg.max_norm,
             foreach=True,
             pp_mesh=pp_mesh,
@@ -575,6 +672,10 @@ class Trainer:
         self._check_finite(loss_sum, grad_norm)
 
         self.optimizer.step()
+        # After the update, so the lr the optimizer just applied is the one this
+        # schedule produced for the previous step -- which is what makes step 1
+        # run at ``lambda(0)`` rather than ``lambda(1)``.
+        self.lr_scheduler.step()
 
         # Summed over tokens, divided by the global count: the loss is then
         # independent of how the batch was split across DP ranks. Division by a
@@ -599,6 +700,11 @@ class Trainer:
             "max_loss": global_max_loss,
             "grad_norm": float(grad_norm),
         }
+        # Reported, not checkpointed. The schedule is deterministic in the step
+        # number (see load_state_dict), so a resumed run's lr is a pure function
+        # of counters that already round-trip; a saved copy would be state that
+        # can only go stale against them.
+        metrics.update(self.lr_scheduler.get_metrics())
         # Aux-loss step registers are rolled up by the optimizer step pre-hook
         # above; this reduces them for logging. Single-process runs skip the
         # collection (there is no mesh to reduce over and no second rank's

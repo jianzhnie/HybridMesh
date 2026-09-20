@@ -13,7 +13,7 @@ from enum import StrEnum
 
 from torch.distributed.device_mesh import DeviceMesh, init_device_mesh
 
-from ..trainer.config import ParallelismConfig
+from ..trainer.config import ParallelConfig
 from ..utils.device import device_type
 
 logger = logging.getLogger(__name__)
@@ -82,7 +82,7 @@ class ParallelDims:
 
     @classmethod
     def from_config(
-        cls, parallelism_config: ParallelismConfig, world_size: int
+        cls, parallelism_config: ParallelConfig, world_size: int
     ) -> ParallelDims:
         return cls(
             dp_replicate=parallelism_config.data_parallel_replicate_degree,
