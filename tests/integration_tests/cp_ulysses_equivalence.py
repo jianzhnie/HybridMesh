@@ -71,7 +71,7 @@ def _cfg(num_kv_heads: int = 4) -> HybridMeshConfig:
             num_key_value_heads=num_kv_heads,
         ),
         parallel=ParallelConfig(
-            context_parallel_degree=2,
+            context_parallel_size=2,
             context_parallel_strategy="ulysses",
             context_parallel_load_balancer=None,
             backend="gloo",
@@ -245,7 +245,7 @@ def _check_refusals(mesh, failures: list[str]) -> None:
         "load_balancer=None",
         "ulysses + headtail",
         lambda: ParallelConfig(
-            context_parallel_degree=2,
+            context_parallel_size=2,
             context_parallel_strategy="ulysses",
             context_parallel_load_balancer="headtail",
         ),

@@ -238,7 +238,7 @@ def test_router_gate_matches_a_plain_fp32_linear() -> None:
         plain.weight.copy_(gate.weight)
 
     x = torch.randn(3, 8)
-    assert torch.allclose(gate(x), plain(x.float()), atol=0, rtol=0)
+    torch.testing.assert_close(gate(x), plain(x.float()), rtol=0, atol=0)
 
 
 def test_router_gate_is_the_moe_router_projection() -> None:

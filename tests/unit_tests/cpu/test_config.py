@@ -29,13 +29,13 @@ from hpmesh.trainer.config import (
 @pytest.mark.parametrize(
     "field",
     [
-        "tensor_parallel_degree",
-        "pipeline_parallel_degree",
-        "context_parallel_degree",
-        "expert_parallel_degree",
+        "tensor_parallel_size",
+        "pipeline_parallel_size",
+        "context_parallel_size",
+        "expert_parallel_size",
     ],
 )
-def test_a_degree_below_one_is_rejected(field: str) -> None:
+def test_a_size_below_one_is_rejected(field: str) -> None:
     """A zero degree is a division by zero three layers down; catch it at parse."""
     with pytest.raises(ValueError, match=f"{field} must be >= 1"):
         ParallelConfig(**{field: 0})
@@ -43,11 +43,9 @@ def test_a_degree_below_one_is_rejected(field: str) -> None:
 
 def test_dp_shard_accepts_minus_one_as_derive_but_not_zero() -> None:
     """``-1`` means "derive it", ``0`` is a typo for neither."""
-    assert (
-        ParallelConfig(data_parallel_shard_degree=-1).data_parallel_shard_degree == -1
-    )
+    assert ParallelConfig(data_parallel_shard_size=-1).data_parallel_shard_size == -1
     with pytest.raises(ValueError, match="must be >= 1 or -1"):
-        ParallelConfig(data_parallel_shard_degree=0)
+        ParallelConfig(data_parallel_shard_size=0)
 
 
 def test_an_empty_load_balancer_is_rejected_rather_than_coerced() -> None:
@@ -230,3 +228,36 @@ def test_a_non_positive_loop_parameter_is_rejected(field: str, bad: int) -> None
     """Each of these divides or iterates; zero is a hang or a ZeroDivision."""
     with pytest.raises(ValueError, match=f"{field} must be >= 1"):
         TrainingConfig(**{field: bad})
+
+
+# -- the flat view the trainer reads -------------------------------------------
+#
+# ``HybridMeshConfig`` exposes the trainer's scalars as hand-written properties,
+# so a new field on a group stays invisible to the trainer until its passthrough
+# exists. The failure mode is an AttributeError on the first training step, not
+# at parse time -- so the passthroughs are worth pinning explicitly.
+
+
+def test_accumulation_and_gc_freq_reach_the_flat_view() -> None:
+    """The trainer reads both off ``cfg``, not off ``cfg.training``."""
+    from hpmesh.trainer import HybridMeshConfig
+
+    cfg = HybridMeshConfig(
+        training=TrainingConfig(gradient_accumulation_steps=3, gc_freq=7)
+    )
+    assert cfg.gradient_accumulation_steps == 3
+    assert cfg.gc_freq == 7
+    # The defaults the trainer runs with when nothing is passed.
+    assert HybridMeshConfig().gradient_accumulation_steps == 1
+    assert HybridMeshConfig().gc_freq == 50
+
+
+def test_cp_must_divide_seq_len() -> None:
+    """A ragged sequence split would give ranks unequal token counts."""
+    from hpmesh.trainer import HybridMeshConfig
+
+    with pytest.raises(ValueError):
+        HybridMeshConfig(
+            parallel=ParallelConfig(context_parallel_size=3),
+            training=TrainingConfig(max_seq_len=64),
+        )

@@ -84,7 +84,7 @@ def test_default_reduce_dtype_is_float32() -> None:
 def test_apply_cp_is_a_no_op_when_cp_is_off() -> None:
     """CP=1 must hand the model back untouched rather than raise."""
     model = torch.nn.Linear(4, 4)
-    cfg = ParallelConfig(context_parallel_degree=1)
+    cfg = ParallelConfig(context_parallel_size=1)
 
     assert apply_cp(model, None, cfg) is model
 
@@ -97,7 +97,7 @@ def test_apply_cp_requires_the_flex_backend() -> None:
     from silently computing attention over its own shard only.
     """
 
-    cfg = ParallelConfig(context_parallel_degree=2)
+    cfg = ParallelConfig(context_parallel_size=2)
 
     with pytest.raises(RuntimeError, match="attention backend"):
         apply_cp(torch.nn.Linear(4, 4), None, cfg)

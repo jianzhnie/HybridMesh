@@ -36,7 +36,7 @@ def test_the_last_shard_absorbs_the_remainder() -> None:
     assert vocab_shard_bounds(10, 3, 2) == (8, 10)
 
 
-def test_a_degree_wider_than_the_vocabulary_yields_empty_not_negative() -> None:
+def test_a_size_wider_than_the_vocabulary_yields_empty_not_negative() -> None:
     """The clamp exists so callers reject an empty shard rather than slicing backwards.
 
     Without the ``min(global_vocab_size, ...)``, rank 7 of a 8-way split of a

@@ -82,7 +82,7 @@ def _cfg(load_balancer: str | None) -> HybridMeshConfig:
             num_key_value_heads=4,
         ),
         parallel=ParallelConfig(
-            context_parallel_degree=2,
+            context_parallel_size=2,
             context_parallel_load_balancer=load_balancer,
             backend="gloo",
         ),
