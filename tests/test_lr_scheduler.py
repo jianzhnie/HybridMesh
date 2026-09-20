@@ -10,7 +10,7 @@ from __future__ import annotations
 import pytest
 import torch
 
-from hpmesh.components.lr_scheduler import LRScheduler, build_lr_scheduler
+from hpmesh.components.optimizer import LRSchedulersContainer, build_lr_scheduler
 from hpmesh.trainer.config import LRSchedulerConfig
 
 
@@ -19,11 +19,11 @@ def _optimizer(lr: float = 1.0) -> torch.optim.Optimizer:
     return torch.optim.AdamW([parameter], lr=lr)
 
 
-def _lrs(scheduler: LRScheduler) -> list[float]:
-    return scheduler.scheduler.get_last_lr()
+def _lrs(scheduler: LRSchedulersContainer) -> list[float]:
+    return scheduler.schedulers[0].get_last_lr()
 
 
-def _step(scheduler: LRScheduler) -> float:
+def _step(scheduler: LRSchedulersContainer) -> float:
     """One training step's worth of schedule: optimizer, then scheduler.
 
     Stepping a real optimizer (not just the scheduler) is what reproduces the
@@ -32,12 +32,12 @@ def _step(scheduler: LRScheduler) -> float:
     a real ordering mistake. The optimizer update itself is irrelevant to the
     lr, so the value it is given does not matter.
     """
-    scheduler.scheduler.optimizer.step()
+    scheduler.schedulers[0].optimizer.step()
     scheduler.step()
     return _lrs(scheduler)[0]
 
 
-def _advance(scheduler: LRScheduler, steps: int) -> None:
+def _advance(scheduler: LRSchedulersContainer, steps: int) -> None:
     for _ in range(steps):
         _step(scheduler)
 
@@ -54,7 +54,7 @@ def test_default_config_is_a_constant_learning_rate() -> None:
     """
     optimizer = _optimizer(lr=0.25)
     scheduler = build_lr_scheduler(
-        LRSchedulerConfig(), optimizer=optimizer, training_steps=10
+        LRSchedulerConfig(), optimizers=[optimizer], training_steps=10
     )
 
     for step in range(10):
@@ -71,7 +71,7 @@ def test_warmup_ramps_linearly_from_the_second_lr() -> None:
     """
     optimizer = _optimizer(lr=1.0)
     scheduler = build_lr_scheduler(
-        LRSchedulerConfig(warmup_steps=4), optimizer=optimizer, training_steps=10
+        LRSchedulerConfig(warmup_steps=4), optimizers=[optimizer], training_steps=10
     )
 
     observed = []
@@ -87,7 +87,7 @@ def test_decay_ratio_holds_the_peak_then_decays() -> None:
     optimizer = _optimizer(lr=1.0)
     scheduler = build_lr_scheduler(
         LRSchedulerConfig(warmup_steps=2, decay_ratio=0.5),
-        optimizer=optimizer,
+        optimizers=[optimizer],
         training_steps=8,
     )
 
@@ -105,7 +105,7 @@ def test_min_lr_factor_floors_the_decay() -> None:
     optimizer = _optimizer(lr=1.0)
     scheduler = build_lr_scheduler(
         LRSchedulerConfig(decay_ratio=1.0, min_lr_factor=0.5),
-        optimizer=optimizer,
+        optimizers=[optimizer],
         training_steps=4,
     )
 
@@ -119,7 +119,7 @@ def test_decay_types_all_reach_the_floor(decay_type: str) -> None:
     optimizer = _optimizer(lr=1.0)
     scheduler = build_lr_scheduler(
         LRSchedulerConfig(decay_ratio=1.0, decay_type=decay_type),
-        optimizer=optimizer,
+        optimizers=[optimizer],
         training_steps=16,
     )
 
@@ -139,7 +139,7 @@ def test_no_decay_reaches_zero_on_the_final_step() -> None:
     """The virtual last step is what keeps this just above zero, not at it."""
     optimizer = _optimizer(lr=1.0)
     scheduler = build_lr_scheduler(
-        LRSchedulerConfig(decay_ratio=1.0), optimizer=optimizer, training_steps=4
+        LRSchedulerConfig(decay_ratio=1.0), optimizers=[optimizer], training_steps=4
     )
 
     _advance(scheduler, 3)
@@ -152,7 +152,7 @@ def test_unknown_decay_type_raises() -> None:
     # Bypass __post_init__ the way a hand-built config would: the Literal type is
     # not enforced at runtime, so the guard has to be in the lambda.
     object.__setattr__(config, "decay_type", "exponential")
-    scheduler = build_lr_scheduler(config, optimizer=optimizer, training_steps=4)
+    scheduler = build_lr_scheduler(config, optimizers=[optimizer], training_steps=4)
 
     with pytest.raises(ValueError, match="Unknown decay_type"):
         _advance(scheduler, 2)
@@ -182,14 +182,14 @@ def test_total_steps_shorter_than_the_run_is_rejected() -> None:
     """A schedule that ends early would take the lr negative, not just to zero."""
     with pytest.raises(ValueError, match="shorter than the run"):
         build_lr_scheduler(
-            LRSchedulerConfig(total_steps=4), optimizer=_optimizer(), training_steps=10
+            LRSchedulerConfig(total_steps=4), optimizers=[_optimizer()], training_steps=10
         )
 
 
 def test_warmup_longer_than_the_schedule_is_clamped(caplog) -> None:
     """Clamped with a warning, rather than erroring: a short debug run is common."""
     scheduler = build_lr_scheduler(
-        LRSchedulerConfig(warmup_steps=100), optimizer=_optimizer(), training_steps=4
+        LRSchedulerConfig(warmup_steps=100), optimizers=[_optimizer()], training_steps=4
     )
     assert scheduler.total_steps == 4
     assert any("exceeds total_steps" in r.message for r in caplog.records)
@@ -200,7 +200,7 @@ def test_total_steps_decouples_the_curve_from_the_run_length() -> None:
     optimizer = _optimizer(lr=1.0)
     scheduler = build_lr_scheduler(
         LRSchedulerConfig(warmup_steps=100, total_steps=20),
-        optimizer=optimizer,
+        optimizers=[optimizer],
         training_steps=4,
     )
 
@@ -216,14 +216,14 @@ def test_total_steps_decouples_the_curve_from_the_run_length() -> None:
 
 def test_lr_metric_is_keyed_by_the_optimizer_name() -> None:
     scheduler = build_lr_scheduler(
-        LRSchedulerConfig(), optimizer=_optimizer(), training_steps=4
+        LRSchedulerConfig(), optimizers=[_optimizer()], training_steps=4
     )
     assert scheduler.get_metrics() == {"lr/AdamW": 1.0}
 
 
 def test_state_dict_is_just_the_epoch() -> None:
     scheduler = build_lr_scheduler(
-        LRSchedulerConfig(), optimizer=_optimizer(), training_steps=8
+        LRSchedulerConfig(), optimizers=[_optimizer()], training_steps=8
     )
     _advance(scheduler, 3)
 
@@ -234,7 +234,7 @@ def test_load_state_dict_restores_the_scheduled_lr() -> None:
     """A resumed run must continue the curve, not restart it."""
     optimizer = _optimizer(lr=1.0)
     scheduler = build_lr_scheduler(
-        LRSchedulerConfig(warmup_steps=8), optimizer=optimizer, training_steps=16
+        LRSchedulerConfig(warmup_steps=8), optimizers=[optimizer], training_steps=16
     )
     _advance(scheduler, 4)
     expected = _lrs(scheduler)[0]
@@ -243,7 +243,7 @@ def test_load_state_dict_restores_the_scheduled_lr() -> None:
     # A fresh optimizer and scheduler, as a resumed run would build.
     resumed = build_lr_scheduler(
         LRSchedulerConfig(warmup_steps=8),
-        optimizer=_optimizer(lr=1.0),
+        optimizers=[_optimizer(lr=1.0)],
         training_steps=16,
     )
     assert _lrs(resumed)[0] != expected, "sanity: they must differ before loading"
@@ -255,7 +255,7 @@ def test_load_state_dict_restores_the_scheduled_lr() -> None:
 
 def test_load_state_dict_ignores_an_empty_dict() -> None:
     scheduler = build_lr_scheduler(
-        LRSchedulerConfig(), optimizer=_optimizer(), training_steps=4
+        LRSchedulerConfig(), optimizers=[_optimizer()], training_steps=4
     )
     scheduler.load_state_dict({})
     assert _lrs(scheduler)[0] == 1.0
@@ -265,7 +265,7 @@ def test_a_third_of_the_way_through_warmup_is_a_third_of_the_lr() -> None:
     """End-to-end shape check: a known point on the curve, computed by hand."""
     optimizer = _optimizer(lr=0.9)
     scheduler = build_lr_scheduler(
-        LRSchedulerConfig(warmup_steps=3), optimizer=optimizer, training_steps=6
+        LRSchedulerConfig(warmup_steps=3), optimizers=[optimizer], training_steps=6
     )
 
     _advance(scheduler, 1)

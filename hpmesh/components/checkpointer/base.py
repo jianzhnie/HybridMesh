@@ -35,18 +35,16 @@ Four deliberate departures, all subtractions:
   collection and drops the tags. Its ``run`` is likewise not wired into the
   training loop yet -- the checkpointer uses only ``collect``.
 
-One addition: ``OptimizerWrapper`` and ``init_optim_state``. torchtitan has no
-equivalent here because its ``components/optimizer.py`` supplies both, as part
-of an ``OptimizersContainer`` that also re-keys state dicts by FQN to survive
-pipeline parallelism. hpmesh keeps the two concerns in this wrapper instead:
-the *materialization* is load-bearing in both directions, and the FQN re-keying
-is an optional mode (``model_parts=...``) the trainer turns on under PP -- see
-``OptimizerWrapper``.
-
 ``MODEL`` / ``OPTIMIZER`` / ``LR_SCHEDULER`` / ``DATALOADER`` / ``TRAIN_STATE``
 are the top-level state keys a checkpoint is keyed by. hpmesh shares none of
 torchtitan's component containers, so which of them a run actually populates
 differs -- see ``components/checkpointer/__init__.py`` for the mapping.
+
+The ``Stateful`` views a checkpoint wraps its inputs in -- ``ModelWrapper`` here,
+``OptimizerWrapper`` in ``components/optimizer/`` -- are not part of this
+contract: they are what a model or an optimizer looks like *to* a checkpointer,
+and they live with the thing they wrap. This module keeps the model one only
+because a model has no other home.
 """
 
 from __future__ import annotations
@@ -132,74 +130,6 @@ def _shares_storage(a: torch.Tensor, b: torch.Tensor) -> bool:
     return torch._C._is_alias_of(a, b)
 
 
-def init_optim_state(optimizer: torch.optim.Optimizer) -> None:
-    """Materialize per-parameter optimizer state without changing anything.
-
-    Two callers need this, for the same underlying reason: PyTorch creates Adam's
-    ``exp_avg``/``exp_avg_sq`` lazily, on the first ``step()``.
-
-    * **Saving.** DCP reads whatever tensors the state dict reports. An
-      optimizer that has not stepped reports none, so the checkpoint would carry
-      model weights and no optimizer state -- silently, since the save succeeds.
-    * **Loading.** DCP writes *into* the tensors a state dict reports rather
-      than calling ``load_state_dict``. A fresh optimizer reports none, so there
-      is nothing to write into and the restored run trains with a cold
-      optimizer. ``OptimizerWrapper.state_dict`` calls this for that case.
-
-    Vendored from torchtitan's ``components/optimizer/utils.init_optim_state``.
-    The step runs with zero gradients and ``lr=0`` so parameters are untouched;
-    the materialized state is then reset, so the first real update is still Adam
-    step 1. Existing gradients and optimizer state are preserved.
-
-    No-op when every parameter that requires a gradient already has state.
-    """
-    params = [param for group in optimizer.param_groups for param in group["params"]]
-    missing = [
-        param
-        for param in params
-        if param.requires_grad and not optimizer.state.get(param)
-    ]
-    if not missing:
-        return
-
-    saved_grads = [param.grad for param in params]
-    for param in params:
-        param.grad = None
-    for param in missing:
-        param.grad = torch.zeros_like(param)
-
-    # Some optimizers update parameters from lr alone, independent of the
-    # gradient, so lr is zeroed for the duration of the step.
-    saved_lrs: list[Any] = []
-    for group in optimizer.param_groups:
-        if "lr" not in group:
-            continue
-        saved_lrs.append(group["lr"])
-        group["lr"] = (
-            torch.tensor(0.0) if isinstance(group["lr"], torch.Tensor) else 0.0
-        )
-    optimizer.step()
-
-    # A zero lr leaves parameters alone, but Adam still advances its step count,
-    # and coupled weight decay can move its moments. Reset the state that was
-    # just materialized so the first real update is Adam step 1.
-    if isinstance(optimizer, torch.optim.Adam | torch.optim.AdamW):
-        for param in missing:
-            state = optimizer.state[param]
-            state["step"].zero_()
-            state["exp_avg"].zero_()
-            state["exp_avg_sq"].zero_()
-            if "max_exp_avg_sq" in state:
-                state["max_exp_avg_sq"].zero_()
-
-    for group, lr in zip(
-        (g for g in optimizer.param_groups if "lr" in g), saved_lrs, strict=True
-    ):
-        group["lr"] = lr
-    for param, grad in zip(params, saved_grads, strict=True):
-        param.grad = grad
-
-
 class ModelWrapper(Stateful):
     """A ``Stateful`` view over one module or a list of them.
 
@@ -254,114 +184,6 @@ class ModelWrapper(Stateful):
             model.load_state_dict(state_dict, strict=False)
         # Refresh the cache so state_dict() reflects the freshly loaded values.
         self.cached_state_dict = self._get_state_dict()
-
-
-class OptimizerWrapper(Stateful):
-    """A ``Stateful`` view over one optimizer that survives a fresh load.
-
-    ``torch.optim.Optimizer`` already satisfies ``Stateful``, and DCP writes
-    straight into the tensors a ``Stateful`` reports -- which is why a *plain*
-    optimizer works for saving and for loading into an optimizer that has
-    already taken a step. It does not work for the case that matters: a resumed
-    run builds a fresh optimizer, whose Adam moments do not exist until its
-    first ``step()``, so DCP finds no ``exp_avg`` to write into and the run
-    silently restarts from a cold optimizer under warm weights.
-
-    The fix is to give DCP the tensors to load into before it plans the load.
-    ``load_state_dict`` therefore materializes the state first (via
-    ``init_optim_state``, a zero-gradient, zero-lr step) and only then hands the
-    state dict to the optimizer, which -- with the state present -- restores in
-    place.
-
-    PyTorch expects this of a ``Stateful`` wrapper: it calls ``load_state_dict``
-    on the *object it was given*, and that object is responsible for pushing the
-    values into whatever it manages. hpmesh hands DCP this wrapper instead of
-    the bare optimizer, so the contract is met.
-
-    Args:
-        optimizer: the optimizer to wrap.
-        model_parts: when given, optimizer state is keyed by parameter FQN
-            rather than by positional index. Pipeline parallelism needs this:
-            every stage's optimizer numbers its own parameters from 0, so the
-            positional keys of two stages collide in one shared checkpoint
-            (torchtitan solves the same collision with its
-            ``OptimizersContainer``'s FQN flattening). The FQNs are read off
-            ``model_parts`` in parameter order, so the caller must have built
-            the optimizer over exactly those parameters in that order -- the
-            trainer does (``chain(*(part.parameters() ...))``). ``None`` keeps
-            the positional format, which every non-PP checkpoint already on
-            disk uses.
-    """
-
-    def __init__(
-        self,
-        optimizer: torch.optim.Optimizer,
-        model_parts: list[nn.Module] | None = None,
-    ) -> None:
-        self.optimizer = optimizer
-        self._fqns = (
-            None
-            if model_parts is None
-            else [name for part in model_parts for name, _ in part.named_parameters()]
-        )
-
-    def state_dict(self) -> dict[str, Any]:
-        # Materialize first, on both directions. On a save, DCP reads whatever
-        # tensors this reports -- an optimizer that has never stepped reports
-        # none, so the checkpoint would quietly carry weights and no optimizer
-        # state. On a load, DCP calls ``state_dict()`` to learn where the values
-        # are going and only afterwards calls ``load_state_dict()``, so a
-        # version that materialized lazily would be a step too late for the
-        # planner to have anywhere to put ``exp_avg``.
-        init_optim_state(self.optimizer)
-        state_dict = self.optimizer.state_dict()
-        if self._fqns is None:
-            return state_dict
-        return {
-            "state": {
-                # ``state_dict`` packs state positionally; the FQN order is the
-                # same parameter order, so the re-keying is a rename only.
-                self._fqns[index]: state
-                for index, state in state_dict["state"].items()
-            },
-            # The positional ``params`` list must not be saved: under PP each
-            # stage's optimizer numbers its own parameters from 0, so every
-            # rank would write the same ``optimizer.param_groups`` key with a
-            # list of its own length (stages differ in parameter count), and
-            # one shared checkpoint key cannot hold them all. What remains --
-            # lr, betas, and friends -- is config-level and identical across
-            # stages, so a single shared copy is correct. ``load_state_dict``
-            # rebuilds the list from the live optimizer.
-            "param_groups": [
-                {key: value for key, value in group.items() if key != "params"}
-                for group in state_dict["param_groups"]
-            ],
-        }
-
-    def load_state_dict(self, state_dict: dict[str, Any]) -> None:
-        # Already materialized by the ``state_dict()`` call that precedes this
-        # one on the DCP path; idempotent here, and load-bearing for any caller
-        # that restores without going through DCP.
-        init_optim_state(self.optimizer)
-        if self._fqns is not None:
-            fqn_to_index = {fqn: i for i, fqn in enumerate(self._fqns)}
-            state_dict = {
-                "state": {
-                    fqn_to_index[fqn]: state
-                    for fqn, state in state_dict["state"].items()
-                },
-                "param_groups": [
-                    # Re-inject the positional ``params`` list ``state_dict``
-                    # dropped: index i is the i-th parameter of the live group.
-                    {**group, "params": list(range(len(live["params"])))}
-                    for group, live in zip(
-                        state_dict["param_groups"],
-                        self.optimizer.param_groups,
-                        strict=True,
-                    )
-                ],
-            }
-        self.optimizer.load_state_dict(state_dict)
 
 
 @runtime_checkable

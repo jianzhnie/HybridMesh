@@ -40,11 +40,10 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from dataclasses import dataclass, field
-from typing import Literal
+from typing import Any, Literal
 
 import torch
 from transformers import AutoConfig
-
 from hpmesh.components.checkpointer import LR_SCHEDULER, MODEL, OPTIMIZER
 from hpmesh.datasets.hf.text import DATASETS
 from hpmesh.utils import filesystem
@@ -61,6 +60,7 @@ __all__ = [
     "ModelConfig",
     "OptimizerConfig",
     "ParallelConfig",
+    "ParamGroupConfig",
     "ProfilerConfig",
     "TrainingConfig",
 ]
@@ -469,6 +469,40 @@ class LRSchedulerConfig:
 
 
 @dataclass
+class ParamGroupConfig:
+    """One parameter group and the optimizer that owns it.
+
+    A list of these, in order, is what ``OptimizerConfig.param_groups`` means:
+    each parameter is claimed by the first entry whose ``pattern`` matches its
+    FQN, so a catch-all ``.*`` belongs last.
+
+    ``optimizer_name`` and ``optimizer_kwargs`` define the group's optimizer
+    completely -- there is no inheritance from ``OptimizerConfig``'s flat
+    scalars, which supply the *default* catch-all group and nothing else. A
+    config that omits ``lr`` here therefore fails in the optimizer constructor
+    rather than silently adopting a value set somewhere else.
+
+    There is no CLI flag for this: ``HfArgumentParser`` builds one flag per
+    dataclass *field*, and a list of nested dataclasses has no flag spelling.
+    Groups are set from code, by constructing an ``OptimizerConfig`` with
+    ``param_groups=[...]``. See that class's ``__post_init__`` for how the flat
+    scalars become a group when this list is left empty.
+    """
+
+    pattern: str
+    """Regex matched against parameter FQNs, e.g. ``r".*\\.bias$"``, ``r".*"``."""
+
+    optimizer_name: str
+    """Optimizer class for this group's parameters: ``"Adam"`` or ``"AdamW"``."""
+
+    optimizer_kwargs: dict[str, Any] = field(default_factory=dict)
+    """Keyword arguments for the optimizer constructor. Must include everything
+    required (``lr`` above all); nothing is filled in from the enclosing config.
+    Entries override the run-wide implementation kwargs, so a group can ask for
+    ``fused=False`` where the run default is fused."""
+
+
+@dataclass
 class OptimizerConfig:
     """Optimizer (adamw only for now -- the learning path needs just one).
 
@@ -479,10 +513,75 @@ class OptimizerConfig:
 
     learning_rate: float = field(default=3e-4, metadata={"help": "Learning rate"})
     weight_decay: float = field(default=0.0, metadata={"help": "Weight decay"})
+    betas: list[float] = field(
+        default_factory=lambda: [0.9, 0.999],
+        metadata={
+            "help": "AdamW (beta1, beta2). Pass as two values: "
+            "--betas 0.9 0.95. The default is torch's; torchtitan's reference "
+            "LLM recipe uses (0.9, 0.95), which is a NUMERIC change."
+        },
+    )
+    eps: float = field(
+        default=1e-8,
+        metadata={"help": "AdamW epsilon (denominator floor)."},
+    )
+    implementation: Literal["fused", "foreach", "for-loop"] = field(
+        default="fused",
+        metadata={
+            "help": "Optimizer kernel. 'fused' is CUDA-only and falls back to "
+            "the for-loop kernel elsewhere; on CPU all three are bit-identical. "
+            "torchtitan's default."
+        },
+    )
+    param_groups: list[ParamGroupConfig] = field(
+        default_factory=list,
+        metadata={
+            "help": "Per-parameter-group optimizers. Empty (the default) means "
+            "one catch-all group built from the flat scalars above. No CLI flag "
+            "-- nested dataclass lists cannot be parsed; set it from code."
+        },
+    )
     lr_scheduler_config: LRSchedulerConfig = field(
         default_factory=LRSchedulerConfig,
-        metadata={"help": "Learning-rate schedule (see components/lr_scheduler)."},
+        metadata={"help": "Learning-rate schedule (see components/optimizer)."},
     )
+
+    def __post_init__(self) -> None:
+        # ``list`` is what the parser can build from two CLI values, but the
+        # optimizer wants a tuple and the field must not be mutable: a reused
+        # ``HfArgumentParser`` hands every instance the SAME default list (the
+        # factory runs once, not per instance), so an in-place edit would leak
+        # across runs. Normalizing here makes that unreachable, and the length
+        # check is what turns a typo like ``--betas 0.9`` into an error rather
+        # than a one-element betas that torch rejects deep in a step.
+        betas = tuple(self.betas)
+        if len(betas) != 2:
+            raise ValueError(
+                f"betas must have exactly 2 entries (beta1, beta2), got "
+                f"{len(betas)}: {betas}. Pass both: --betas 0.9 0.95."
+            )
+        if not all(0.0 <= beta < 1.0 for beta in betas):
+            raise ValueError(f"betas must each be in [0, 1), got {betas}")
+        self.betas = betas
+
+        # The degenerate grouping: no explicit param_groups means one catch-all
+        # group over every trainable parameter, built from the flat scalars.
+        # Synthesized here rather than in the container so there is exactly one
+        # description of the default, and so a caller that reads
+        # ``cfg.param_groups`` sees the groups a run actually uses.
+        if not self.param_groups:
+            self.param_groups = [
+                ParamGroupConfig(
+                    pattern=".*",
+                    optimizer_name="AdamW",
+                    optimizer_kwargs={
+                        "lr": self.learning_rate,
+                        "weight_decay": self.weight_decay,
+                        "betas": self.betas,
+                        "eps": self.eps,
+                    },
+                )
+            ]
 
     @property
     def lr_scheduler(self) -> LRSchedulerConfig:
@@ -1032,6 +1131,14 @@ class HybridMeshConfig:
     @property
     def weight_decay(self) -> float:
         return self.optimizer.weight_decay
+
+    @property
+    def betas(self) -> tuple[float, float]:
+        return self.optimizer.betas
+
+    @property
+    def eps(self) -> float:
+        return self.optimizer.eps
 
     @property
     def lr_scheduler_config(self) -> LRSchedulerConfig:

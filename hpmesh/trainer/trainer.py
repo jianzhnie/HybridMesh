@@ -73,7 +73,6 @@ from __future__ import annotations
 
 from collections.abc import Iterable, Iterator
 from contextlib import nullcontext
-from itertools import chain
 from time import perf_counter
 from typing import Any
 
@@ -85,8 +84,12 @@ from torch.distributed.device_mesh import DeviceMesh
 from .. import parallel
 from ..components.checkpointer import DATALOADER, TRAIN_STATE, CheckpointManager
 from ..components.loss import IGNORE_INDEX, next_token_targets
-from ..components.lr_scheduler import LRScheduler, build_lr_scheduler
 from ..components.metrics import MetricsProcessor
+from ..components.optimizer import (
+    LRSchedulersContainer,
+    OptimizersContainer,
+    build_lr_scheduler,
+)
 from ..components.profiler import Profiler
 from ..datasets import build_dataloader
 from ..datasets.loader import BaseDataLoader, DataloaderExhaustedError, TrainerBatch
@@ -143,7 +146,7 @@ class Trainer:
     # ``None`` is also a real state -- it means "fall back to the synthetic
     # source" -- so the default is the correct value, not just a placeholder.
     dataloader: BaseDataLoader | None = None
-    lr_scheduler: LRScheduler | None
+    lr_scheduler: LRSchedulersContainer | None
     checkpointer: CheckpointManager | None
     metrics: MetricsProcessor | None
     gc_handler: GarbageCollection | None
@@ -207,11 +210,7 @@ class Trainer:
             self.model = orchestration
             self.model_parts = [orchestration]
 
-        self.optimizer = torch.optim.AdamW(
-            chain.from_iterable(part.parameters() for part in self.model_parts),
-            lr=cfg.lr,
-            weight_decay=cfg.weight_decay,
-        )
+        self.optimizer = OptimizersContainer(cfg.optimizer, model_parts=self.model_parts)
 
         # The lr schedule. Built regardless of whether the knobs were touched:
         # the default is warmup_steps=0 with no decay, so the factor is a
@@ -219,9 +218,14 @@ class Trainer:
         # multiply per step and removes the branch that would otherwise decide
         # whether the lr is scheduled -- a branch whose two sides would have to
         # be kept numerically identical forever.
+        #
+        # Handed the *inner* optimizers, not the container: a LambdaLR reads
+        # ``lr`` off its optimizer's param groups, and the container's own
+        # groups carry none (they are the merged parameter view). This is why
+        # the scheduler is a container too.
         self.lr_scheduler = build_lr_scheduler(
             cfg.lr_scheduler_config,
-            optimizer=self.optimizer,
+            optimizers=list(self.optimizer),
             training_steps=cfg.steps,
         )
 
@@ -229,6 +233,10 @@ class Trainer:
         # accumulate per forward; this pre-hook rolls the per-instance sums
         # into the step registers at each optimizer step. Harmless when no
         # aux loss exists.
+        #
+        # Registered on the container, so it fires once per step() call --
+        # not once per inner optimizer, which is what a loop over the inner
+        # optimizers would give under pipeline parallelism.
         register_aux_loss_zero_hook(
             self.optimizer, self.model_parts, self.parallel_dims
         )

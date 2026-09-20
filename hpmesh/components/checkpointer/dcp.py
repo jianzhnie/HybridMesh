@@ -74,7 +74,6 @@ from .base import (
     OPTIMIZER,
     BaseCheckpointManager,
     ModelWrapper,
-    OptimizerWrapper,
     purge_thread,
 )
 
@@ -131,10 +130,10 @@ class CheckpointManager(BaseCheckpointManager):
        collide and one of them is lost. Then on reload only one stage can restore
        its optimizer state and the others error.
 
-       The solution is keying optimizer state by FQN instead of position, which
-       ``OptimizerWrapper`` does when constructed with ``model_parts`` -- pass
-       ``optimizer_fqn_keying=True`` (the trainer does, when pp > 1).
-       torchtitan's equivalent is its ``OptimizersContainer`` flattening.
+       The solution is keying optimizer state by FQN instead of position. The
+       ``OptimizersContainer`` does this unconditionally -- it has to, since one
+       container already spans every model part, so there is no positional
+       format for it to fall back to. torchtitan's container does the same.
 
     2. With complex PP schedules there are multiple model chunks per PP rank,
        which compounds (1) by also requiring us to reason about multiple local
@@ -149,18 +148,19 @@ class CheckpointManager(BaseCheckpointManager):
     Args:
         config: how checkpointing is configured for this run.
         model_parts: the model chunks to checkpoint (one entry per PP stage).
-        optimizer: the optimizer to checkpoint, wrapped as an
-            ``OptimizerWrapper`` so a resumed run's fresh optimizer has its
-            state materialized before DCP plans the load.
+        optimizer: the optimizer to checkpoint, as an ``OptimizersContainer``.
+            Its state dict is flat and FQN-keyed, and it materializes a fresh
+            optimizer's state before DCP plans the load.
         states: extra states to save beyond the model and optimizer.
         folder: absolute directory the checkpoints live in. Already joined with
             the run's dump folder by the caller.
         sd_adapter: converts model state dicts between the native layout and
             another format (HF safetensors). Required for the HF export paths.
             hpmesh ships none yet, so those paths reject at construction.
-        optimizer_fqn_keying: key optimizer state by parameter FQN rather than
-            positional index. Required under pipeline parallelism (see above);
-            off otherwise, so existing checkpoints keep their format.
+        optimizer_fqn_keying: accepted and ignored -- optimizer state is always
+            FQN-keyed, because the container spans every model part. Kept so
+            existing callers do not have to change, and to record in one place
+            that positional optimizer state is no longer reachable.
     """
 
     def __init__(
@@ -186,12 +186,13 @@ class CheckpointManager(BaseCheckpointManager):
         self.states.update(
             {
                 MODEL: ModelWrapper(model_parts),
-                # Wrapped rather than passed bare: see OptimizerWrapper. DCP
-                # writes into the tensors a Stateful reports, so a resumed run's
-                # fresh optimizer needs its Adam moments materialized first.
-                OPTIMIZER: OptimizerWrapper(
-                    optimizer, model_parts=model_parts if optimizer_fqn_keying else None
-                ),
+                # Passed through, not wrapped: the optimizer is an
+                # ``OptimizersContainer``, whose ``state_dict`` is already flat
+                # and FQN-keyed (the format DCP needs to reshard a pipeline
+                # checkpoint) and which materializes state before DCP plans a
+                # load, so a resumed run's fresh optimizer has somewhere to put
+                # ``exp_avg``.
+                OPTIMIZER: optimizer,
             }
         )
 

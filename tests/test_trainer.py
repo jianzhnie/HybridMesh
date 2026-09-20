@@ -46,7 +46,8 @@ from hpmesh.parallel.collectives import (
     dist_sum,
     dist_sum_tensor,
 )
-from hpmesh.trainer.config import CheckpointConfig
+from hpmesh.components.optimizer import OptimizersContainer
+from hpmesh.trainer.config import CheckpointConfig, OptimizerConfig, ParamGroupConfig
 from hpmesh.trainer.trainer import Trainer
 
 # -- losses -------------------------------------------------------------------
@@ -240,9 +241,29 @@ def test_iterator_rejects_an_empty_source() -> None:
 # -- checkpointing ------------------------------------------------------------
 
 
-def _model_and_optimizer() -> tuple[nn.Module, torch.optim.Optimizer]:
+def _model_and_optimizer() -> tuple[nn.Module, OptimizersContainer]:
+    """A model and the container the trainer would build around it.
+
+    The checkpointer is handed the container, not a bare ``AdamW``: its state
+    dict is flat and FQN-keyed, which is what makes optimizer state
+    unambiguous under pipeline parallelism, and it materializes a fresh
+    optimizer's state before DCP plans a load.
+    """
     model = nn.Linear(4, 4)
-    return model, torch.optim.AdamW(model.parameters(), lr=0.1)
+    optimizer = OptimizersContainer(
+        OptimizerConfig(
+            learning_rate=0.1,
+            param_groups=[
+                ParamGroupConfig(
+                    pattern=".*",
+                    optimizer_name="AdamW",
+                    optimizer_kwargs={"lr": 0.1},
+                )
+            ],
+        ),
+        model_parts=[model],
+    )
+    return model, optimizer
 
 
 class _TrainState:
@@ -276,17 +297,23 @@ def _manager(
     )
 
 
-def _step(model: nn.Module, optimizer: torch.optim.Optimizer, times: int = 2) -> None:
+def _step(model: nn.Module, optimizer: OptimizersContainer, times: int = 2) -> None:
     for _ in range(times):
         optimizer.zero_grad()
         model(torch.ones(2, 4)).sum().backward()
         optimizer.step()
 
 
-def _optimizer_state(optimizer) -> dict:
+def _optimizer_state(optimizer: OptimizersContainer) -> dict:
+    """One step's optimizer state, keyed by FQN, from the container's flat dict.
+
+    The trainable parameters are all ``weight``/``bias``, each carrying
+    ``exp_avg`` and ``exp_avg_sq``.
+    """
     return {
-        param_id: {k: v.clone() for k, v in state.items()}
-        for param_id, state in optimizer.state_dict()["state"].items()
+        key: value.clone()
+        for key, value in optimizer.state_dict().items()
+        if key.startswith("state.") and key.endswith(("exp_avg", "exp_avg_sq"))
     }
 
 
@@ -320,11 +347,10 @@ def test_checkpoint_round_trips_model_optimizer_and_counters(tmp_path) -> None:
     # The load-bearing case. A fresh Adam has no exp_avg to write into, so a
     # manager that did not materialize the state first would report success
     # while leaving the optimizer cold.
-    restored_optim = fresh_optimizer.state_dict()["state"]
+    restored_optim = _optimizer_state(fresh_optimizer)
     assert restored_optim.keys() == saved_optim.keys()
-    for param_id, saved in saved_optim.items():
-        for key, value in saved.items():
-            assert torch.equal(restored_optim[param_id][key], value)
+    for key, value in saved_optim.items():
+        assert torch.equal(restored_optim[key], value)
 
 
 def test_checkpoint_save_includes_optimizer_state_without_a_prior_step(
