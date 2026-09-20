@@ -81,7 +81,7 @@ def test_ep_that_divides_is_accepted() -> None:
 
 
 def test_a_non_positive_size_is_rejected() -> None:
-    """A zero degree would divide by zero deep in the mesh builder."""
+    """A zero size would divide by zero deep in the mesh builder."""
     with pytest.raises(AssertionError):
         _dims(world_size=8, dp_shard=0)
 
