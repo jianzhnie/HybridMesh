@@ -869,6 +869,25 @@ class TrainingConfig:
             "clipping but still reports grad_norm."
         },
     )
+    gc_freq: int = field(
+        default=50,
+        metadata={
+            "help": "Run a cyclic garbage collection every this many steps. The "
+            "training loop takes the collector over from CPython so it fires at a "
+            "step boundary instead of mid-forward."
+        },
+    )
+    gradient_accumulation_steps: int = field(
+        default=1,
+        metadata={
+            "help": "Micro-batches accumulated per optimizer update. Each is a "
+            "full forward/backward; the step's gradients are summed and the "
+            "reported loss is the sum over all of them divided by the global "
+            "valid-token count, so the number stays comparable across settings. "
+            "Contrast num_pp_microbatches, which splits one batch's pipeline "
+            "schedule rather than training on more data."
+        },
+    )
     dump_folder: str = field(
         default="./outputs",
         metadata={
@@ -928,6 +947,11 @@ class TrainingConfig:
             raise ValueError(f"max_seq_len must be >= 1, got {self.max_seq_len}")
         if self.steps < 1:
             raise ValueError(f"steps must be >= 1, got {self.steps}")
+        if self.gradient_accumulation_steps < 1:
+            raise ValueError(
+                "gradient_accumulation_steps must be >= 1, got "
+                f"{self.gradient_accumulation_steps}"
+            )
 
 
 @dataclass
@@ -1054,6 +1078,14 @@ class HybridMeshConfig:
     @property
     def dump_folder(self) -> str:
         return self.training.dump_folder
+
+    @property
+    def gc_freq(self) -> int:
+        return self.training.gc_freq
+
+    @property
+    def gradient_accumulation_steps(self) -> int:
+        return self.training.gradient_accumulation_steps
 
     @property
     def checkpoint(self) -> CheckpointConfig:

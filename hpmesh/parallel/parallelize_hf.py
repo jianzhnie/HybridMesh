@@ -40,7 +40,7 @@ import torch.nn as nn
 
 from ..trainer.config import HybridMeshConfig
 from .cp_ep import apply_cp_ep
-from .fsdp2.fsdp_wrap import apply_fsdp
+from .fully_shard.fsdp_wrap import apply_fsdp
 from .pipeline_parallel import PipelineParallelSetup, apply_pp, build_pipeline_schedule
 from .tensor_parallel.tp import apply_tp
 

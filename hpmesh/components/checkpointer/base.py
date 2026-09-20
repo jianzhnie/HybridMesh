@@ -324,7 +324,18 @@ class OptimizerWrapper(Stateful):
                 self._fqns[index]: state
                 for index, state in state_dict["state"].items()
             },
-            "param_groups": state_dict["param_groups"],
+            # The positional ``params`` list must not be saved: under PP each
+            # stage's optimizer numbers its own parameters from 0, so every
+            # rank would write the same ``optimizer.param_groups`` key with a
+            # list of its own length (stages differ in parameter count), and
+            # one shared checkpoint key cannot hold them all. What remains --
+            # lr, betas, and friends -- is config-level and identical across
+            # stages, so a single shared copy is correct. ``load_state_dict``
+            # rebuilds the list from the live optimizer.
+            "param_groups": [
+                {key: value for key, value in group.items() if key != "params"}
+                for group in state_dict["param_groups"]
+            ],
         }
 
     def load_state_dict(self, state_dict: dict[str, Any]) -> None:
@@ -339,7 +350,16 @@ class OptimizerWrapper(Stateful):
                     fqn_to_index[fqn]: state
                     for fqn, state in state_dict["state"].items()
                 },
-                "param_groups": state_dict["param_groups"],
+                "param_groups": [
+                    # Re-inject the positional ``params`` list ``state_dict``
+                    # dropped: index i is the i-th parameter of the live group.
+                    {**group, "params": list(range(len(live["params"])))}
+                    for group, live in zip(
+                        state_dict["param_groups"],
+                        self.optimizer.param_groups,
+                        strict=True,
+                    )
+                ],
             }
         self.optimizer.load_state_dict(state_dict)
 

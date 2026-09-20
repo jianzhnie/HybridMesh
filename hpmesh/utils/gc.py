@@ -14,10 +14,14 @@ previous step's garbage before allocating more measurably reduces peak RSS.
 from __future__ import annotations
 
 import gc
-import logging
 import time
 
-logger = logging.getLogger(__name__)
+from .logger_utils import get_logger
+
+# ``get_logger``, not a bare ``logging.getLogger``: without the handler this
+# module's installer attaches, the collection notices are emitted and then
+# dropped, which is indistinguishable from the collector never running.
+logger = get_logger(__name__)
 
 
 class GarbageCollection:
