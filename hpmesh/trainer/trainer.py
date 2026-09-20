@@ -185,13 +185,18 @@ class Trainer:
         model = HFTransformerModel(build_model_config_for(cfg)).to(self.device)
 
         # 3. parallelism, in Titan's order: tp/pp/cp/ep declared first, fsdp last
-        #    (outer wraps inner). Each is a no-op when its degree is 1.
+        #    (outer wraps inner). Each is a no-op when its degree is 1. The
+        #    parallel layer's contract is ParallelConfig plus explicit scalars,
+        #    so the training-side values it needs are unpacked here.
         orchestration = parallel.parallelize_hf_transformers(
             model,
-            cfg=cfg,
+            cfg=cfg.parallel,
             mesh=self.mesh,
             parallel_dims=self.parallel_dims,
             device=self.device,
+            compile=cfg.training.compile,
+            global_batch_size=cfg.training.global_batch_size,
+            dataset=cfg.training.dataloader.dataset,
         )
         if isinstance(orchestration, PipelineParallelSetup):
             # pp > 1: no single model survives the split -- this rank holds its
@@ -260,12 +265,14 @@ class Trainer:
         #    position would resume the weights and restart the data, silently
         #    training a second pass over the beginning of the corpus.
         #
-        #    The schedule is NOT registered. It holds one integer -- last_epoch --
-        #    and every step's value of it is the step number, which the trainer
-        #    above already serializes. A second copy could only ever disagree with
-        #    the first, and a resumed run re-derives the lr from ``last_epoch``
-        #    and the optimizer's own ``base_lrs``, which come back with the
-        #    optimizer's state.
+        #    The schedule rides along for one integer, ``last_epoch``, that
+        #    nothing else in the checkpoint carries. The optimizer restores its
+        #    ``base_lrs`` -- so the *current* lr comes back right -- but
+        #    ``last_epoch`` is the scheduler's own counter, and a resumed run's
+        #    fresh scheduler starts it at 0. Without it the curve restarts from
+        #    the beginning on the step after a resume: silent whenever warmup
+        #    and decay are both off (the lr is then constant and the mistake
+        #    invisible), and wrong for the rest of the run once either is set.
         states: dict[str, Any] = {TRAIN_STATE: self}
         if self.dataloader is not None:
             states[DATALOADER] = self.dataloader
@@ -273,6 +280,7 @@ class Trainer:
             cfg.checkpoint,
             model_parts=self.model_parts,
             optimizer=self.optimizer,
+            lr_scheduler=self.lr_scheduler,
             states=states,
             folder=cfg.dump_folder,
             # Under PP the optimizer's positional state indices collide across
@@ -337,6 +345,32 @@ class Trainer:
         )
         return dp_mesh.get_local_rank(), dp_mesh.size()
 
+    def _batch_size_per_rank(self, dp_world_size: int) -> int:
+        """This rank's share of the global batch, checked rather than floored.
+
+        Both loader paths divide the global batch by ``dp_world_size`` -- the
+        random path slices rows, the Grain path is handed a token count -- and
+        both are wrong in the same silent way when it does not divide: the run
+        reads a smaller global batch than the config names, and every number
+        derived from it (the lr, the token count, the value logged as
+        ``batch_size``) describes a batch that is not the one being read.
+
+        ``RandomTokenDataLoader`` rejects an indivisible ``batch_size`` of its
+        own, but only once it is constructed and only on the random path. The
+        token count is computed here, before either loader exists, so this is
+        the one place both paths pass through -- which is what makes the
+        failure the same for both, and the same up front.
+        """
+        global_batch_size = self.cfg.global_batch_size
+        if global_batch_size % dp_world_size != 0:
+            raise ValueError(
+                f"global_batch_size ({global_batch_size}) must be divisible by "
+                f"the number of data-parallel ranks ({dp_world_size}); each rank "
+                f"reads global_batch_size // dp_world_size samples, and the "
+                f"remainder would be dropped silently."
+            )
+        return global_batch_size // dp_world_size
+
     def _build_dataloader(self) -> BaseDataLoader | None:
         """Build the micro-batch source the config names.
 
@@ -346,6 +380,7 @@ class Trainer:
         state that could disagree with the first.
         """
         dp_rank, dp_world_size = self._dp_rank_world_size()
+        batch_size_per_rank = self._batch_size_per_rank(dp_world_size)
         loader = build_dataloader(
             self.cfg.dataloader,
             seed=self.cfg.seed,
@@ -358,9 +393,7 @@ class Trainer:
             # Per rank, not global: the Grain loader splits every dataset's
             # rows across ``dp_world_size`` ranks itself, so this many tokens
             # per rank is this many tokens per rank of the global batch.
-            num_tokens_per_batch=self.cfg.global_batch_size
-            // dp_world_size
-            * self.cfg.max_seq_len,
+            num_tokens_per_batch=batch_size_per_rank * self.cfg.max_seq_len,
         )
         if isinstance(loader, RandomTokenDataLoader):
             # The random positions ARE the step counter, already in the

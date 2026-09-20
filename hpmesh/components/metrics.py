@@ -378,7 +378,10 @@ class MetricsProcessor:
         dump_folder: base directory for the TensorBoard event files.
         pp_schedule: the pipeline schedule name, which decides the metrics rank.
         num_flops_per_token: model FLOPs per token, used for tflops and MFU. The
-            caller sets this once the model exists; ``0`` suppresses both.
+            caller sets this once the model exists. ``0`` -- the value
+            :func:`~hpmesh.models.hf_wrapper.num_flops_per_token` returns for a
+            config whose geometry it cannot read -- suppresses MFU rather than
+            reporting ``0.00%``; ``tflops`` is then ``0.0`` of its own accord.
         config_dict: the full job config, handed to wandb. Only wandb reads it.
         tag: prefix applied to every recorded key, so two runs can share one
             project or event directory. The console line is not tagged.
@@ -523,12 +526,18 @@ class MetricsProcessor:
         # meaningful where the hardware actually achieves that. Where the peak
         # is unknown the measurement is suppressed rather than reported against
         # a guess -- see get_peak_flops.
+        # The model's own geometry is the other input, and it is missing in the
+        # same way: a config that does not expose the sizes the formula needs
+        # makes num_flops_per_token 0, and 0 into a non-zero peak reports a
+        # confident 0.00% rather than an unknown. Suppress both -- a wrong
+        # number in a dashboard is worse than an absent one.
         # https://arxiv.org/abs/2204.02311 for the definition.
-        mfu = (
-            None
-            if self.gpu_peak_flops == 0
-            else 100 * self.num_flops_per_token * tps / self.gpu_peak_flops
-        )
+        if self.gpu_peak_flops == 0:
+            mfu = None
+        elif self.num_flops_per_token == 0:
+            mfu = None
+        else:
+            mfu = 100 * self.num_flops_per_token * tps / self.gpu_peak_flops
 
         assert self.step_last_log is not None, "should_log must run before log"
         time_end_to_end = time_delta / (step - self.step_last_log)

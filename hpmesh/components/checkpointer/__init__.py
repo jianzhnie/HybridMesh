@@ -36,15 +36,17 @@ the first two plus whatever the caller passes in ``states``:
   the same two through ``state_dict``/``load_state_dict`` for the same reason:
   they are the counters a resumed run needs.
 * ``lr_scheduler`` -- the ``LRSchedulersContainer`` from
-  ``components/optimizer/lr_scheduler.py``, registered only when the run has a
-  non-constant schedule. A constant lr is a function of nothing, so saving it
-  would be a key that can only disagree with the optimizer it already sits
-  beside.
+  ``components/optimizer/lr_scheduler.py``, always registered. It holds one
+  integer, ``last_epoch``, that nothing else in the checkpoint carries: the
+  optimizer restores the ``base_lrs`` so the *current* lr comes back right, but
+  the step count is the scheduler's own, and a resumed run's fresh scheduler
+  starts it at 0. Without it the curve restarts on the step after a resume --
+  invisible while the lr is constant, wrong for the rest of the run once warmup
+  or decay is set.
 * ``dataloader`` -- the ``BaseDataLoader``, registered only when it is loadable.
   See the trainer's ``_build_dataloader`` for why the synthetic one is not.
 """
 
-from ..optimizer import OptimizerWrapper, init_optim_state
 from .base import (
     DATALOADER,
     LR_SCHEDULER,

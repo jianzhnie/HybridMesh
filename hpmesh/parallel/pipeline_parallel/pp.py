@@ -32,8 +32,9 @@ from torch.distributed.pipelining.schedules import (
     get_schedule_class,
 )
 
+from hpmesh.trainer.config import ParallelConfig
+
 from ...components.loss import cross_entropy_loss
-from ...trainer.config import HybridMeshConfig, ParallelConfig
 from ..fully_shard.fsdp_wrap import apply_fsdp
 from ..parallel_dims import ParallelDims
 from ..tensor_parallel.tp import apply_tp
@@ -135,7 +136,9 @@ def _get_pipeline_metadata(
     return num_stages, input_weight, output_weight
 
 
-def _validate_microbatches(parallel_dims: ParallelDims, cfg: HybridMeshConfig) -> None:
+def _validate_microbatches(
+    parallel_dims: ParallelDims, cfg: ParallelConfig, global_batch_size: int
+) -> None:
     """Fail at setup, not mid-step, on a batch that cannot be microbatched.
 
     The trainer chunks each rank's rows into ``num_pp_microbatches`` pieces, so
@@ -143,16 +146,16 @@ def _validate_microbatches(parallel_dims: ParallelDims, cfg: HybridMeshConfig) -
     fed uneven (or wrong-count) microbatches and hang in a p2p.
     """
     dp = parallel_dims.dp_replicate * parallel_dims.dp_shard
-    if cfg.global_batch_size % dp != 0:
+    if global_batch_size % dp != 0:
         raise ValueError(
-            f"global_batch_size ({cfg.global_batch_size}) is not divisible by "
+            f"global_batch_size ({global_batch_size}) is not divisible by "
             f"the data-parallel degree ({dp})"
         )
-    rows_per_rank = cfg.global_batch_size // dp
-    num_microbatches = cfg.parallel.num_pp_microbatches
+    rows_per_rank = global_batch_size // dp
+    num_microbatches = cfg.num_pp_microbatches
     if rows_per_rank % num_microbatches != 0:
         raise ValueError(
-            f"per-rank batch rows ({cfg.global_batch_size} / {dp} = "
+            f"per-rank batch rows ({global_batch_size} / {dp} = "
             f"{rows_per_rank}) must be divisible by num_pp_microbatches "
             f"({num_microbatches})"
         )
@@ -162,8 +165,11 @@ def apply_pp(
     model: nn.Module,
     *,
     parallel_dims: ParallelDims,
-    cfg: HybridMeshConfig,
+    cfg: ParallelConfig,
     device: torch.device,
+    global_batch_size: int,
+    dataset: str = "random",
+    compile: bool = False,
 ) -> tuple[list[PipelineStage], list[nn.Module], bool, bool]:
     """Split ``model`` into this rank's pipeline stages and parallelize them.
 
@@ -172,6 +178,10 @@ def apply_pp(
     TP, then (if configured) ``torch.compile``, then FSDP. The chunk a stage
     object holds is rebound afterwards, so a wrapping transform (compile)
     cannot leave the stage running the pre-wrap module.
+
+    ``global_batch_size`` and ``dataset`` are training-side values the PP
+    guards need; they are explicit parameters rather than reads off a
+    run-wide config so this layer never sees ``HybridMeshConfig``.
 
     Returns ``(stages, model_parts, has_first_stage, has_last_stage)``; the
     schedule over the stages is built separately (``build_pipeline_schedule``).
@@ -182,7 +192,7 @@ def apply_pp(
             "batch the schedule consumes and EP swaps MoE blocks per chunk, and "
             "neither path is wired through the pipeline. Run them separately."
         )
-    if cfg.dataloader.dataset != "random":
+    if dataset != "random":
         raise NotImplementedError(
             "pp > 1 supports only the synthetic 'random' corpus: a packed real "
             "corpus supplies per-token positions, and the pipeline body does "
@@ -195,9 +205,9 @@ def apply_pp(
             "each stage's deep copy would train an independent copy of the "
             "shared weight."
         )
-    parallelism = cfg.parallel
+    parallelism = cfg
     pp_mesh = parallel_dims.get_mesh("pp")
-    _validate_microbatches(parallel_dims, cfg)
+    _validate_microbatches(parallel_dims, cfg, global_batch_size)
 
     module_names_per_stage = parallelism.module_fqns_per_model_part
     if module_names_per_stage is None:
@@ -234,7 +244,7 @@ def apply_pp(
     dense_mesh = parallel_dims.spmd_dense_mesh()
     for i, part in enumerate(model_parts):
         part = apply_tp(part, dense_mesh, cfg)
-        if cfg.compile:
+        if compile:
             part = torch.compile(part)
         part = apply_fsdp(part, dense_mesh, cfg, parallel_dims)
         model_parts[i] = part
@@ -249,7 +259,7 @@ def apply_pp(
 def build_pipeline_schedule(
     stages: list[PipelineStage],
     *,
-    cfg: HybridMeshConfig,
+    cfg: ParallelConfig,
 ) -> _PipelineSchedule:
     """Build the schedule that drives this rank's stages.
 
@@ -258,7 +268,7 @@ def build_pipeline_schedule(
     sum over tokens -- the trainer normalizes by the global token count after
     the reduction, so the schedule must not average over microbatches.
     """
-    parallelism = cfg.parallel
+    parallelism = cfg
     if parallelism.pipeline_parallel_schedule_csv:
         raise NotImplementedError(
             "pipeline_parallel_schedule_csv is not wired: hpmesh builds "

@@ -32,7 +32,7 @@ __all__ = [
 ]
 
 
-def init_optim_state(optimizer: torch.optim.Optimizer) -> None:
+def init_optim_state(optim: torch.optim.Optimizer) -> None:
     """Materialize per-parameter optimizer state without changing anything.
 
     Two callers need this, for the same underlying reason: PyTorch creates Adam's
@@ -57,50 +57,50 @@ def init_optim_state(optimizer: torch.optim.Optimizer) -> None:
     multi-optimizer case: the reset branch below is type-gated on Adam, and
     would be skipped silently if a container were handed in whole.
     """
-    params = [param for group in optimizer.param_groups for param in group["params"]]
-    missing = [
-        param
-        for param in params
-        if param.requires_grad and not optimizer.state.get(param)
+    params = [
+        param for param_group in optim.param_groups for param in param_group["params"]
     ]
-    if not missing:
+    params_to_initialize = [
+        param for param in params if param.requires_grad and not optim.state.get(param)
+    ]
+    if not params_to_initialize:
         return
 
     saved_grads = [param.grad for param in params]
     for param in params:
         param.grad = None
-    for param in missing:
+    for param in params_to_initialize:
         param.grad = torch.zeros_like(param)
 
-    # Some optimizers update parameters from lr alone, independent of the
-    # gradient, so lr is zeroed for the duration of the step.
-    saved_lrs: list[Any] = []
-    for group in optimizer.param_groups:
-        if "lr" not in group:
-            continue
-        saved_lrs.append(group["lr"])
-        group["lr"] = (
-            torch.tensor(0.0) if isinstance(group["lr"], torch.Tensor) else 0.0
-        )
-    optimizer.step()
+    # Some optimizers update parameters regardless of gradients due to lr, so set
+    # lr to zero before stepping to keep parameters unchanged.
+    saved_lrs = []
+    for param_group in optim.param_groups:
+        if "lr" in param_group:
+            saved_lrs.append(param_group["lr"])
+            param_group["lr"] = (
+                torch.tensor(0.0)
+                if isinstance(param_group["lr"], torch.Tensor)
+                else 0.0
+            )
+    optim.step(closure=None)
 
-    # A zero lr leaves parameters alone, but Adam still advances its step count,
-    # and coupled weight decay can move its moments. Reset the state that was
-    # just materialized so the first real update is Adam step 1.
-    if isinstance(optimizer, torch.optim.Adam | torch.optim.AdamW):
-        for param in missing:
-            state = optimizer.state[param]
+    # A zero learning rate keeps parameters unchanged, but Adam still advances
+    # its step counter (and coupled weight decay can update its moments). Reset
+    # the materialized state so the first real update remains Adam step 1.
+    if isinstance(optim, (torch.optim.Adam, torch.optim.AdamW)):
+        for param in params_to_initialize:
+            state = optim.state[param]
             state["step"].zero_()
             state["exp_avg"].zero_()
             state["exp_avg_sq"].zero_()
             if "max_exp_avg_sq" in state:
                 state["max_exp_avg_sq"].zero_()
 
-    for group, lr in zip(
-        (g for g in optimizer.param_groups if "lr" in g), saved_lrs, strict=True
-    ):
-        group["lr"] = lr
-    for param, grad in zip(params, saved_grads, strict=True):
+    for param_group in optim.param_groups:
+        if "lr" in param_group:
+            param_group["lr"] = saved_lrs.pop(0)
+    for param, grad in zip(params, saved_grads, strict=False):
         param.grad = grad
 
 

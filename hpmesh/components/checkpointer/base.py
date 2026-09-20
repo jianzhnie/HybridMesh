@@ -66,16 +66,27 @@ from torch.distributed.checkpoint.stateful import Stateful
 from torch.distributed.tensor import DTensor
 
 from ...utils import filesystem
+from ...utils.checkpoint_keys import (
+    DATALOADER,
+    LR_SCHEDULER,
+    MODEL,
+    OPTIMIZER,
+    TRAIN_STATE,
+)
 from ...utils.gc import GarbageCollection
 
 logger = logging.getLogger(__name__)
 
-
-MODEL = "model"
-OPTIMIZER = "optimizer"
-LR_SCHEDULER = "lr_scheduler"
-DATALOADER = "dataloader"
-TRAIN_STATE = "train_state"
+# The state keys are defined in ``utils/checkpoint_keys.py`` so that
+# ``trainer/config.py`` can read them without importing this package; the
+# import above re-exports them under their long-standing names.
+__all__ = [
+    "DATALOADER",
+    "LR_SCHEDULER",
+    "MODEL",
+    "OPTIMIZER",
+    "TRAIN_STATE",
+]
 
 
 def purge_thread(

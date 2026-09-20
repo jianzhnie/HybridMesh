@@ -45,9 +45,8 @@ from typing import Any, Literal
 import torch
 from transformers import AutoConfig
 
-from hpmesh.components.checkpointer import LR_SCHEDULER, MODEL, OPTIMIZER
-from hpmesh.datasets.hf.text import DATASETS
 from hpmesh.utils import filesystem
+from hpmesh.utils.checkpoint_keys import LR_SCHEDULER, MODEL, OPTIMIZER
 from hpmesh.utils.logger_utils import get_logger
 
 logger = get_logger(__name__)
@@ -934,13 +933,9 @@ class DataloaderConfig:
             )
         if self.dataset == "local_jsonl" and not self.dataset_path:
             raise ValueError("dataset_path is required for dataset 'local_jsonl'")
-        if self.dataset not in ("random", "local_jsonl") and (
-            self.dataset not in DATASETS
-        ):
-            raise ValueError(
-                f"unknown dataset {self.dataset!r}. Expected 'random', "
-                f"'local_jsonl', or one of: {sorted(DATASETS)}"
-            )
+        # Membership in ``datasets.hf.text.DATASETS`` is checked by
+        # ``datasets/build.py`` at build time, not here: reading the registry
+        # would import the datasets package into the config layer.
         if self.max_num_documents is not None and self.max_num_documents <= 0:
             raise ValueError("max_num_documents must be positive")
 
@@ -1076,7 +1071,10 @@ class HybridMeshConfig:
                 f"cp ({self.parallel.cp})"
             )
 
-    # -- Flat view: lets mesh/trainer read cfg.dp / cfg.lr / ... uniformly. --
+    # -- Flat view: lets the trainer read cfg.lr / cfg.steps / ... uniformly. --
+    # The parallel degrees (dp/tp/pp/cp/ep) are deliberately NOT here: the
+    # parallel layer takes ``cfg.parallel`` (a ParallelConfig) directly, so a
+    # second flat spelling of the same numbers could only drift apart.
     @property
     def hf_model(self) -> str:
         return self.model.model_name_or_path
@@ -1104,26 +1102,6 @@ class HybridMeshConfig:
     @property
     def num_key_value_heads(self) -> int:
         return self.model.num_key_value_heads
-
-    @property
-    def dp(self) -> int:
-        return self.parallel.data_parallel_shard_degree
-
-    @property
-    def tp(self) -> int:
-        return self.parallel.tensor_parallel_degree
-
-    @property
-    def pp(self) -> int:
-        return self.parallel.pipeline_parallel_degree
-
-    @property
-    def cp(self) -> int:
-        return self.parallel.context_parallel_degree
-
-    @property
-    def ep(self) -> int:
-        return self.parallel.expert_parallel_degree
 
     @property
     def lr(self) -> float:
@@ -1162,22 +1140,12 @@ class HybridMeshConfig:
         return self.training.seed
 
     @property
-    def compile(self) -> bool:
-        return self.training.compile
-
-    @property
     def deterministic(self) -> bool:
         return self.training.deterministic
 
     @property
     def pipeline_parallel_schedule(self) -> str:
         return self.parallel.pipeline_parallel_schedule
-
-    @property
-    def log_freq(self) -> int:
-        # Owned by the metrics group: the same number gates both the console
-        # line and the TensorBoard/WandB write, so one knob controls them.
-        return self.training.metrics.log_freq
 
     @property
     def max_norm(self) -> float:

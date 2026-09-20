@@ -36,11 +36,20 @@ def _reduce(x: torch.Tensor, *, reduce_op: dist.ReduceOp, mesh) -> torch.Tensor:
     ``mesh is None`` is the single-rank case: the reduction is the identity, so
     skipping the collective is the correct answer rather than a shortcut. It is
     what lets one training loop run from one device up to a full mesh.
+
+    The clone is what makes this a *function* rather than a mutation: upstream
+    reaches the same place via ``funcol.all_reduce``, which is out-of-place by
+    construction. It matters because callers keep using the tensor they passed:
+    ``train_step`` reduces the local token count here and then divides the loss
+    by that same tensor, expecting the *local* count. Under ``dist.all_reduce``,
+    whose own docstring says the input is mutated in place, it instead holds the
+    global count, and the per-rank average silently becomes a global one.
     """
     if mesh is None:
         return x
-    dist.all_reduce(x, op=reduce_op, group=mesh.get_group())
-    return x
+    result = x.clone()
+    dist.all_reduce(result, op=reduce_op, group=mesh.get_group())
+    return result
 
 
 def dist_sum_tensor(x: torch.Tensor, mesh=None) -> torch.Tensor:

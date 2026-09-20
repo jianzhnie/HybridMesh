@@ -7,7 +7,8 @@ import logging
 import torch.nn as nn
 from torch.distributed.device_mesh import DeviceMesh
 
-from ...trainer.config import HybridMeshConfig
+from hpmesh.trainer.config import ParallelConfig
+
 from .cp_kernel import CPFlexKernel
 
 logger = logging.getLogger(__name__)
@@ -23,7 +24,7 @@ _ATTN_MODULE_NAMES = ("self_attn", "attn", "attention")
 def apply_cp(
     model: nn.Module,
     mesh: DeviceMesh | None,
-    cfg: HybridMeshConfig,
+    cfg: ParallelConfig,
 ) -> nn.Module:
     """Attach a CP flex kernel to every decoder layer's attention module.
 
@@ -67,8 +68,8 @@ def apply_cp(
             f"mesh 'cp' axis has size {cp_mesh.size()}, but cfg requests cp={cfg.cp}."
         )
 
-    strategy = cfg.parallel.context_parallel_strategy
-    load_balancer = cfg.parallel.context_parallel_load_balancer
+    strategy = cfg.context_parallel_strategy
+    load_balancer = cfg.context_parallel_load_balancer
     if strategy == "ulysses":
         model_config = getattr(getattr(model, "model", None), "config", None)
         if load_balancer is not None:

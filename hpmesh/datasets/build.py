@@ -77,6 +77,16 @@ def build_dataloader(
             dp_world_size=dp_world_size,
         )
 
+    # Unknown recipe names are rejected here, at build time, rather than in
+    # ``DataloaderConfig.__post_init__``: the registry lives in this package,
+    # and the config layer must not import it. Checked before the tokenizer is
+    # built so a bad name fails fast without loading tokenizer assets.
+    if config.dataset != "local_jsonl" and config.dataset not in DATASETS:
+        raise ValueError(
+            f"unknown dataset {config.dataset!r}. Expected 'random', "
+            f"'local_jsonl', or one of: {sorted(DATASETS)}"
+        )
+
     # Imported here, not at module scope: building the tokenizer pulls in
     # ``tokenizers``/``jinja2``, and a random-token run should not have to
     # have them installed.

@@ -26,7 +26,8 @@ import torch.distributed as dist
 from torch.distributed._composable.fsdp import FSDPModule
 from torch.distributed.device_mesh import DeviceMesh
 
-from ...trainer.config import HybridMeshConfig
+from hpmesh.trainer.config import ParallelConfig
+
 from ..parallel_dims import ParallelDims
 from .fsdp import (
     apply_fsdp_to_decoder,
@@ -53,7 +54,7 @@ def _force_sum_grad_reduction(model: torch.nn.Module) -> None:
 def apply_fsdp(
     model: torch.nn.Module,
     mesh: DeviceMesh | None,
-    cfg: HybridMeshConfig,
+    cfg: ParallelConfig,
     parallel_dims: ParallelDims | None = None,
 ) -> torch.nn.Module:
     """Fully-shard ``model`` (FSDP2). No-op when neither DP-shard nor CP is enabled.
@@ -105,12 +106,12 @@ def apply_fsdp(
         reduce_dtype=reduce_dtype,
         pp_enabled=parallel_dims.pp_enabled,
         cpu_offload=False,
-        reshard_after_forward_policy=cfg.parallel.fsdp_reshard_after_forward,
+        reshard_after_forward_policy=cfg.fsdp_reshard_after_forward,
         ep_degree=parallel_dims.ep,
         edp_mesh=edp_mesh,
         dp_mesh_dims=dp_mesh_dims,
         edp_mesh_dims=edp_mesh_dims,
-        enable_symm_mem=cfg.parallel.enable_fsdp_symm_mem,
+        enable_symm_mem=cfg.enable_fsdp_symm_mem,
     )
     # ``apply_fsdp_to_decoder`` already calls ``disable_fsdp_gradient_division``
     # and, when asked, ``enable_fsdp_symm_mem``; do not repeat them here.
