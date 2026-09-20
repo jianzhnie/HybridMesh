@@ -74,12 +74,12 @@ def apply_fsdp(
 
     # torch rejects ``dp_mesh_dims`` unless every parameter is already a DTensor
     # on the full SPMD mesh ("When dp_mesh_dims is provided, all parameters must
-    # be DTensors ... via distribute_module"). That precondition is torchtitan's
-    # Module protocol (``model.parallelize()``), which converts declared states
-    # into DTensors; hpmesh's HF models hold plain tensors. So we hand FSDP a
-    # plain 1-D DP mesh and let it do its own sharding -- the mode torch
-    # supports out of the box. Wiring the DTensor path is a prerequisite for
-    # composing FSDP with tp/cp/ep on one mesh, and is not done here.
+    # be DTensors ... via distribute_module"). Meeting that precondition means
+    # converting each declared state into a DTensor before FSDP is applied;
+    # hpmesh's HF models hold plain tensors. So we hand FSDP a plain 1-D DP mesh
+    # and let it do its own sharding -- the mode torch supports out of the box.
+    # Wiring the DTensor path is a prerequisite for composing FSDP with
+    # tp/cp/ep on one mesh, and is not done here.
     dp_mesh_dims = None
     edp_mesh_dims = None
 

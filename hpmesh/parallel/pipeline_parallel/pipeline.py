@@ -9,7 +9,7 @@ Two independent pieces, usable on their own:
   result in a ``PipelineStage``.
 
 Vendored from torchtitan's ``experiments/transformers_modeling_backend/pipeline.py``.
-Three changes, all removals of torchtitan's module layer:
+Two changes, both removals of torchtitan's module layer:
 
 * ``ModuleList`` / ``ModuleDict`` -> the plain ``nn`` equivalents. torchtitan's
   versions exist so the containers take part in its module protocol; hpmesh has
@@ -17,7 +17,6 @@ Three changes, all removals of torchtitan's module layer:
   layers are re-keyed to their original indices (via ``add_module``), because a
   fresh ``ModuleList`` would renumber them and two stages' state-dict keys would
   collide in one checkpoint.
-* ``Identity.Config().build()`` -> ``nn.Identity()``.
 * ``get_mesh`` defaults to ``None``. torchtitan passes a callback so each stage
   can rebuild a DTensor from the plain tensor it receives from the previous stage
   (DTensors carry a ProcessGroup, which cannot cross a stage boundary). hpmesh

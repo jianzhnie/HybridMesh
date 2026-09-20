@@ -7,10 +7,9 @@
 """The ``nn`` modules a ``models/common`` model composes, under one vocabulary.
 
 Vendored from torchtitan ``models/common/nn_modules.py``. Upstream each class
-used diamond inheritance (``nn.X`` + ``Module``) so that ``Config.build()``
-could construct it and ``parallelize()`` could shard it; hpmesh has neither
-protocol, and the constructions here are all plain ``nn.X`` calls, so the
-``Config`` dataclasses are gone and almost nothing is left over.
+used diamond inheritance (``nn.X`` + ``Module``) so it could carry a config and
+be sharded by the parallelism engine; hpmesh has neither protocol, and the
+constructions here are all plain ``nn.X`` calls, so almost nothing is left over.
 
 Be clear about what this file is: with the protocol removed, these ARE the
 stock ``nn`` modules. The value is having one spelling for the components a
