@@ -34,14 +34,14 @@ import torch
 import torch.distributed as dist
 import torch.nn as nn
 
-from ..models.common.grouped_experts import GroupedExperts
-from ..models.common.moe import (
+from ...models.common.grouped_experts import GroupedExperts
+from ...models.common.moe import (
     MicrobatchWiseLoadBalanceLoss,
     MoE,
     RoutedExperts,
     TokenChoiceTopKRouter,
 )
-from ..models.common.token_dispatcher import (
+from ...models.common.token_dispatcher import (
     AllToAllTokenDispatcher,
     LocalTokenDispatcher,
 )
@@ -192,7 +192,7 @@ def swap_hf_moe_blocks(model: nn.Module, *, ep_group=None) -> int:
             f"({type(getattr(model, 'model', model)).__name__}): no layer's "
             "``mlp`` has the router-gate + experts-ModuleList shape this swap "
             "recognizes. Add the model family's spelling to the probe in "
-            "parallel/ep.py."
+            "parallel/expert_parallel/ep.py."
         )
     logger.info("Swapped %d HF MoE blocks for hpmesh MoE blocks", swapped)
     return swapped

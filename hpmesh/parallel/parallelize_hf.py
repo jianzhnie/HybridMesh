@@ -25,10 +25,10 @@ oversight:
 * **Converting modules to a ``Module`` protocol.** hpmesh has none, and no
   on-the-fly sharding-config declarations either -- the TP plan lives as plain
   data in the model registry instead (see docs/hybridmesh_design.md, SEAM 1).
-* **Swapping in a native MoE.** No longer true: ``apply_cp_ep`` swaps HF MoE
+* **Swapping in a native MoE.** No longer true: ``apply_ep`` swaps HF MoE
   blocks for the ``models/common`` MoE stack when ``ep > 1`` (see
-  ``parallel/ep.py``). The swap moves weights rather than re-initializing
-  them, so the model still trains from HF's initialization.
+  ``parallel/expert_parallel/ep.py``). The swap moves weights rather than
+  re-initializing them, so the model still trains from HF's initialization.
 """
 
 from __future__ import annotations
@@ -39,7 +39,8 @@ import torch
 import torch.nn as nn
 
 from ..trainer.config import HybridMeshConfig
-from .cp_ep import apply_cp_ep
+from .context_parallel import apply_cp
+from .expert_parallel import apply_ep
 from .fully_shard.fsdp_wrap import apply_fsdp
 from .pipeline_parallel import PipelineParallelSetup, apply_pp, build_pipeline_schedule
 from .tensor_parallel.tp import apply_tp
@@ -103,7 +104,8 @@ def parallelize_hf_transformers(
         ep_group = ep_mesh.get_group()
 
     model = apply_tp(model, mesh, cfg)
-    model = apply_cp_ep(model, mesh, cfg, ep_group=ep_group)
+    model = apply_ep(model, cfg, ep_group=ep_group)
+    model = apply_cp(model, mesh, cfg)
 
     if cfg.compile:
         model = torch.compile(model)

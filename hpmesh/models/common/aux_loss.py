@@ -36,14 +36,21 @@ from __future__ import annotations
 import re
 from collections import defaultdict
 from collections.abc import Sequence
-from typing import ClassVar
+from typing import TYPE_CHECKING, ClassVar
 
 import torch
 import torch.nn as nn
 from torch.distributed._functional_collectives import all_reduce
 
-from hpmesh.parallel.parallel_dims import ParallelDims
 from hpmesh.utils.device import device_type
+
+if TYPE_CHECKING:
+    # Annotation-only: ``ParallelDims`` appears in two signatures below and
+    # nowhere at runtime. Importing it eagerly would form a cycle --
+    # ``parallel/__init__`` -> ``expert_parallel.apply`` -> ``models.common.moe``
+    # -> here -- which is entered whenever a model module is imported before
+    # ``hpmesh.parallel``.
+    from hpmesh.parallel.parallel_dims import ParallelDims
 
 __all__ = [
     "AuxLoss",

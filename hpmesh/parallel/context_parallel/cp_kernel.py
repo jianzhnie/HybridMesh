@@ -1,6 +1,6 @@
 """The CP flex kernel: redistribute q/k/v across the CP group, then run flex.
 
-``apply_cp_ep`` attaches one of these to every decoder layer's attention module
+``apply_cp`` attaches one of these to every decoder layer's attention module
 as ``_titan_flex_kernel``; ``hf_wrapper._flex_attention_hf`` then routes the
 layer's attention call through it. q/k/v arrive HF-shaped --
 ``(batch, heads, seq, dim)`` -- with the sequence already sharded along dim 2
@@ -26,7 +26,7 @@ local shard's length. The wrapper cannot be told which strategy attached (its
 only CP channel is ``set_cp_mesh``), so the kernel rebuilds the full-length
 causal mask itself. That rebuild is exact because the wrapper's internal CP
 mask is causal-only; packed (``block_causal``) runs are refused at attach time
-in ``apply_cp_ep``, where the model config is still visible.
+in ``apply_cp``, where the model config is still visible.
 """
 
 from __future__ import annotations
@@ -212,7 +212,7 @@ class CPFlexKernel(nn.Module):
         attached), while ulysses attends full-length queries. The full-length
         causal mask is rebuilt here instead -- exact because the wrapper's
         internal CP mask is causal-only. Packed sequences are refused at
-        attach time in ``apply_cp_ep``.
+        attach time in ``apply_cp``.
         """
         q = _SeqToHead.apply(query.contiguous(), self._cp_group)
         k = _SeqToHead.apply(key.contiguous(), self._cp_group)
