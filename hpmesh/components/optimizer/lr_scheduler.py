@@ -6,50 +6,54 @@
 
 """The learning-rate schedule: linear warmup, stable phase, then decay.
 
-Vendored from torchtitan ``components/optimizer/lr_scheduler.py``. Two things
-were dropped:
+Vendored from torchtitan ``components/optimizer/lr_scheduler.py``: the same
+``LRSchedulersContainer``, driven by the same ``LambdaLR``, over the same
+Warmup-Stable-Decay (WSD) curve (https://arxiv.org/abs/2404.06395).
 
-* **The container.** Upstream ``LRSchedulersContainer`` wraps a list of
-  schedulers, one per optimizer in an ``OptimizersContainer``, and re-derives
-  each one's lr from its own ``base_lrs`` on load. hpmesh builds a single
-  ``torch.optim.AdamW`` in the trainer, so there is exactly one scheduler and
-  the list indirection carries nothing.
-* **The config is not defined here.** The knobs live in
-  ``LRSchedulerConfig`` in ``hpmesh.trainer.config``, with every other config in
-  the package (see that module's docstring); :func:`build_lr_scheduler` is the
-  seam that turns one into the scheduler below, so this module still reads
-  top-down: the curve, the ``LambdaLR``, then the function that configures them.
+The container is not optional. A ``LambdaLR`` reads ``lr`` off the first of its
+optimizer's ``param_groups``, and an ``OptimizersContainer`` built the way the
+loop needs it has none: its ``param_groups`` is the parameter view
+``Optimizer.__init__`` merges, and no group carries an ``lr`` of its own. So the
+scheduler has to be handed the *inner* optimizers, one ``LambdaLR`` each -- which
+is exactly what this class holds, and why it exists rather than a bare
+``LambdaLR``.
 
-What is kept is the schedule itself, arithmetic unchanged: a Warmup-Stable-Decay
-(WSD) curve (https://arxiv.org/abs/2404.06395). ``decay_ratio`` decides how much
-of the run the decay covers and whatever is left after warmup is the stable
-phase, so the shape is warmup -> stable -> decay with ``decay_ratio=0`` (the
-default) degenerating to warmup and then a constant rate.
+Departures from upstream:
 
-**Checkpoint behavior.** ``state_dict`` is one integer. A LambdaLR recomputes
-its lr from the optimizer's ``base_lrs`` and the shared lambda, so restoring
-``last_epoch`` is the whole of the state; the base lrs come back with the
-optimizer's own state. That also makes the save and load sides independent of how
-many schedulers exist, which is what upstream relies on for resharding.
+* **The config is not defined here.** The knobs live in ``LRSchedulerConfig`` in
+  ``hpmesh.trainer.config``, with every other config in the package;
+  :func:`build_lr_scheduler` is the seam that turns one into the container.
+  Upstream's ``Config.build`` is that seam, spelled with torchtitan's config
+  system.
+* **``state_dict`` reports ``last_epoch`` and nothing else.** ``LambdaLR`` is
+  stateless apart from it -- the lr is a pure function of ``(last_epoch,
+  base_lr)`` -- so ``_last_lr`` is recomputed on load rather than stored. The
+  base lrs come back with the optimizer's own state. A stateful scheduler
+  (``ReduceLROnPlateau`` and friends) would need more, which is why the load path
+  spells this out instead of round-tripping the whole dict.
 """
 
 from __future__ import annotations
 
 import functools
 import math
-from collections.abc import Callable
-from typing import Any
+from collections.abc import Callable, Iterator
+from typing import TYPE_CHECKING, Any
 
 from torch.distributed.checkpoint.stateful import Stateful
 from torch.optim import Optimizer
 from torch.optim.lr_scheduler import LambdaLR
 
-from ..trainer.config import LRSchedulerConfig
-from ..utils.logger_utils import get_logger
+from ...utils.logger_utils import get_logger
+
+if TYPE_CHECKING:
+    # ``trainer.config`` imports this package, so the runtime import happens
+    # inside ``build_lr_scheduler`` -- the one place a config's fields are read.
+    from ...trainer.config import LRSchedulerConfig
 
 logger = get_logger(__name__)
 
-__all__ = ["build_lr_scheduler", "LRScheduler"]
+__all__ = ["build_lr_scheduler", "LRSchedulersContainer"]
 
 
 def _wsd_factor(
@@ -91,25 +95,44 @@ def _wsd_factor(
     return min_lr_factor + (1 - min_lr_factor) * factor
 
 
-class LRScheduler(Stateful):
-    """One ``LambdaLR`` over one optimizer, exposing the loop's three needs.
+class LRSchedulersContainer(Stateful):
+    """One ``LambdaLR`` per inner optimizer, stepped together.
+
+    The training loop drives this like a single scheduler: ``step`` advances
+    them all, ``get_metrics`` reports the lr of each.
+
+    All of them share one lambda. They can still diverge, because a ``LambdaLR``
+    scales its own optimizer's ``base_lrs`` -- so a run whose param groups carry
+    different base learning rates gets the right curve per group without a
+    second lambda.
 
     Args:
-        optimizer: the optimizer whose ``param_groups`` are stepped.
+        optimizers: one scheduler is built per entry, in order.
         lr_lambda: maps ``last_epoch`` to the multiplicative lr factor.
-        total_steps: the schedule's length, kept only so ``build`` can validate
-            it; nothing at step time reads it.
+        total_steps: the schedule's length, resolved by :func:`build_lr_scheduler`
+            from the config and the run length. Kept only so callers can assert
+            on the curve's extent; nothing at step time reads it.
     """
 
     def __init__(
         self,
-        optimizer: Optimizer,
+        optimizers: list[Optimizer],
         lr_lambda: Callable[[int], float],
         *,
         total_steps: int,
     ) -> None:
+        if not optimizers:
+            raise ValueError(
+                "LRSchedulersContainer needs at least one optimizer to schedule."
+            )
         self.total_steps = total_steps
-        self.scheduler = LambdaLR(optimizer, lr_lambda)
+        self.schedulers = [LambdaLR(optimizer, lr_lambda) for optimizer in optimizers]
+
+    def __iter__(self) -> Iterator[LambdaLR]:
+        return iter(self.schedulers)
+
+    def __len__(self) -> int:
+        return len(self.schedulers)
 
     def step(self) -> None:
         """Advance the schedule by one step.
@@ -118,51 +141,57 @@ class LRScheduler(Stateful):
         the one this computes from the previous ``last_epoch`` -- which is why
         the first training step runs at ``lambda(0)``.
         """
-        self.scheduler.step()
+        for scheduler in self.schedulers:
+            scheduler.step()
 
     def get_metrics(self) -> dict[str, float]:
-        """The current lr, keyed so several optimizers could not collide.
+        """The current lr of each optimizer, keyed so several cannot collide.
 
-        hpmesh has one param group, but the key keeps upstream's shape: a future
-        param-group split would show up as ``lr/AdamW/1`` rather than silently
+        The key keeps upstream's shape: a run with several schedulers, or a
+        param-group split, shows up as ``lr/AdamW/1`` rather than silently
         overwriting ``lr/AdamW``.
         """
-        optimizer_name = type(self.scheduler.optimizer).__name__
-        last_lrs = self.scheduler.get_last_lr()
-        if len(last_lrs) == 1:
-            return {f"lr/{optimizer_name}": float(last_lrs[0])}
-        return {
-            f"lr/{optimizer_name}/{index}": float(value)
-            for index, value in enumerate(last_lrs)
-        }
+        metrics: dict[str, float] = {}
+        for scheduler in self.schedulers:
+            optimizer_name = type(scheduler.optimizer).__name__
+            last_lrs = scheduler.get_last_lr()
+            if len(last_lrs) == 1:
+                metrics[f"lr/{optimizer_name}"] = float(last_lrs[0])
+                continue
+            for index, value in enumerate(last_lrs):
+                metrics[f"lr/{optimizer_name}/{index}"] = float(value)
+        return metrics
 
     def state_dict(self) -> dict[str, Any]:
-        return {"last_epoch": self.scheduler.last_epoch}
+        # One integer, not one per scheduler: every scheduler is stepped
+        # together from the same lambda, so they share a step count by
+        # construction. Storing it once is what lets a checkpoint survive
+        # resharding to a different number of optimizers.
+        return {"last_epoch": self.schedulers[0].last_epoch}
 
     def load_state_dict(self, state_dict: dict[str, Any]) -> None:
-        """Restore ``last_epoch`` only.
+        """Restore ``last_epoch`` on every scheduler.
 
         ``LambdaLR`` is stateless apart from that -- the lr is a pure function of
         ``(last_epoch, base_lr)`` -- so ``_last_lr`` is recomputed rather than
-        stored. A stateful scheduler (ReduceLROnPlateau and friends) would need
-        more, which is why this is spelled out rather than round-tripping the
-        whole dict.
+        stored, per scheduler, from its own optimizer's ``base_lrs``.
         """
         if not state_dict:
             return
         last_epoch = state_dict["last_epoch"]
-        self.scheduler.last_epoch = last_epoch
-        self.scheduler._step_count = last_epoch + 1
-        self.scheduler._last_lr = self.scheduler.get_lr()
+        for scheduler in self.schedulers:
+            scheduler.last_epoch = last_epoch
+            scheduler._step_count = last_epoch + 1
+            scheduler._last_lr = scheduler.get_lr()
 
 
 def build_lr_scheduler(
     config: LRSchedulerConfig,
     *,
-    optimizer: Optimizer,
+    optimizers: list[Optimizer],
     training_steps: int,
-) -> LRScheduler:
-    """Build the scheduler a :class:`~hpmesh.trainer.config.LRSchedulerConfig`
+) -> LRSchedulersContainer:
+    """Build the schedule a :class:`~hpmesh.trainer.config.LRSchedulerConfig`
     describes.
 
     ``training_steps`` is the run's actual length; the config's ``total_steps``
@@ -170,16 +199,6 @@ def build_lr_scheduler(
     rather than clamped: a schedule shorter than the run would put the last steps
     past its end, where the decay factor runs off the bottom of the curve and
     turns the learning rate negative -- which ascends the loss instead of
-    failing.
-    """
-
-    """Build the scheduler this configuration describes.
-
-    ``training_steps`` is the run's actual length; ``total_steps`` overrides
-    it for the curve only. The two are validated against each other rather
-    than clamped: a schedule shorter than the run would put the last steps
-    past its end, where the decay factor runs off the bottom of the curve
-    and turns the learning rate negative -- which ascends the loss instead of
     failing.
     """
     total_steps = (
@@ -229,4 +248,4 @@ def build_lr_scheduler(
         decay_type=config.decay_type,
         min_lr_factor=config.min_lr_factor,
     )
-    return LRScheduler(optimizer, lr_lambda, total_steps=total_steps)
+    return LRSchedulersContainer(optimizers, lr_lambda, total_steps=total_steps)

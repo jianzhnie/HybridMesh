@@ -1,0 +1,251 @@
+# Copyright (c) Meta Platforms, Inc. and affiliates.
+# All rights reserved.
+#
+# This source code is licensed under the BSD-style license found in the
+# LICENSE file in the root directory of this source tree.
+
+"""Optimizer state-dict helpers for distributed checkpointing.
+
+Vendored from torchtitan ``components/optimizer/utils.py``, unchanged in logic.
+These utilities operate directly on ``torch.optim.Optimizer`` state dicts; they
+are model-agnostic and optimizer-agnostic.
+
+``get_flat_optim_state_dict`` / ``load_flat_optim_state_dict`` convert between an
+optimizer's native (integer-indexed) state dict and a flat, FQN-keyed dict that
+DCP can save and reshard. ``init_optim_state`` materializes optimizer state and
+is a precondition for both.
+
+``init_optim_state`` moved here from ``components/checkpointer/base.py``, which
+is where it lived while hpmesh had no optimizer package: the function is
+optimizer machinery, not checkpoint machinery, and its home is the same one
+upstream puts it in. The checkpointer imports it from here.
+"""
+
+from typing import Any
+
+import torch
+
+__all__ = [
+    "init_optim_state",
+    "get_flat_optim_state_dict",
+    "load_flat_optim_state_dict",
+]
+
+
+def init_optim_state(optimizer: torch.optim.Optimizer) -> None:
+    """Materialize per-parameter optimizer state without changing anything.
+
+    Two callers need this, for the same underlying reason: PyTorch creates Adam's
+    ``exp_avg``/``exp_avg_sq`` lazily, on the first ``step()``.
+
+    * **Saving.** DCP reads whatever tensors the state dict reports. An
+      optimizer that has not stepped reports none, so the checkpoint would carry
+      model weights and no optimizer state -- silently, since the save succeeds.
+    * **Loading.** DCP writes *into* the tensors a state dict reports rather
+      than calling ``load_state_dict``. A fresh optimizer reports none, so there
+      is nothing to write into and the restored run trains with a cold
+      optimizer. ``OptimizersContainer.state_dict`` calls this for that case.
+
+    The step runs with zero gradients and ``lr=0`` so parameters are untouched;
+    the materialized state is then reset, so the first real update is still Adam
+    step 1. Existing gradients and optimizer state are preserved.
+
+    No-op when every parameter that requires a gradient already has state.
+
+    An ``OptimizersContainer`` is itself an ``Optimizer``, so wrapping this in a
+    per-inner-optimizer loop -- which the container does -- is the whole of the
+    multi-optimizer case: the reset branch below is type-gated on Adam, and
+    would be skipped silently if a container were handed in whole.
+    """
+    params = [param for group in optimizer.param_groups for param in group["params"]]
+    missing = [
+        param
+        for param in params
+        if param.requires_grad and not optimizer.state.get(param)
+    ]
+    if not missing:
+        return
+
+    saved_grads = [param.grad for param in params]
+    for param in params:
+        param.grad = None
+    for param in missing:
+        param.grad = torch.zeros_like(param)
+
+    # Some optimizers update parameters from lr alone, independent of the
+    # gradient, so lr is zeroed for the duration of the step.
+    saved_lrs: list[Any] = []
+    for group in optimizer.param_groups:
+        if "lr" not in group:
+            continue
+        saved_lrs.append(group["lr"])
+        group["lr"] = (
+            torch.tensor(0.0) if isinstance(group["lr"], torch.Tensor) else 0.0
+        )
+    optimizer.step()
+
+    # A zero lr leaves parameters alone, but Adam still advances its step count,
+    # and coupled weight decay can move its moments. Reset the state that was
+    # just materialized so the first real update is Adam step 1.
+    if isinstance(optimizer, torch.optim.Adam | torch.optim.AdamW):
+        for param in missing:
+            state = optimizer.state[param]
+            state["step"].zero_()
+            state["exp_avg"].zero_()
+            state["exp_avg_sq"].zero_()
+            if "max_exp_avg_sq" in state:
+                state["max_exp_avg_sq"].zero_()
+
+    for group, lr in zip(
+        (g for g in optimizer.param_groups if "lr" in g), saved_lrs, strict=True
+    ):
+        group["lr"] = lr
+    for param, grad in zip(params, saved_grads, strict=True):
+        param.grad = grad
+
+
+def get_flat_optim_state_dict(optim: torch.optim.Optimizer) -> dict[str, Any]:
+    """Return a flat, FQN-keyed optimizer state dict ready for DCP.
+
+    Output keys are ``state.{fqn}.{state_name}`` and ``param_groups.{fqn}.{key}``.
+    The flat layout avoids the integer ``param_group`` index collisions that break
+    pipeline-parallel checkpoints (multiple chunks reusing index 0).
+
+    The optimizer state must already exist; call ``init_optim_state`` first.
+    """
+    fqn_sd = _optim_state_dict_to_fqn_keys(optim.state_dict())
+
+    flat: dict[str, Any] = {}
+    for fqn, state in fqn_sd["state"].items():
+        _flatten_state_nested(state, f"state.{fqn}", flat)
+    for param_group in fqn_sd["param_groups"]:
+        for fqn in param_group["params"]:
+            for key, value in param_group.items():
+                if key != "params":
+                    flat[f"param_groups.{fqn}.{key}"] = value
+    return flat
+
+
+def load_flat_optim_state_dict(
+    optim: torch.optim.Optimizer, flat_sd: dict[str, Any]
+) -> None:
+    """Load a flat, FQN-keyed optimizer state dict into ``optim``.
+
+    Inverse of ``get_flat_optim_state_dict``. The optimizer state must already
+    exist (it tells us which state tensors to expect); call ``init_optim_state``
+    first. Keys in ``flat_sd`` that this optimizer does not own are ignored, so a
+    single flat dict covering several optimizers can be passed to each of them.
+    """
+    optim.load_state_dict(_unflatten_optim_state_dict(optim, flat_sd))
+
+
+def _optim_state_dict_to_fqn_keys(optim_sd: dict[str, Any]) -> dict[str, Any]:
+    """Re-key an optimizer state dict from integer param ids to FQNs.
+
+    Relies on ``param_names`` in each param group, which PyTorch populates when
+    the optimizer is built with ``(name, param)`` tuples. ``param_names`` is
+    dropped from the result.
+    """
+    id_to_fqn: dict[int, str] = {}
+    new_param_groups: list[dict[str, Any]] = []
+    for param_group in optim_sd["param_groups"]:
+        if "param_names" not in param_group:
+            raise ValueError(
+                "Optimizer must be built with (name, param) tuples so that "
+                "param_names is available for FQN-keyed state dicts."
+            )
+        fqns = param_group["param_names"]
+        for param_id, fqn in zip(param_group["params"], fqns, strict=False):
+            id_to_fqn[param_id] = fqn
+        new_group = {k: v for k, v in param_group.items() if k != "param_names"}
+        new_group["params"] = list(fqns)
+        new_param_groups.append(new_group)
+
+    new_state: dict[str, Any] = {}
+    for param_id, state in optim_sd["state"].items():
+        if param_id not in id_to_fqn:
+            raise KeyError(
+                f"Optimizer state has param id {param_id} that is not in any "
+                f"param group. Known ids: {sorted(id_to_fqn)}"
+            )
+        new_state[id_to_fqn[param_id]] = state
+
+    return {"state": new_state, "param_groups": new_param_groups}
+
+
+def _unflatten_optim_state_dict(
+    optim: torch.optim.Optimizer, flat_sd: dict[str, Any]
+) -> dict[str, Any]:
+    """Rebuild an integer-keyed optimizer state dict from a flat, FQN-keyed one.
+
+    Walks the live optimizer's param groups to recover the FQN order and the set
+    of state tensors to expect, then pulls matching values out of ``flat_sd``.
+    """
+    state: dict[int, dict[str, Any]] = {}
+    param_groups: list[dict[str, Any]] = []
+    param_id = 0
+    for param_group in optim.param_groups:
+        fqns = param_group["param_names"]
+        params = param_group["params"]
+        ids: list[int] = []
+        for fqn, param in zip(fqns, params, strict=False):
+            ids.append(param_id)
+            if param in optim.state:
+                param_state: dict[str, Any] = {}
+                for state_name in optim.state[param]:
+                    flat_key = f"state.{fqn}.{state_name}"
+                    if flat_key in flat_sd:
+                        param_state[state_name] = flat_sd[flat_key]
+                    else:
+                        # State value is itself a nested dict (e.g. Shampoo).
+                        nested = _reconstruct_nested(flat_sd, flat_key)
+                        if nested:
+                            param_state[state_name] = nested
+                if param_state:
+                    state[param_id] = param_state
+            param_id += 1
+
+        if not fqns:
+            param_groups.append({"params": ids})
+            continue
+        new_group: dict[str, Any] = {"params": ids}
+        for key in param_group:
+            if key in ("params", "param_names"):
+                continue
+            flat_key = f"param_groups.{fqns[0]}.{key}"
+            if flat_key not in flat_sd:
+                raise KeyError(
+                    f"Optimizer param group key {key!r} not found in checkpoint "
+                    f"(looked up via param {fqns[0]!r})."
+                )
+            new_group[key] = flat_sd[flat_key]
+        param_groups.append(new_group)
+
+    return {"state": state, "param_groups": param_groups}
+
+
+def _flatten_state_nested(
+    state: dict[str, Any], prefix: str, out: dict[str, Any]
+) -> None:
+    """Flatten a (possibly nested) per-param state dict into dotted keys."""
+    for key, value in state.items():
+        flat_key = f"{prefix}.{key}"
+        if isinstance(value, dict):
+            _flatten_state_nested(value, flat_key, out)
+        else:
+            out[flat_key] = value
+
+
+def _reconstruct_nested(flat_sd: dict[str, Any], prefix: str) -> dict[str, Any]:
+    """Rebuild the nested dict stored under ``prefix`` in a flat state dict."""
+    result: dict[str, Any] = {}
+    prefix_dot = prefix + "."
+    for key, value in flat_sd.items():
+        if not key.startswith(prefix_dot):
+            continue
+        current = result
+        parts = key[len(prefix_dot) :].split(".")
+        for part in parts[:-1]:
+            current = current.setdefault(part, {})
+        current[parts[-1]] = value
+    return result

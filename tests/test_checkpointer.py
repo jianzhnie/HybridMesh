@@ -22,11 +22,10 @@ from hpmesh.components.checkpointer import (
     CheckpointManager,
     CheckpointStorage,
     ModelWrapper,
-    OptimizerWrapper,
     canonical_fqn,
-    init_optim_state,
 )
 from hpmesh.components.checkpointer.dcp import _FilesystemCheckpointStorage
+from hpmesh.components.optimizer import OptimizerWrapper, init_optim_state
 from hpmesh.trainer.config import CheckpointConfig as Config
 
 # -- canonical_fqn ------------------------------------------------------------
@@ -306,6 +305,16 @@ def test_optimizer_wrapper_restores_into_a_cold_optimizer() -> None:
             assert torch.equal(restored[param_id][key], value)
 
 
+def _fqns(parts: list[nn.Module]) -> list[str]:
+    """The parameter FQNs of ``parts``, in the order the optimizer sees them.
+
+    The trainer builds its optimizer over ``chain(*(p.parameters() for p in
+    parts))``, so this is the same list, read off the models rather than
+    reconstructed.
+    """
+    return [name for part in parts for name, _ in part.named_parameters()]
+
+
 class _Stage(nn.Module):
     """One pipeline stage's chunk, wrapping a single projection."""
 
@@ -323,7 +332,7 @@ def _stepped(stage: nn.Module) -> tuple[torch.optim.Optimizer, OptimizerWrapper]
     optimizer.zero_grad()
     stage(torch.ones(2, 4)).sum().backward()
     optimizer.step()
-    return optimizer, OptimizerWrapper(optimizer, model_parts=[stage])
+    return optimizer, OptimizerWrapper(optimizer, fqn_keying=True, fqns=_fqns([stage]))
 
 
 def test_optimizer_wrapper_fqn_keying_round_trip() -> None:
@@ -353,7 +362,9 @@ def test_optimizer_wrapper_fqn_keying_round_trip() -> None:
 
     # A fresh optimizer is what a resumed run builds.
     fresh = torch.optim.AdamW(list(stage_a.parameters()), lr=0.1)
-    OptimizerWrapper(fresh, model_parts=[stage_a]).load_state_dict(state_a)
+    OptimizerWrapper(fresh, fqn_keying=True, fqns=_fqns([stage_a])).load_state_dict(
+        state_a
+    )
 
     restored = fresh.state_dict()["state"]
     expected = optimizer_a.state_dict()["state"]
