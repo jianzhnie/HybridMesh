@@ -242,7 +242,9 @@ class FirstFitPackingConfig:
 
     dataset: DatasetConfig
     num_packing_bins: int = 8
-    """Candidate rows kept open; more bins can reduce padding but buffer more samples."""
+    """Candidate rows kept open.
+
+    More bins can reduce padding, but buffer more samples."""
 
     def __post_init__(self) -> None:
         if self.num_packing_bins <= 0:
