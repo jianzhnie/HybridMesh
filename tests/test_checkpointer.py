@@ -27,9 +27,7 @@ from hpmesh.components.checkpointer import (
     init_optim_state,
 )
 from hpmesh.components.checkpointer.dcp import _FilesystemCheckpointStorage
-
-Config = CheckpointManager.Config
-
+from hpmesh.trainer.config import CheckpointConfig as Config
 
 # -- canonical_fqn ------------------------------------------------------------
 
@@ -304,6 +302,63 @@ def test_optimizer_wrapper_restores_into_a_cold_optimizer() -> None:
     restored = target_optimizer.state_dict()["state"]
     assert restored.keys() == source_state["state"].keys()
     for param_id, state in source_state["state"].items():
+        for key, value in state.items():
+            assert torch.equal(restored[param_id][key], value)
+
+
+class _Stage(nn.Module):
+    """One pipeline stage's chunk, wrapping a single projection."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.proj = nn.Linear(4, 4)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return self.proj(x)
+
+
+def _stepped(stage: nn.Module) -> tuple[torch.optim.Optimizer, OptimizerWrapper]:
+    params = list(stage.parameters())
+    optimizer = torch.optim.AdamW(params, lr=0.1)
+    optimizer.zero_grad()
+    stage(torch.ones(2, 4)).sum().backward()
+    optimizer.step()
+    return optimizer, OptimizerWrapper(optimizer, model_parts=[stage])
+
+
+def test_optimizer_wrapper_fqn_keying_round_trip() -> None:
+    """The PP mode: state keyed by parameter FQN, not positional index.
+
+    The FQN is the parameters' path within the stage, not within the whole
+    model: a stage is a deep copy with the other stages' modules removed, so
+    its own path is the same path the unsplit model would have used. Two
+    stages' state therefore lands under two distinct keys in one shared
+    checkpoint, where the positional format would have collided.
+    """
+    torch.manual_seed(0)
+    stage_a = _Stage()
+    stage_b = _Stage()
+    stage_a.proj.weight.data.fill_(1.0)
+    stage_b.proj.weight.data.fill_(2.0)
+
+    optimizer_a, wrapper_a = _stepped(stage_a)
+    _, wrapper_b = _stepped(stage_b)
+
+    # Same FQNs on both sides: the key disambiguates two stages, it does not
+    # make the two stages' parameters distinct.
+    state_a = wrapper_a.state_dict()
+    state_b = wrapper_b.state_dict()
+    assert set(state_a["state"]) == {"proj.weight", "proj.bias"}
+    assert set(state_b["state"]) == set(state_a["state"])
+
+    # A fresh optimizer is what a resumed run builds.
+    fresh = torch.optim.AdamW(list(stage_a.parameters()), lr=0.1)
+    OptimizerWrapper(fresh, model_parts=[stage_a]).load_state_dict(state_a)
+
+    restored = fresh.state_dict()["state"]
+    expected = optimizer_a.state_dict()["state"]
+    assert restored.keys() == expected.keys()
+    for param_id, state in expected.items():
         for key, value in state.items():
             assert torch.equal(restored[param_id][key], value)
 

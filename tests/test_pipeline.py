@@ -9,10 +9,10 @@ chained forward can be checked without any p2p.
 
 from __future__ import annotations
 
+import pytest
 import torch
 import torch.distributed as dist
 import torch.nn as nn
-import pytest
 from torch.distributed.device_mesh import init_device_mesh
 
 from hpmesh.models.hf_wrapper import HFTransformerModel, build_model_config

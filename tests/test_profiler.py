@@ -31,10 +31,8 @@ from hpmesh.components.profiler import (
     Profiler,
     _caused_by_oom,
 )
+from hpmesh.trainer.config import ProfilerConfig as Config
 from hpmesh.utils.monitoring import record_memory_history
-
-Config = Profiler.Config
-
 
 # -- config -------------------------------------------------------------------
 

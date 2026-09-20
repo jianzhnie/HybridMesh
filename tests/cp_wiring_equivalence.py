@@ -55,9 +55,9 @@ from hpmesh.parallel.context_parallel.cp_kernel import CPFlexKernel
 from hpmesh.parallel.cp_ep import apply_cp_ep
 from hpmesh.trainer import (
     HybridMeshConfig,
-    ModelArguments,
-    ParallelArguments,
-    TrainingArguments,
+    ModelConfig,
+    ParallelConfig,
+    TrainingConfig,
 )
 
 SEQ = 256  # torch's CP BlockMask path requires Q_LEN % (cp * 128) == 0
@@ -70,7 +70,7 @@ TOL = 1e-9
 
 def _cfg(load_balancer: str | None) -> HybridMeshConfig:
     return HybridMeshConfig(
-        model=ModelArguments(
+        model=ModelConfig(
             model_name_or_path="qwen3",
             vocab_size=VOCAB,
             hidden_size=64,
@@ -79,12 +79,12 @@ def _cfg(load_balancer: str | None) -> HybridMeshConfig:
             num_attention_heads=4,
             num_key_value_heads=4,
         ),
-        parallel=ParallelArguments(
+        parallel=ParallelConfig(
             context_parallel_degree=2,
             context_parallel_load_balancer=load_balancer,
             backend="gloo",
         ),
-        training=TrainingArguments(max_seq_len=SEQ, steps=1),
+        training=TrainingConfig(max_seq_len=SEQ, steps=1),
     )
 
 

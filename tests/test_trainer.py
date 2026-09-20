@@ -45,6 +45,7 @@ from hpmesh.parallel.collectives import (
     dist_sum,
     dist_sum_tensor,
 )
+from hpmesh.trainer.config import CheckpointConfig
 from hpmesh.trainer.trainer import Trainer
 
 # -- losses -------------------------------------------------------------------
@@ -266,7 +267,7 @@ def _manager(
     # Tests about retention pass keep_latest_k explicitly.
     config = {"keep_latest_k": 0, **overrides}
     return CheckpointManager(
-        CheckpointManager.Config(enable=True, folder="checkpoint", **config),
+        CheckpointConfig(enable=True, folder="checkpoint", **config),
         model_parts=[model],
         optimizer=optimizer,
         states={TRAIN_STATE: state},
@@ -533,9 +534,7 @@ def test_checkpoint_carries_a_dataloader_read_position(tmp_path) -> None:
     )
 
     manager = CheckpointManager(
-        CheckpointManager.Config(
-            enable=True, folder="checkpoint", keep_latest_k=0, interval=1
-        ),
+        CheckpointConfig(enable=True, folder="checkpoint", keep_latest_k=0, interval=1),
         model_parts=[model],
         optimizer=optimizer,
         states={TRAIN_STATE: _TrainState(), DATALOADER: loader},
@@ -553,9 +552,7 @@ def test_checkpoint_carries_a_dataloader_read_position(tmp_path) -> None:
     )
     fresh_model, fresh_optimizer = _model_and_optimizer()
     resumed = CheckpointManager(
-        CheckpointManager.Config(
-            enable=True, folder="checkpoint", keep_latest_k=0, interval=1
-        ),
+        CheckpointConfig(enable=True, folder="checkpoint", keep_latest_k=0, interval=1),
         model_parts=[fresh_model],
         optimizer=fresh_optimizer,
         states={TRAIN_STATE: _TrainState(), DATALOADER: resumed_loader},
