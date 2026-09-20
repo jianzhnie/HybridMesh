@@ -14,8 +14,8 @@ changed:
   autograd-aware ``all_reduce`` (see its ``_reduce_token_partials``) instead of
   ``spmd.redistribute``. The arithmetic is the same: an all-reduce forward with
   an all-reduce backward.
-* ``MicrobatchWiseLoadBalanceLoss`` is ported. It needs ``aux_loss.py``'s
-  injection machinery, which is now in place.
+* ``MicrobatchWiseLoadBalanceLoss`` is ported and wired: the router runs it
+  on each training forward through its ``aux_loss`` slot, matching upstream.
 
 Shape legend, scoped to this file: ``T`` = tokens, ``D`` = model dimension,
 ``E`` = experts, ``K`` = experts per token (top-k), ``e`` = local experts under
@@ -85,6 +85,10 @@ class TokenChoiceTopKRouter(nn.Module):
         route_norm: renormalize the selected K scores to sum to 1.
         route_scale: multiply the final scores, e.g. DeepSeek-V3's
             ``routed_scaling_factor``.
+        aux_loss: an optional ``AuxLoss`` (e.g.
+            ``MicrobatchWiseLoadBalanceLoss``) run on the scores each training
+            forward; its gradient is injected on the top-k scores' backward
+            path. ``None`` disables it.
     """
 
     def __init__(
@@ -96,6 +100,7 @@ class TokenChoiceTopKRouter(nn.Module):
         score_func: Literal["softmax", "sigmoid", "sqrtsoftplus"] = "sigmoid",
         route_norm: bool = False,
         route_scale: float = 1.0,
+        aux_loss: AuxLoss | None = None,
     ) -> None:
         super().__init__()
         self.gate = RouterGateLinear(dim, num_experts)
@@ -104,6 +109,7 @@ class TokenChoiceTopKRouter(nn.Module):
         self.score_func = score_func
         self.route_norm = route_norm
         self.route_scale = route_scale
+        self.aux_loss = aux_loss
 
     def _select_experts(
         self,
@@ -169,6 +175,17 @@ class TokenChoiceTopKRouter(nn.Module):
             topk_expert_ids_TK,
             True,
         )
+
+        # The aux loss reads the pre-topk scores and the routing map; its
+        # gradient rides back on the top-k scores (identity forward, so the
+        # routing arithmetic is unchanged). Training only: an eval forward has
+        # no backward to inject into, and no step denominator is set there.
+        if self.training and self.aux_loss is not None:
+            topk_scores_TK = self.aux_loss(
+                scores_TE,
+                routing_map_TE,
+                carrier=topk_scores_TK,
+            )
 
         return topk_scores_TK, topk_expert_ids_TK, routing_map_TE
 

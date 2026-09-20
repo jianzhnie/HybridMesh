@@ -6,8 +6,9 @@ sit outermost. Each ``apply_*`` is a no-op when its degree is 1, so the same cal
 runs from a single device up to a full hybrid mesh.
 
 On provenance: this is the *orchestration* half of torchtitan's
-``parallelize_hf_transformers``. The other half was three things hpmesh
-deliberately does not do, and dropping them is a decision, not an oversight:
+``parallelize_hf_transformers``. The other half was three things; the first
+two hpmesh deliberately does not do, and dropping them is a decision, not an
+oversight:
 
 * **Untying ``tok_embeddings`` from ``lm_head``.** torchtitan un-ties them
   because its FSDP cannot shard a parameter shared by two FSDP groups. hpmesh
@@ -19,7 +20,10 @@ deliberately does not do, and dropping them is a decision, not an oversight:
 * **Converting modules to a ``Module`` protocol.** hpmesh has none, and no
   on-the-fly sharding-config declarations either -- the TP plan lives as plain
   data in the model registry instead (see docs/hybridmesh_design.md, SEAM 1).
-* **Swapping in a native MoE.** hpmesh ships no MoE implementation.
+* **Swapping in a native MoE.** No longer true: ``apply_cp_ep`` swaps HF MoE
+  blocks for the ``models/common`` MoE stack when ``ep > 1`` (see
+  ``parallel/ep.py``). The swap moves weights rather than re-initializing
+  them, so the model still trains from HF's initialization.
 """
 
 from __future__ import annotations
@@ -72,8 +76,26 @@ def parallelize_hf_transformers(
     """
     _reject_pp(parallel_dims)
 
+    # The EP group lives on the sparse mesh, not the dense (dp, cp, tp) mesh
+    # the apply_* functions are handed, so it is resolved here from
+    # parallel_dims and passed down explicitly.
+    ep_group = None
+    if cfg.ep > 1:
+        if parallel_dims is None:
+            raise ValueError(
+                f"ep={cfg.ep} needs a process group, but this run is "
+                "single-process (parallel_dims is None). EP requires "
+                "world_size > 1."
+            )
+        ep_mesh = parallel_dims.get_optional_mesh("ep")
+        if ep_mesh is None:
+            raise ValueError(
+                f"ep={cfg.ep} but parallel_dims has no multi-rank 'ep' axis."
+            )
+        ep_group = ep_mesh.get_group()
+
     model = apply_tp(model, mesh, cfg)
-    model = apply_cp_ep(model, mesh, cfg)
+    model = apply_cp_ep(model, mesh, cfg, ep_group=ep_group)
 
     if cfg.compile:
         model = torch.compile(model)

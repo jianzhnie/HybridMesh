@@ -267,21 +267,57 @@ def _apply_cp(model: nn.Module, mesh: DeviceMesh, cfg: HybridMeshConfig) -> None
     logger.info("Applied CP (kv all-gather) with degree %d", cfg.cp)
 
 
+def _apply_ep(
+    model: nn.Module, cfg: HybridMeshConfig, *, ep_group: dist.ProcessGroup | None
+) -> None:
+    """Swap every HF MoE block for the EP-capable hpmesh MoE.
+
+    The swap moves weights, so it must happen before FSDP wraps the model.
+    With a multi-rank group each rank keeps ``num_experts / ep`` of them and
+    tokens cross ranks by all-to-all; the two are orthogonal to the CP
+    attention kernel, so CP and EP compose freely.
+    """
+    # Lazy: ep.py imports models/common, and models/common imports back into
+    # parallel/spmd_types -- a module-level import here would close the cycle
+    # when hpmesh.models is imported first.
+    from .ep import swap_hf_moe_blocks
+
+    if ep_group is None or ep_group.size() != cfg.ep:
+        raise ValueError(
+            f"ep={cfg.ep} requires an EP process group of that size, got "
+            f"{None if ep_group is None else ep_group.size()}. The group comes "
+            "from the sparse mesh's 'ep' axis (parallelize_hf_transformers "
+            "resolves it from parallel_dims)."
+        )
+    swapped = swap_hf_moe_blocks(model, ep_group=ep_group)
+    logger.info(
+        "Applied EP (all-to-all dispatch): swapped %d MoE blocks, degree %d",
+        swapped,
+        cfg.ep,
+    )
+
+
 def apply_cp_ep(
-    model: nn.Module, mesh: DeviceMesh | None, cfg: HybridMeshConfig
+    model: nn.Module,
+    mesh: DeviceMesh | None,
+    cfg: HybridMeshConfig,
+    *,
+    ep_group: dist.ProcessGroup | None = None,
 ) -> nn.Module:
     """Wire CP/EP onto a model.
 
     CP is wired: every decoder layer's attention module gets a
     :class:`CPFlexKernel` that all-gathers K/V across the CP axis, and the
     model records the CP mesh so its forward Q-shards the BlockMask to match.
-    EP has no dispatcher yet and still raises.
+    EP is wired: every HF MoE block is swapped for the grouped-experts +
+    all-to-all dispatcher stack, with experts sharded over ``ep_group``. The
+    two touch disjoint submodules (attention vs. MLP), so cp>1 and ep>1
+    compose.
     """
     if cfg.cp == 1 and cfg.ep == 1:
         return model
     if cfg.ep > 1:
-        raise NotImplementedError(
-            "EP is not wired: there is no all-to-all token dispatcher yet. Set ep=1."
-        )
-    _apply_cp(model, mesh, cfg)
+        _apply_ep(model, cfg, ep_group=ep_group)
+    if cfg.cp > 1:
+        _apply_cp(model, mesh, cfg)
     return model
