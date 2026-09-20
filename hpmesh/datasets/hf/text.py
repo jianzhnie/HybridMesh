@@ -6,9 +6,9 @@
 
 """Text dataset recipes: plain-text and single-turn chat.
 
-Vendored from torchtitan ``hf_datasets/text_datasets.py``. What was dropped is
-``Configurable`` -- a processor is constructed with its build context and takes
-the few per-dataset knobs (``text_fn``, ``messages_fn``) as keyword arguments.
+Vendored from torchtitan ``hf_datasets/text_datasets.py``. A processor is
+constructed with its build context and takes the few per-dataset knobs
+(``text_fn``, ``messages_fn``) as keyword arguments.
 
 ``ChatProcessor`` is the one place in the data layer that can fail on a whole
 dataset rather than a sample. Locating the prompt/response boundary by

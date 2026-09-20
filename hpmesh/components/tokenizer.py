@@ -6,10 +6,10 @@
 
 """Tokenizer wrappers: HF special-token inference, chat templates, VLM tokens.
 
-Vendored from torchtitan ``components/tokenizer.py``. What was dropped is the
-``Configurable`` hierarchy -- hpmesh has no component protocol, so the special
-tokens a ``MultiModalTokenizer`` needs are plain keyword arguments. What was
-kept, because the numerics depend on it, is the whole loading strategy:
+Vendored from torchtitan ``components/tokenizer.py``. The special tokens a
+``MultiModalTokenizer`` needs are plain keyword arguments rather than a nested
+config. What was kept, because the numerics depend on it, is the whole loading
+strategy:
 ``tokenizer.json`` before ``vocab.json``/``vocab.txt``, BPE before WordLevel,
 ``added_tokens_decoder`` merged into the vocabulary, and ``encode`` suppressing
 the tokenizer's own special tokens so that ``add_bos``/``add_eos`` are the only

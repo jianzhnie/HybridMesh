@@ -50,7 +50,6 @@ from .base import (
     OPTIMIZER,
     TRAIN_STATE,
     BaseCheckpointManager,
-    BaseCheckpointManagerConfig,
     CheckpointStorage,
     ModelWrapper,
     OptimizerWrapper,
@@ -62,7 +61,6 @@ from .utils import canonical_fqn
 __all__ = [
     "AsyncMode",
     "BaseCheckpointManager",
-    "BaseCheckpointManagerConfig",
     "CheckpointManager",
     "CheckpointStorage",
     "DATALOADER",

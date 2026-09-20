@@ -18,17 +18,15 @@ exit snapshot is what answers that.
 
 Departures from torchtitan, each a subtraction or a device-portability fix:
 
-* **No ``Configurable`` / no ``structured_logger``.** ``Profiler.Config`` is a
-  plain dataclass, as with the checkpointer and metrics configs. The
-  ``log_trace_span`` wrappers around ``profiler.step()`` go with the structured
-  logger, which hpmesh does not have; a profiler step is already the finest
-  thing the trace shows.
+* **No ``structured_logger``.** The ``log_trace_span`` wrappers around
+  ``profiler.step()`` go with it, which hpmesh does not have; a profiler step is
+  already the finest thing the trace shows.
 
 * **No ``active()`` builder.** torchtitan splits ``build`` (returns a configured
-  profiler) from ``active`` (supplies the runtime step and folder), because its
-  ``Configurable`` protocol forces a no-argument build at config time. hpmesh
-  constructs the ``Profiler`` where the trainer knows both, so they collapse
-  into the constructor.
+  profiler) from ``active`` (supplies the runtime step and folder), because a
+  config there has to be buildable with no arguments. hpmesh constructs the
+  ``Profiler`` where the trainer knows both, so they collapse into the
+  constructor.
 
 * **No CUDA-graph annotations.** Those annotate a trace with the module FQNs
   captured inside ``torch.cuda.graph`` regions. hpmesh does not capture CUDA
@@ -52,9 +50,12 @@ from __future__ import annotations
 import os
 import pickle
 import time
-from dataclasses import dataclass
+from typing import TYPE_CHECKING
 
 import torch
+
+if TYPE_CHECKING:
+    from ..trainer.config import ProfilerConfig
 
 from ..utils.device import device_type
 from ..utils.logger_utils import get_distributed_rank, get_logger
@@ -66,11 +67,11 @@ __all__ = ["MemoryProfiler", "Profiler"]
 
 # Directory layout, kept as plain format strings rather than derived at the
 # point of use so the trace/snapshot tree is legible in one place.
-PROFILE_DIR = "profiling/traces"  # Profiler.Config.save_traces_folder default
+PROFILE_DIR = "profiling/traces"  # the ProfilerConfig default
 PROFILE_ITER_DIR = "iteration_{step}"  # PROFILE_DIR/{PROFILE_ITER_DIR}
 PROFILE_FILE = "rank{rank}_trace.json.gz"  # .../{PROFILE_FILE}
 
-MEMORY_DIR = "profiling/memory_snapshot"  # Config.save_memory_snapshot_folder
+MEMORY_DIR = "profiling/memory_snapshot"  # the ProfilerConfig default
 MEMORY_STEP_DIR = "step_{step:012d}"  # MEMORY_DIR/{MEMORY_STEP_DIR}
 MEMORY_EXIT_DIR = "step_{step:012d}_exit"  # the OOM variant of the same
 MEMORY_FILE = "{rank:06d}_step_{step}.pickle"
@@ -163,7 +164,7 @@ class Profiler:
                 prof.step()
 
     Args:
-        config: a :class:`Profiler.Config` instance.
+        config: a :class:`ProfilerConfig` instance.
         global_step: the step profiling begins at. When resuming from a
             checkpoint this is the loaded step, so trace directories are named
             for where the run actually is (``iteration_100``, not
@@ -171,65 +172,9 @@ class Profiler:
         base_folder: root directory for both trace and snapshot output.
     """
 
-    @dataclass(kw_only=True)
-    class Config:
-        enable_profiling: bool = False
-        """Whether to collect Kineto traces."""
-
-        save_traces_folder: str = PROFILE_DIR
-        """Trace location, relative to ``base_folder``."""
-
-        profile_freq: int = 10
-        """How often to collect a trace, in iterations."""
-
-        profiler_repeat: int | None = None
-        """How many times to repeat the profiling cycle. ``None`` repeats
-        forever, which is ``torch.profiler.schedule``'s own default."""
-
-        profiler_skip_first: int | None = None
-        """How many iterations to skip before the schedule starts."""
-
-        profiler_skip_first_wait: int | None = None
-        """How many waits to skip at the start of the first cycle."""
-
-        profiler_active: int = 1
-        """Iterations the profiler is active for, per cycle."""
-
-        profiler_warmup: int = 3
-        """Warmup iterations before the active ones in each cycle.
-
-        Warmup discards its results, so it is what keeps the first active
-        iteration from being dominated by lazy initialization.
-        """
-
-        enable_memory_snapshot: bool = False
-        """Whether to write allocator memory snapshots."""
-
-        memory_snapshot_freq: int | None = None
-        """Snapshot frequency, in iterations. Defaults to ``profile_freq``."""
-
-        save_memory_snapshot_folder: str = MEMORY_DIR
-        """Snapshot location, relative to ``base_folder``."""
-
-        memory_snapshot_max_entries: int = 1_000_000
-        """Alloc/free events kept per snapshot.
-
-        The allocator history is a ring buffer, so this bounds how far back a
-        snapshot can see, and with it the dump's size and cost.
-        """
-
-        def __post_init__(self) -> None:
-            if self.enable_profiling and self.profile_freq < (
-                self.profiler_warmup + self.profiler_active
-            ):
-                raise ValueError(
-                    "profiler.profile_freq must be greater than or equal to "
-                    "profiler_warmup + profiler_active."
-                )
-
     def __init__(
         self,
-        config: Config,
+        config: ProfilerConfig,
         *,
         global_step: int = 0,
         base_folder: str = "",

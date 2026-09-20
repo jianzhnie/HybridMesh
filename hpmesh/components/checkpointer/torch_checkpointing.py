@@ -29,8 +29,8 @@ exists here; the backend still emits its own metrics on the
 ``torch_checkpointing`` logger, which is re-leveled in the subprocess the same
 way torchtitan does it.
 
-**No ``Configurable`` and no tyro.** The config is a plain dataclass (see
-``base.py``), and ``purge_exempt`` is a plain callable.
+**No tyro.** The config is a plain dataclass (see ``base.py``), and
+``purge_exempt`` is a plain callable.
 
 Reachability note, stated plainly because it is easy to mistake for working code:
 nothing in hpmesh constructs this manager yet. It is here because it is the third
@@ -50,17 +50,20 @@ from collections.abc import Callable
 from concurrent.futures import Future
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import torch
 
 from ...utils import filesystem
 from ...utils.gc import GarbageCollection
+
+if TYPE_CHECKING:
+    from ...trainer.config import TorchCheckpointingConfig
+
 from .base import (
     MODEL,
     OPTIMIZER,
     BaseCheckpointManager,
-    BaseCheckpointManagerConfig,
     ModelWrapper,
     purge_thread,
 )
@@ -323,13 +326,9 @@ class TorchCheckpointingManager(BaseCheckpointManager):
             programmatically.
     """
 
-    @dataclass(kw_only=True, slots=True)
-    class Config(BaseCheckpointManagerConfig):
-        pass
-
     def __init__(
         self,
-        config: Config,
+        config: TorchCheckpointingConfig,
         *,
         model_parts: list[Any],
         optimizer: Any,

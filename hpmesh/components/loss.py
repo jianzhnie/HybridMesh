@@ -6,11 +6,11 @@
 
 """Loss functions: plain next-token CE, and its vocab-parallel form.
 
-Vendored from torchtitan ``components/loss.py``. What was dropped is the
-``Configurable`` hierarchy (``BaseLoss`` / ``CrossEntropyLoss`` / ``MSELoss``)
-and the ``spmd.assert_type`` annotations -- hpmesh configures by argument and
-checks shapes, not SPMD types. What was kept is the arithmetic, unchanged, plus
-``IGNORE_INDEX`` and ``next_token_targets``.
+Vendored from torchtitan ``components/loss.py``. The functions are called
+directly rather than through the ``BaseLoss`` / ``CrossEntropyLoss`` /
+``MSELoss`` hierarchy, and the ``spmd.assert_type`` annotations are gone --
+hpmesh configures by argument and checks shapes, not SPMD types. What was kept
+is the arithmetic, unchanged, plus ``IGNORE_INDEX`` and ``next_token_targets``.
 
 Two entry points, and the difference between them is worth stating plainly:
 

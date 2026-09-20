@@ -6,9 +6,9 @@
 
 """Conversion from dataset rows to trainer batches.
 
-Vendored from torchtitan ``components/data/collators.py``. What was dropped is
-``Configurable`` -- a collator is constructed directly with the build context
-and reads what it needs from there. The padding rules are unchanged: padded
+Vendored from torchtitan ``components/data/collators.py``. A collator is
+constructed directly with the build context and reads what it needs from there.
+The padding rules are unchanged: padded
 positions are `arange % max_context_length`, not zeros, so a padded row looks
 like a fresh document rather than a continuation of the previous one.
 """

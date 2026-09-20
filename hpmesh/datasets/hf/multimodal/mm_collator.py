@@ -6,10 +6,10 @@
 
 """Multimodal collator for VLM datasets.
 
-Vendored from torchtitan ``hf_datasets/multimodal/mm_collator.py``. What was
-dropped is ``Configurable``: the collator's knobs -- patch geometry, patch
-order, the media budget -- are plain keyword arguments, and the build context
-still supplies the tokenizer and the token-batch size.
+Vendored from torchtitan ``hf_datasets/multimodal/mm_collator.py``. The
+collator's knobs -- patch geometry, patch order, the media budget -- are plain
+keyword arguments, and the build context supplies the tokenizer and the
+token-batch size.
 
 ``build_mrope_positions`` is the one option that can produce a silently wrong
 tensor rather than an error: MRoPE coordinates are laid out in block patch

@@ -7,21 +7,22 @@
 """The learning-rate schedule: linear warmup, stable phase, then decay.
 
 Vendored from torchtitan ``components/optimizer/lr_scheduler.py``. Two things
-were dropped, both consequences of hpmesh having one flat optimizer:
+were dropped:
 
 * **The container.** Upstream ``LRSchedulersContainer`` wraps a list of
   schedulers, one per optimizer in an ``OptimizersContainer``, and re-derives
   each one's lr from its own ``base_lrs`` on load. hpmesh builds a single
   ``torch.optim.AdamW`` in the trainer, so there is exactly one scheduler and
   the list indirection carries nothing.
-* **``Configurable``.** ``Config`` is a plain dataclass whose ``build()`` takes
-  the optimizer, the same shape as the checkpointer's and the metrics
-  processor's configs.
+* **The config.** The knobs moved to ``hpmesh.trainer.config`` with every other
+  config in the package (see that module's docstring). What is left here is the
+  curve and the ``LambdaLR`` that steps it.
 
 What is kept is the schedule itself, arithmetic unchanged: a Warmup-Stable-Decay
-(WSD) curve (https://arxiv.org/abs/2404.06395) where the stable phase is
-implicit -- with no ``decay_ratio`` the decay starts the moment warmup ends,
-which is the plain warmup-plus-decay curve.
+(WSD) curve (https://arxiv.org/abs/2404.06395). ``decay_ratio`` decides how much
+of the run the decay covers and whatever is left after warmup is the stable
+phase, so the shape is warmup -> stable -> decay with ``decay_ratio=0`` (the
+default) degenerating to warmup and then a constant rate.
 
 **Checkpoint behavior.** ``state_dict`` is one integer. A LambdaLR recomputes
 its lr from the optimizer's ``base_lrs`` and the shared lambda, so restoring
@@ -32,13 +33,10 @@ many schedulers exist, which is what upstream relies on for resharding.
 
 from __future__ import annotations
 
-import functools
 import math
 from collections.abc import Callable
-from dataclasses import dataclass, field
-from typing import Any, Literal
+from typing import Any
 
-import torch
 from torch.distributed.checkpoint.stateful import Stateful
 from torch.optim import Optimizer
 from torch.optim.lr_scheduler import LambdaLR
@@ -152,123 +150,3 @@ class LRScheduler(Stateful):
         self.scheduler.last_epoch = last_epoch
         self.scheduler._step_count = last_epoch + 1
         self.scheduler._last_lr = self.scheduler.get_lr()
-
-
-@dataclass(kw_only=True)
-class LRSchedulerConfig:
-    """The WSD schedule's knobs.
-
-    ``decay_ratio`` is the switch that matters. At its default of 0 there is no
-    decay phase, so the factor is 1.0 throughout (after any warmup) and the
-    learning rate is exactly the one the optimizer was built with -- which is
-    what makes the default run comparable to every measurement taken at a
-    constant lr. Setting it to a fraction appends a decay covering that fraction
-    of ``total_steps``; whatever is left over after warmup and decay is the
-    stable phase, at the peak learning rate.
-    """
-
-    warmup_steps: int = field(
-        default=0,
-        metadata={"help": "Steps to linearly ramp the learning rate from 0."},
-    )
-    total_steps: int | None = field(
-        default=None,
-        metadata={
-            "help": "Length of the schedule. Defaults to --steps. Set it to "
-            "decouple the curve from the run length, so a short debugging run "
-            "sees the same lrs the full run would."
-        },
-    )
-    decay_ratio: float = field(
-        default=0.0,
-        metadata={
-            "help": "Fraction of total_steps spent decaying the learning rate. "
-            "0 (the default) never decays, holding the rate at its peak. A "
-            "value below 1 leaves the intervening steps at the peak rate "
-            "(WSD)."
-        },
-    )
-    decay_type: Literal["linear", "sqrt", "cosine"] = field(
-        default="linear",
-        metadata={"help": "Shape of the decay phase. Ignored when decay_ratio=0."},
-    )
-    min_lr_factor: float = field(
-        default=0.0,
-        metadata={
-            "help": "Floor of the decay, as a fraction of the base learning "
-            "rate. 0 decays all the way to zero. Ignored when decay_ratio=0."
-        },
-    )
-
-    def __post_init__(self) -> None:
-        if self.warmup_steps < 0:
-            raise ValueError(f"warmup_steps must be >= 0, got {self.warmup_steps}")
-        if self.total_steps is not None and self.total_steps < 1:
-            raise ValueError(f"total_steps must be >= 1, got {self.total_steps}")
-        if not 0.0 <= self.decay_ratio <= 1.0:
-            raise ValueError(
-                f"decay_ratio must be in [0, 1], got {self.decay_ratio}"
-            )
-        if not 0.0 <= self.min_lr_factor < 1.0:
-            raise ValueError(
-                f"min_lr_factor must be in [0, 1), got {self.min_lr_factor}"
-            )
-
-    def build(self, *, optimizer: Optimizer, training_steps: int) -> LRScheduler:
-        """Build the scheduler this configuration describes.
-
-        ``training_steps`` is the run's actual length; ``total_steps`` overrides
-        it for the curve only. The two are validated against each other rather
-        than clamped: a schedule shorter than the run would put the last steps
-        past its end, where the decay factor runs off the bottom of the curve
-        and turns the learning rate negative -- which ascends the loss instead of
-        failing.
-        """
-        total_steps = (
-            self.total_steps if self.total_steps is not None else training_steps
-        )
-        if total_steps < training_steps:
-            raise ValueError(
-                f"lr_scheduler.total_steps ({total_steps}) is shorter than the run "
-                f"({training_steps} steps). The decay would run past its end and "
-                "produce a negative learning rate. Raise total_steps, or drop it "
-                "to use the run length."
-            )
-
-        warmup_steps = self.warmup_steps
-        if warmup_steps > total_steps:
-            logger.warning(
-                "lr_scheduler.warmup_steps (%d) exceeds total_steps (%d); "
-                "clamping the warmup to the whole schedule.",
-                warmup_steps,
-                total_steps,
-            )
-            warmup_steps = total_steps
-
-        decay_steps = round(total_steps * self.decay_ratio)
-        if warmup_steps + decay_steps > total_steps:
-            logger.warning(
-                "lr_scheduler warmup (%d) + decay (%d) exceed total_steps (%d); "
-                "shortening the decay to %d.",
-                warmup_steps,
-                decay_steps,
-                total_steps,
-                total_steps - warmup_steps,
-            )
-            decay_steps = total_steps - warmup_steps
-        # The "+ 1" is a virtual final step. Without it the last real step would
-        # land exactly at the end of the decay, where the factor is 0 (linear) --
-        # an lr of zero on the final update. With no decay phase it makes the
-        # stable region one step longer than the run, which is the point: every
-        # real step falls inside it and the factor is a constant 1.0.
-        stable_steps = total_steps + 1 - warmup_steps - decay_steps
-
-        lr_lambda = functools.partial(
-            _wsd_factor,
-            warmup_steps=warmup_steps,
-            stable_steps=stable_steps,
-            decay_steps=decay_steps,
-            decay_type=self.decay_type,
-            min_lr_factor=self.min_lr_factor,
-        )
-        return LRScheduler(optimizer, lr_lambda, total_steps=total_steps)
