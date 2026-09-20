@@ -17,18 +17,6 @@ import tempfile
 
 import numpy as np
 import pytest
-from data_fixtures import (
-    CHAT_TEMPLATE,
-    NUM_ROWS,
-    VOCAB,
-    corpus,  # noqa: F401  (fixture re-export)
-    make_context,
-    make_policy,
-    text_dataset,
-    token_ids,
-    tokenizer,  # noqa: F401  (fixture re-export)
-    write_tokenizer,
-)
 
 from hpmesh.components.loss import IGNORE_INDEX
 from hpmesh.components.tokenizer import HuggingFaceTokenizer
@@ -46,6 +34,18 @@ from hpmesh.datasets import (
 from hpmesh.datasets.hf.text import ChatProcessor
 from hpmesh.datasets.random_data import RandomTokenDataLoader
 from hpmesh.trainer.config import DataloaderConfig
+from tests.data_fixtures import (
+    CHAT_TEMPLATE,
+    NUM_ROWS,
+    VOCAB,
+    corpus,  # noqa: F401  (fixture re-export)
+    make_context,
+    make_policy,
+    text_dataset,
+    token_ids,
+    tokenizer,  # noqa: F401  (fixture re-export)
+    write_tokenizer,
+)
 
 # --------------------------------------------------------------------------
 # Tokenizer

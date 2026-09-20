@@ -27,12 +27,6 @@ import json
 import numpy as np
 import pytest
 import torch
-from data_fixtures import (  # noqa: F401
-    VOCAB,
-    make_context,
-    make_policy,
-    write_tokenizer,
-)
 
 from hpmesh.components.loss import IGNORE_INDEX
 from hpmesh.components.tokenizer import MultiModalTokenizer
@@ -55,6 +49,12 @@ from hpmesh.datasets.hf.multimodal.utils.image import (
 )
 from hpmesh.datasets.hf.multimodal.utils.text import insert_vision_placeholders
 from hpmesh.datasets.hf.multimodal.utils.video import load_video, process_video
+from tests.data_fixtures import (  # noqa: F401
+    VOCAB,
+    make_context,
+    make_policy,
+    write_tokenizer,
+)
 
 IMAGE_TOKEN = "<|image_pad|>"
 VIDEO_TOKEN = "<|video_pad|>"
