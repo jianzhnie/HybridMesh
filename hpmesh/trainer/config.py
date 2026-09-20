@@ -99,37 +99,37 @@ class ModelConfig:
 
 @dataclass(kw_only=True, slots=True)
 class ParallelConfig:
-    """The parallelism degrees, plus the process group backend.
+    """The parallelism sizes, plus the process group backend.
 
-    The field names and semantics are torchtitan's, deliberately: the mesh
-    builder reads the ``*_degree`` fields directly, so keeping the spelling
-    keeps ``ParallelDims`` portable. Short aliases (``tp`` / ``pp`` / ``cp`` /
-    ``ep`` / ``dp``) are exposed as properties at the end of the class, so
-    callers and tests can use the same names ``HybridMeshConfig`` does without
-    going through the long spelling.
+    The field names and semantics are torchtitan's, spelled ``*_size`` rather
+    than ``*_degree``. ``ParallelDims.from_config`` reads these six fields by
+    name, so the spelling here and there has to stay in step. Short aliases
+    (``tp`` / ``pp`` / ``cp`` / ``ep`` / ``dp``) are exposed as properties at
+    the end of the class, so callers and tests can use the same names
+    ``HybridMeshConfig`` does without going through the long spelling.
     """
 
-    data_parallel_replicate_degree: int = 1
+    data_parallel_replicate_size: int = 1
     """
-    The `data_parallel_replicate_degree` argument specifies the degree of
+    The `data_parallel_replicate_size` argument specifies the degree of
     data parallelism for weight replication. When this value is greater
-    than 1, weights will be replicated across `data_parallel_replicate_degree`
-    ranks. If `data_parallel_shard_degree` is also greater than 1, the parallelism
+    than 1, weights will be replicated across `data_parallel_replicate_size`
+    ranks. If `data_parallel_shard_size` is also greater than 1, the parallelism
     method used is HSDP (Hybrid Sharded Data Parallelism). Otherwise, the
     parallelism method used is DDP (Distributed Data Parallelism).
     1 means disabled.
     """
 
-    data_parallel_shard_degree: int = -1
+    data_parallel_shard_size: int = -1
     """
-    The `data_parallel_shard_degree` argument specifies the degree of data
+    The `data_parallel_shard_size` argument specifies the degree of data
     parallelism for weight sharding. When this value is greater than 1, weights
-    will be sharded across `data_parallel_shard_degree` ranks. If
-    `data_parallel_replicate_degree` is also greater than 1, the parallelism
+    will be sharded across `data_parallel_shard_size` ranks. If
+    `data_parallel_replicate_size` is also greater than 1, the parallelism
     method used is HSDP (Hybrid Sharded Data Parallelism). Otherwise, the
     parallelism method used is FSDP (Fully Sharded Data Parallelism).
     -1 means leftover ranks will be used (After DP_REPLICATE/SP/PP). Note that
-    only `data_parallel_shard_degree` can be negative. 1 means disabled.
+    only `data_parallel_shard_size` can be negative. 1 means disabled.
     """
 
     fsdp_reshard_after_forward: Literal["default", "always", "never"] = "default"
@@ -154,14 +154,14 @@ class ParallelConfig:
     all FSDP modules after `fully_shard` has been applied.
     """
 
-    tensor_parallel_degree: int = 1
+    tensor_parallel_size: int = 1
     """Tensor Parallelism degree. 1 means disabled."""
 
     enable_sequence_parallel: bool = True
     """Whether to use SequenceParallel as part of tensor parallelism. Enabled
     by default."""
 
-    pipeline_parallel_degree: int = 1
+    pipeline_parallel_size: int = 1
     """
     Pipeline Parallelism degree, or number of ranks. 1 means disabled.
     If using looped schedules, this still specifies the number of physical
@@ -202,8 +202,8 @@ class ParallelConfig:
     """
     The number of layers per (virtual) pipeline stage. If specified, the
     module_fqns_per_model_part will be calculated from the number of layers and
-    pipeline_parallel_degree. If not specified, the layers per stage will be
-    inferred from the model, schedule, and pipeline_parallel_degree.
+    pipeline_parallel_size. If not specified, the layers per stage will be
+    inferred from the model, schedule, and pipeline_parallel_size.
     """
 
     pipeline_parallel_schedule: str = "1F1B"
@@ -213,7 +213,7 @@ class ParallelConfig:
     Specify the Pipeline Parallel schedule to use. The schedule must be
     compatible with the split points and stages_per_rank.
     Looped schedules (e.g. Interleaved1F1B) require specifying
-    pipeline_parallel_degree = number of ranks,
+    pipeline_parallel_size = number of ranks,
     and split_points = number of stages - 1
     """
 
@@ -228,10 +228,10 @@ class ParallelConfig:
     """
     Number of pipeline microbatches per data-parallel rank and gradient
     accumulation iteration. This setting is ignored when pipeline parallelism
-    is disabled (`pipeline_parallel_degree = 1`, the default).
+    is disabled (`pipeline_parallel_size = 1`, the default).
     """
 
-    context_parallel_degree: int = 1
+    context_parallel_size: int = 1
     """Context parallelism degree. 1 means disabled."""
 
     context_parallel_strategy: str = "kv_allgather"
@@ -262,7 +262,7 @@ class ParallelConfig:
     load balancer with dict-valued attention masks; ignored otherwise.
     """
 
-    expert_parallel_degree: int = 1
+    expert_parallel_size: int = 1
     """
     Expert parallelism degree. 1 means disabled. No effect for non-MoE models.
 
@@ -272,18 +272,18 @@ class ParallelConfig:
     pp and dp_replicate are outer dimensions unaffected by this constraint.
     """
 
-    def non_dp_degrees(self) -> int:
+    def non_dp_sizes(self) -> int:
         """Product of the fixed (non-derivable) degrees: dp_replicate*tp*pp*cp*ep."""
         return (
-            self.data_parallel_replicate_degree
-            * self.tensor_parallel_degree
-            * self.pipeline_parallel_degree
-            * self.context_parallel_degree
-            * self.expert_parallel_degree
+            self.data_parallel_replicate_size
+            * self.tensor_parallel_size
+            * self.pipeline_parallel_size
+            * self.context_parallel_size
+            * self.expert_parallel_size
         )
 
     def derive_dp(self, world_size: int) -> int:
-        """Resolve ``data_parallel_shard_degree`` against world_size.
+        """Resolve ``data_parallel_shard_size`` against world_size.
 
         ``-1`` means "derive from world_size": the leftover ranks after
         dp_replicate / tp / pp / cp / ep, matching ``ParallelDims``'s
@@ -291,15 +291,15 @@ class ParallelConfig:
         check so a mis-sized launch fails here with a config-level message
         rather than deep inside mesh construction.
         """
-        fixed = self.non_dp_degrees()
-        if self.data_parallel_shard_degree == -1:
+        fixed = self.non_dp_sizes()
+        if self.data_parallel_shard_size == -1:
             if world_size % fixed != 0:
                 raise ValueError(
                     f"world_size={world_size} not divisible by "
                     f"dp_replicate*tp*pp*cp*ep={fixed}"
                 )
             return world_size // fixed
-        dp_shard = self.data_parallel_shard_degree
+        dp_shard = self.data_parallel_shard_size
         if dp_shard * fixed != world_size:
             raise ValueError(
                 f"dp_shard*dp_replicate*tp*pp*cp*ep = {dp_shard * fixed} "
@@ -312,20 +312,17 @@ class ParallelConfig:
 
     def __post_init__(self):
         for name in (
-            "tensor_parallel_degree",
-            "pipeline_parallel_degree",
-            "context_parallel_degree",
-            "expert_parallel_degree",
+            "tensor_parallel_size",
+            "pipeline_parallel_size",
+            "context_parallel_size",
+            "expert_parallel_size",
         ):
             if getattr(self, name) < 1:
                 raise ValueError(f"{name} must be >= 1, got {getattr(self, name)}")
-        if (
-            self.data_parallel_shard_degree < 1
-            and self.data_parallel_shard_degree != -1
-        ):
+        if self.data_parallel_shard_size < 1 and self.data_parallel_shard_size != -1:
             raise ValueError(
-                "data_parallel_shard_degree must be >= 1 or -1 (derive), got "
-                f"{self.data_parallel_shard_degree}"
+                "data_parallel_shard_size must be >= 1 or -1 (derive), got "
+                f"{self.data_parallel_shard_size}"
             )
         if self.context_parallel_load_balancer == "":
             raise ValueError(
@@ -387,23 +384,23 @@ class ParallelConfig:
     # Short aliases for the torchtitan-spelled degree fields.
     @property
     def dp(self) -> int:
-        return self.data_parallel_shard_degree
+        return self.data_parallel_shard_size
 
     @property
     def tp(self) -> int:
-        return self.tensor_parallel_degree
+        return self.tensor_parallel_size
 
     @property
     def pp(self) -> int:
-        return self.pipeline_parallel_degree
+        return self.pipeline_parallel_size
 
     @property
     def cp(self) -> int:
-        return self.context_parallel_degree
+        return self.context_parallel_size
 
     @property
     def ep(self) -> int:
-        return self.expert_parallel_degree
+        return self.expert_parallel_size
 
 
 @dataclass(kw_only=True)
@@ -880,19 +877,24 @@ class DataloaderConfig:
 
     ``random`` (the default) keeps the synthetic corpus and needs no assets, so
     the default run is unchanged and reproducible offline. Any other value
-    names a recipe from ``datasets.hf.text.DATASETS``, or the built-in
-    ``local_jsonl`` -- which is deliberately NOT in that dict, because its
-    corpus path is a runtime argument rather than a constant.
+    names a recipe from ``datasets.hf.text.DATASETS`` or
+    ``datasets.hf.multimodal.MM_DATASETS``, or the built-in ``local_jsonl`` --
+    which is deliberately NOT in either dict, because its corpus path is a
+    runtime argument rather than a constant.
 
     Every non-``random`` dataset builds its graph on Grain, which needs a
     tokenizer, so ``tokenizer_path`` is required there and unused otherwise.
+    Multimodal recipes additionally need the optional dependencies
+    torchvision/Pillow (and av for video) and the five ``mm_*_token`` strings
+    below, which must exist as added tokens in that tokenizer.
     """
 
     dataset: str = field(
         default="random",
         metadata={
             "help": "Corpus selector: 'random' (synthetic, no assets) | "
-            "'local_jsonl' | a key of datasets.hf.text.DATASETS"
+            "'local_jsonl' | a key of datasets.hf.text.DATASETS | a key of "
+            "datasets.hf.multimodal.MM_DATASETS (needs torchvision)"
         },
     )
     tokenizer_path: str | None = field(
@@ -924,6 +926,30 @@ class DataloaderConfig:
             "frontier unconstrained."
         },
     )
+    mm_image_token: str = field(
+        default="<|image_pad|>",
+        metadata={"help": "Image placeholder token. Multimodal recipes only."},
+    )
+    mm_video_token: str = field(
+        default="<|video_pad|>",
+        metadata={"help": "Video placeholder token. Multimodal recipes only."},
+    )
+    mm_vision_start_token: str = field(
+        default="<|vision_start|>",
+        metadata={
+            "help": "Token opening a vision placeholder run. Multimodal recipes only."
+        },
+    )
+    mm_vision_end_token: str = field(
+        default="<|vision_end|>",
+        metadata={
+            "help": "Token closing a vision placeholder run. Multimodal recipes only."
+        },
+    )
+    mm_pad_token: str = field(
+        default="<|endoftext|>",
+        metadata={"help": "Padding token. Multimodal recipes only."},
+    )
 
     def __post_init__(self) -> None:
         if self.dataset != "random" and not self.tokenizer_path:
@@ -933,8 +959,9 @@ class DataloaderConfig:
             )
         if self.dataset == "local_jsonl" and not self.dataset_path:
             raise ValueError("dataset_path is required for dataset 'local_jsonl'")
-        # Membership in ``datasets.hf.text.DATASETS`` is checked by
-        # ``datasets/build.py`` at build time, not here: reading the registry
+        # Membership in ``datasets.hf.text.DATASETS`` /
+        # ``datasets.hf.multimodal.MM_DATASETS`` is checked by
+        # ``datasets/build.py`` at build time, not here: reading the registries
         # would import the datasets package into the config layer.
         if self.max_num_documents is not None and self.max_num_documents <= 0:
             raise ValueError("max_num_documents must be positive")

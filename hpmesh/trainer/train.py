@@ -3,7 +3,7 @@
 Deciding which group a config belongs to
 
 HfArgumentParser is given the config GROUPS (not the composed config), so each
-field becomes a clean flat CLI flag (--steps, --data_parallel_shard_degree,
+field becomes a clean flat CLI flag (--steps, --data_parallel_shard_size,
 --learning_rate, --dump_folder, ...) and each group runs its own __post_init__
 validation. We then compose them into the single HybridMeshConfig. A YAML/JSON
 file can also be passed positionally.
@@ -32,7 +32,7 @@ Single process (step 0):
     # or, after `pip install -e .`:  hpmesh-train --steps 20
 
 Data parallel, 2 ranks (step 1):
-    torchrun --nproc_per_node=2 -m hpmesh --data_parallel_shard_degree -1
+    torchrun --nproc_per_node=2 -m hpmesh --data_parallel_shard_size -1
 
 Checkpointing (disabled unless --enable is passed):
     python -m hpmesh --steps 20 --enable --interval 10 --dump_folder ./outputs

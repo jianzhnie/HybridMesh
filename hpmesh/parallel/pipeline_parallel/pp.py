@@ -276,7 +276,7 @@ def build_pipeline_schedule(
         )
     schedule_class = get_schedule_class(parallelism.pipeline_parallel_schedule)
     num_microbatches = parallelism.num_pp_microbatches
-    num_total_stages = parallelism.pipeline_parallel_degree * len(stages)
+    num_total_stages = parallelism.pipeline_parallel_size * len(stages)
     if num_microbatches < num_total_stages:
         logger.warning(
             f"Number of microbatches ({num_microbatches}) is less than the "
