@@ -367,6 +367,11 @@ class Trainer:
             num_flops_per_token=num_flops_per_token(cfg),
             tag=cfg.metrics.tag,
         )
+        # Under PP the loss exists on one rank and ``LOG_RANK`` decides which
+        # ranks print, so a mismatched pair trains correctly and reports
+        # nothing -- which reads exactly like a hang. Warn now, rather than
+        # leave the user to work it out at step 1.
+        self.metrics.ensure_pp_loss_visible()
 
     # -- setup helpers ---------------------------------------------------------
 

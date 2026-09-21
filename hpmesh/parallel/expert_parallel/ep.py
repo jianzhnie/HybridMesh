@@ -385,6 +385,25 @@ def _read_expert_groups(
     return num_groups, _read_int_attr(block, router, "topk_group")
 
 
+def _restore_fp32_state_buffers(module: nn.Module) -> None:
+    """Undo the dtype conversion ``Module.to(dtype=...)`` applies to float buffers.
+
+    ``Module.to`` converts parameters *and* every floating-point buffer, with no
+    way to ask for one and not the other. The MoE registers two buffers as fp32
+    on purpose -- ``expert_bias_E`` (an additive load-balancing correction that
+    would erode under a bf16 round per step) and ``tokens_per_expert_E`` (a
+    token *count*, which bf16 cannot hold exactly past 256: 1001 becomes 1000).
+    Neither has a gradient, so casting them buys nothing and silently costs
+    precision. Upstream keeps both fp32 unconditionally.
+
+    Scoped to float buffers: an integer buffer's dtype is already exact and
+    casting it back would be wrong.
+    """
+    for buffer in module.buffers():
+        if torch.is_floating_point(buffer):
+            buffer.data = buffer.data.to(torch.float32)
+
+
 def _convert_block(
     block: nn.Module,
     *,
@@ -469,6 +488,7 @@ def _convert_block(
     # keep its mode: a fresh module defaults to training=True, which would
     # flip eval-built models (aux-loss injection, token counting) back on.
     moe.to(dtype=router_gate.weight.dtype, device=router_gate.weight.device)
+    _restore_fp32_state_buffers(moe)
     moe.train(block.training)
     with torch.no_grad():
         router.gate.weight.copy_(router_gate.weight)

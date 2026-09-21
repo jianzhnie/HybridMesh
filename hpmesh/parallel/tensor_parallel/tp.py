@@ -277,12 +277,22 @@ def rowwise() -> ShardingConfig:
 # -- engine -------------------------------------------------------------------
 
 
-def _resolve_plan(model: nn.Module, plan) -> dict[str, ShardingConfig]:
+def _resolve_plan(model: nn.Module, plan) -> dict[str, ShardingConfig | None]:
     """Normalize a plan into ``{module_path_pattern: ShardingConfig}``.
 
     ``plan`` may be ``None`` (use the model's declared plan), a map of patterns
-    to ``ShardingConfig``, or a map of patterns to ``"colwise"`` / ``"rowwise"``
-    strings (the form HF ships).
+    to ``ShardingConfig``, or a map of patterns to strings (the form HF ships).
+
+    Three of HF's string specs map onto a realizer: ``colwise`` and ``rowwise``
+    as below, plus ``replicated_with_grad_allreduce`` -- a projection left whole
+    on every rank whose gradient the trainer's own
+    ``_allreduce_replicated_tp_grads`` already sums. That last one is not
+    decoration: Qwen3's plan marks ``q_norm`` / ``k_norm`` with it, and without
+    this branch every Qwen3 TP run dies here before touching a weight.
+
+    HF's MoE specs (``packed_colwise``, ``moe_tp_experts``) still raise. hpmesh
+    does not shard MoE experts over the TP axis -- it has no fused-expert
+    realizer -- so honouring them silently would be worse than refusing.
 
     When ``plan`` is omitted the model's own declaration is used, preferring the
     ``tp_plan`` property over the raw ``_tp_plan`` attribute: a wrapper that
@@ -292,7 +302,7 @@ def _resolve_plan(model: nn.Module, plan) -> dict[str, ShardingConfig]:
     """
     if plan is None:
         plan = getattr(model, "tp_plan", None) or getattr(model, "_tp_plan", None) or {}
-    resolved: dict[str, ShardingConfig] = {}
+    resolved: dict[str, ShardingConfig | None] = {}
     for pattern, spec in plan.items():
         if isinstance(spec, ShardingConfig):
             resolved[pattern] = spec
@@ -300,12 +310,32 @@ def _resolve_plan(model: nn.Module, plan) -> dict[str, ShardingConfig]:
             resolved[pattern] = colwise()
         elif spec == "rowwise":
             resolved[pattern] = rowwise()
+        elif spec == "replicated_with_grad_allreduce":
+            # Nothing for apply_tp to do: the projection stays whole on every
+            # rank. The ``_with_grad_allreduce`` half is already implemented --
+            # _allreduce_replicated_tp_grads sums exactly these parameters'
+            # gradients -- so this entry only has to be understood, not acted
+            # on. Recorded as None rather than dropped so _match still stops
+            # here instead of falling through to a broader later pattern.
+            resolved[pattern] = None
         else:
             raise ValueError(f"Unsupported TP plan entry for {pattern!r}: {spec!r}")
     return resolved
 
 
-def _match(plan: dict[str, ShardingConfig], module_path: str) -> ShardingConfig | None:
+def _match(
+    plan: dict[str, ShardingConfig | None], module_path: str
+) -> ShardingConfig | None:
+    """The first pattern in ``plan`` that matches ``module_path``.
+
+    The None entries are plans that deliberately declare a projection *not*
+    sharded; for those first-match-wins is load-bearing, because ``_match``
+    walks the plan in insertion order and stops at the first hit. Returning
+    None from them is indistinguishable from "no pattern matched" to the
+    caller, which is correct here -- both mean "leave this module alone" -- but
+    it does mean a sharded pattern sitting *after* a replicated one in the plan
+    can never win for the same path.
+    """
     for pattern, spec in plan.items():
         if fnmatch.fnmatch(module_path, pattern):
             return spec

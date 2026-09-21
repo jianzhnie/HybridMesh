@@ -171,8 +171,18 @@ class ParallelConfig:
     """Tensor Parallelism degree. 1 means disabled."""
 
     enable_sequence_parallel: bool = True
-    """Whether to use SequenceParallel as part of tensor parallelism. Enabled
-    by default."""
+    """Sequence parallelism as part of tensor parallelism.
+
+    Not a switch here. hpmesh's TP is the sequence-parallel formulation only:
+    ``parallel/tensor_parallel/tp.py`` gathers and scatters the sequence inside
+    the fused GEMMs, and the trainer shards the batch so ``T / tp`` tokens
+    enter each rank. There is no replicated-activation realization to fall
+    back to, so ``False`` has nothing to select and is rejected rather than
+    silently ignored -- see ``ParallelConfig.__post_init__``.
+
+    Unlike the other fields here this one is hpmesh's own: it is not forwarded
+    to any upstream API, so it is not a name this config has to keep in step.
+    """
 
     pipeline_parallel_size: int = 1
     """
@@ -262,19 +272,13 @@ class ParallelConfig:
     """
     Load balancer type for context parallelism. Options:
     - "headtail": Use HeadTailLoadBalancer for SDPA
-    - "ptrr": Use PTRRLoadBalancer for FlexInnerAttention
+    - "ptrr": accepted for config compatibility, but NOT implemented -- it is
+      rejected with NotImplementedError when the CP mesh is built
+      (``parallel/context_parallel/input_shard.py``), because it needs a
+      BlockMask to derive its schedule from and hpmesh's kernel does not
+      consume one. Use "headtail" or None.
     - None: Disable load balancing
     """
-
-    context_parallel_ptrr_mask_key: str | None = None
-    """
-    When the load balancer is "ptrr" and the attention masks are a
-    dict[str, BlockMask], this selects which mask in the dict the
-    PTRRLoadBalancer is built from. The chosen balancer is then used to shard
-    every mask in the dict as well as the inputs. Only relevant for the "ptrr"
-    load balancer with dict-valued attention masks; ignored otherwise.
-    """
-
     expert_parallel_size: int = 1
     """
     Expert parallelism degree. 1 means disabled. No effect for non-MoE models.
@@ -345,6 +349,22 @@ class ParallelConfig:
         ):
             if getattr(self, name) < 1:
                 raise ValueError(f"{name} must be >= 1, got {getattr(self, name)}")
+        if not self.enable_sequence_parallel:
+            # The flag used to be read by no line of the package, so ``False``
+            # was accepted and silently behaved as ``True``. It cannot simply be
+            # honoured instead: hpmesh has one TP realization, and it *is* the
+            # sequence-parallel one (see the field's docstring). Refuse the
+            # configuration rather than train something other than what was
+            # asked for.
+            raise NotImplementedError(
+                "parallelism.enable_sequence_parallel=false is not supported: "
+                "hpmesh's tensor parallelism is sequence-parallel by "
+                "construction (the fused TP GEMMs gather/scatter the sequence "
+                "and the batch is sharded T/tp). There is no "
+                "replicated-activation TP path to fall back to, so this flag "
+                "has nothing to disable. Leave it true, or set "
+                "tensor_parallel_size=1 to drop TP."
+            )
         if self.data_parallel_shard_size < 1 and self.data_parallel_shard_size != -1:
             raise ValueError(
                 "data_parallel_shard_size must be >= 1 or -1 (derive), got "
@@ -361,6 +381,18 @@ class ParallelConfig:
                 "parallelism.context_parallel_load_balancer must be one of: "
                 f"None, 'headtail', 'ptrr' "
                 f"(got {self.context_parallel_load_balancer!r})"
+            )
+        if self.context_parallel_load_balancer == "ptrr":
+            # It is in `allowed` only so that a config naming it is recognized
+            # rather than reported as a typo. Rejecting it here rather than in
+            # the mesh builder moves the failure from the first forward -- after
+            # process groups, model build and dataloader construction -- to the
+            # config, where the message is still about the flag.
+            raise NotImplementedError(
+                "parallelism.context_parallel_load_balancer='ptrr' is not "
+                "implemented in hpmesh: it derives its schedule from a "
+                "BlockMask, which hpmesh's CP kernel does not consume. Use "
+                "'headtail' or None."
             )
         allowed_strategies = frozenset({"kv_allgather", "ulysses"})
         if self.context_parallel_strategy not in allowed_strategies:

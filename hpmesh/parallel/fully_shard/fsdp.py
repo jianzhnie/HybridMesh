@@ -311,14 +311,15 @@ def apply_fsdp_to_decoder(
             # pyrefly: ignore [missing-attribute]
             experts = transformer_block.moe.routed_experts.inner_experts
             expert_params = set(experts.parameters())
-            # The comparison needs the TOTAL expert count, which the grouped
-            # weights do not have: the EP swap builds them per rank, so
-            # ``experts.num_experts`` is this rank's shard (total / ep). The
-            # router holds the total. Comparing against the shard instead
-            # reads as ``efsdp * ep > total / ep``, i.e. ``efsdp * ep**2 >
-            # total`` -- an ep-times stricter threshold than upstream's, which
-            # picks Shard(1) for configurations that should shard the expert
-            # axis.
+            # The total expert count, read off the router. hpmesh's grouped
+            # weights are built per rank by the EP swap, so
+            # ``experts.num_experts`` is only this rank's slice (total / ep);
+            # the router is the child that always holds the total. Upstream
+            # reads ``experts.num_experts`` instead and gets the same number,
+            # because its experts are an SPMD DTensor sharded on ``ep`` with the
+            # logical count intact. So this is a spelling difference forced by
+            # the different expert representation, not a different threshold --
+            # both sides compare ``efsdp * ep`` against the same total.
             num_experts = transformer_block.moe.router.num_experts
 
             if ep_size > 1:
