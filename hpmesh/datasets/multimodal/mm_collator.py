@@ -183,7 +183,31 @@ class MultiModalCollator(Collator):
         prev_vision = torch.cat(
             [torch.zeros_like(vision_mask[:, :1]), vision_mask[:, :-1]], dim=1
         )
-        batch_vision_starts = vision_mask & ~prev_vision  # (batch, seq_len)
+        prev_tokens = torch.cat([tokens[:, :1], tokens[:, :-1]], dim=1)
+        # A transition image -> video is two media runs even though both sides
+        # satisfy ``vision_mask``. Treating it as one would consume only the
+        # image grid and shift every following grid by one.
+        batch_vision_starts = vision_mask & (
+            ~prev_vision | (tokens != prev_tokens)
+        )  # (batch, seq_len)
+
+        num_image_runs = int(
+            (batch_vision_starts & (tokens == image_token_id)).sum()
+        )
+        num_video_runs = int(
+            (batch_vision_starts & (tokens == video_token_id)).sum()
+        )
+        num_image_grids = 0 if grid_thw is None else int(grid_thw.shape[0])
+        num_video_grids = (
+            0 if grid_thw_videos is None else int(grid_thw_videos.shape[0])
+        )
+        if num_image_runs != num_image_grids or num_video_runs != num_video_grids:
+            raise ValueError(
+                "MRoPE media/grid mismatch: "
+                f"found {num_image_runs} image placeholder run(s) and "
+                f"{num_video_runs} video placeholder run(s), but received "
+                f"{num_image_grids} image grid(s) and {num_video_grids} video grid(s)"
+            )
         grid_cache: dict[tuple[int, int, int], torch.Tensor] = {}
 
         image_index, video_index = 0, 0
@@ -235,6 +259,35 @@ class MultiModalCollator(Collator):
                         int(h.item()) // spatial_merge_size,
                         int(w.item()) // spatial_merge_size,
                     )
+                    if int(h.item()) % spatial_merge_size or int(
+                        w.item()
+                    ) % spatial_merge_size:
+                        raise ValueError(
+                            "MRoPE grid spatial dimensions must be divisible by "
+                            f"spatial_merge_size={spatial_merge_size}; got "
+                            f"grid [{int(t.item())}, {int(h.item())}, {int(w.item())}]"
+                        )
+                    expected_vision_tokens = (
+                        llm_grid_t * llm_grid_h * llm_grid_w
+                    )
+                    vision_end = vision_start
+                    while (
+                        vision_end < doc_end
+                        and sample_tokens[vision_end] == sample_tokens[vision_start]
+                    ):
+                        vision_end += 1
+                    actual_vision_tokens = vision_end - vision_start
+                    if actual_vision_tokens != expected_vision_tokens:
+                        media_kind = (
+                            "image"
+                            if sample_tokens[vision_start] == image_token_id
+                            else "video"
+                        )
+                        raise ValueError(
+                            f"MRoPE {media_kind} placeholder run has "
+                            f"{actual_vision_tokens} token(s), but its grid "
+                            f"requires {expected_vision_tokens}"
+                        )
                     text_len = vision_start - pair_cursor
 
                     pos_id_offset = (
@@ -272,7 +325,7 @@ class MultiModalCollator(Collator):
                     doc_pos_ids_list.append(
                         grid_cache[grid_key] + text_len + pos_id_offset
                     )
-                    pair_cursor = vision_start + llm_grid_t * llm_grid_h * llm_grid_w
+                    pair_cursor = vision_end
 
                 # Trailing [text tokens] after the last text/vision pair.
                 if pair_cursor < doc_end:

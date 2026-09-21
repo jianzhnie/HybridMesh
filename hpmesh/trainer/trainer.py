@@ -1000,7 +1000,6 @@ class Trainer:
         # the rest of the batch is dropped here rather than held across the
         # accumulation window.
         microbatches: list[dict[str, Any]] = []
-        loss_sums: list[torch.Tensor] = []
         local_valid_tokens = 0
         for _ in range(self.cfg.gradient_accumulation_steps):
             # ``_microbatch`` owns the split of responsibility: it takes the
@@ -1027,17 +1026,30 @@ class Trainer:
         if AuxLoss._group_counts:
             AuxLoss.set_step_denominator(global_valid_tokens)
 
-        # Process each group, then free it. ``loss_sums`` accumulates the raw
-        # per-group sums, not the normalized returns, so the reported loss is
-        # the step total over the step's global token count.
+        # Process each group, then free it. Loss values are retained only on a
+        # logging step: backward has already consumed them, and non-logging
+        # steps need only the on-device finiteness verdict. On logging steps,
+        # take ownership of the first detached value and accumulate later
+        # groups in place, avoiding a list plus a final stack proportional to
+        # ``gradient_accumulation_steps``.
+        accumulated_loss: torch.Tensor | None = None
+        # int32 is supported by NCCL reductions, unlike bool.
+        loss_is_finite = torch.ones((), dtype=torch.int32, device=self.device)
         for microbatch in microbatches:
-            loss_sums.append(
-                self.forward_backward_step(
-                    microbatch, global_valid_tokens=global_valid_tokens
-                )
+            detached_loss = self.forward_backward_step(
+                microbatch, global_valid_tokens=global_valid_tokens
             )
-
-        loss_sum = torch.sum(torch.stack(loss_sums))
+            local_loss = (
+                detached_loss.to_local()
+                if isinstance(detached_loss, DTensor)
+                else detached_loss
+            )
+            loss_is_finite.logical_and_(torch.isfinite(local_loss).all())
+            if should_log:
+                if accumulated_loss is None:
+                    accumulated_loss = detached_loss.clone()
+                else:
+                    accumulated_loss.add_(detached_loss)
 
         # After the last backward, before clipping: replicated parameters under
         # TP hold token-partial gradients that nothing else reduces.
@@ -1056,8 +1068,7 @@ class Trainer:
         # step that another rank already knows is garbage -- and the parameter
         # update that follows is collective, so the disagreement is not
         # recoverable. int32, not bool: NCCL has no bool reduction.
-        step_is_finite = torch.ones((), dtype=torch.int32, device=self.device)
-        step_is_finite.logical_and_(torch.isfinite(loss_sum).all())
+        step_is_finite = loss_is_finite
         # Only the last PP stage holds a real loss; the others carry the
         # sentinel, which is finite by construction and says nothing. Skipping
         # the loss-mesh reduction there matches torchtitan and costs nothing --
@@ -1093,6 +1104,11 @@ class Trainer:
         # the top of this function is the value handed to the optimizer.
         self.lr_scheduler.step()
 
+        if not should_log:
+            return None
+
+        assert accumulated_loss is not None
+
         # Summed over tokens, divided by the global count: the loss is then
         # independent of how the batch was split across DP ranks or across
         # accumulation groups. Division by a tensor keeps it on device. Above
@@ -1101,13 +1117,7 @@ class Trainer:
         # only part of the window has contributed -- so early steps of a long
         # accumulation read slightly low. That is the value consistent with the
         # gradients the optimizer just applied.
-        loss = loss_sum / global_valid_tokens
-
-        # Only a logging step derives the two reported losses: they are the only
-        # place this function touches the host, and the metrics dict is typed
-        # for floats. The loss the optimizer used was the tensor above.
-        if not should_log:
-            return None
+        loss = accumulated_loss / global_valid_tokens
 
         if loss_mesh is not None:
             # The collectives are entered UNCONDITIONALLY: gating them on a
@@ -1116,9 +1126,9 @@ class Trainer:
             # step. Only the per-rank division needs the guard -- a rank with
             # no valid tokens contributes 0 to the max.
             local_avg = (
-                loss_sum / local_valid_tokens_tensor
+                accumulated_loss / local_valid_tokens_tensor
                 if local_valid_tokens > 0
-                else torch.zeros_like(loss_sum)
+                else torch.zeros_like(accumulated_loss)
             )
             global_avg_loss = float(dist_sum(loss, loss_mesh))
             global_max_loss = float(dist_max(local_avg, loss_mesh))

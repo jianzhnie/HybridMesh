@@ -134,6 +134,12 @@ class RandomTokenDataLoader(BaseDataLoader):
         dp_rank: int = 0,
         dp_world_size: int = 1,
     ) -> None:
+        if dp_world_size <= 0:
+            raise ValueError("dp_world_size must be positive")
+        if not 0 <= dp_rank < dp_world_size:
+            raise ValueError(
+                f"dp_rank must be in [0, {dp_world_size}), got {dp_rank}"
+            )
         if batch_size % dp_world_size != 0:
             raise ValueError(
                 f"batch_size={batch_size} not divisible by "
