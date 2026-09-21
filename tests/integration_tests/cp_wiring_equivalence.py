@@ -326,12 +326,14 @@ def _check_preprocess_inputs_matches(mesh, failures: list[str]) -> float:
     ids, labels, positions = _data(packed=True)
 
     # ``preprocess_inputs`` reaches the mesh through ``parallel_dims``, so it
-    # gets a stand-in whose only job is to answer ``get_optional_mesh("cp")``.
+    # gets a stand-in whose only job is to answer ``get_optional_mesh``: "cp"
+    # with the CP mesh, "tp" (asked since the TP sequence shard moved into the
+    # seam) with None -- this is a CP-only run.
     class _CpOnlyDims:
         @staticmethod
         def get_optional_mesh(name: str):
-            assert name == "cp", f"preprocess_inputs asked for '{name}'"
-            return mesh["cp"]
+            assert name in ("cp", "tp"), f"preprocess_inputs asked for '{name}'"
+            return mesh["cp"] if name == "cp" else None
 
     with mock.patch(
         "hpmesh.models.hf_wrapper.create_attention_mask",

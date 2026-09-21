@@ -859,6 +859,113 @@ def test_checkpoint_carries_a_dataloader_read_position(tmp_path) -> None:
 # -- the synthetic data iterator ------------------------------------------------
 
 
+def test_synthetic_loader_is_checkpointed_like_any_other() -> None:
+    """``_build_dataloader`` hands back the synthetic loader, not ``None``.
+
+    Dropping it (the old behavior) kept the loader out of the checkpoint's
+    ``states``, so a resumed run restored trained weights and then re-read the
+    corpus from batch 0. The loader's ``load_state_dict`` replay is what a
+    resume needs, and it is dead code unless the loader is registered.
+    """
+    trainer = _bare_trainer(_cfg_with_batch(global_batch_size=8, max_seq_len=16))
+
+    loader = trainer._build_dataloader()
+
+    assert isinstance(loader, RandomTokenDataLoader)
+
+
+def test_microbatch_defers_the_device_transfer_to_consumption() -> None:
+    """Reading an accumulation window must not move it to the device.
+
+    ``_microbatch`` runs at read time for every group of the window; moving
+    tensors there would keep the whole window resident in device memory. The
+    transfer belongs to ``_to_device``, which ``_preprocess`` calls once per
+    group, just ahead of that group's forward.
+    """
+    trainer = _bare_trainer(_cfg_with_batch())
+    trainer.device = torch.device("cpu")
+    trainer.ntokens_seen = 0
+    batch = _random_batch()
+
+    calls = 0
+    original_to = torch.Tensor.to
+
+    def counting_to(self, *args, **kwargs):
+        nonlocal calls
+        calls += 1
+        return original_to(self, *args, **kwargs)
+
+    try:
+        torch.Tensor.to = counting_to
+        microbatch = trainer._microbatch(batch)
+        assert calls == 0, "_microbatch moved tensors at read time"
+        trainer._to_device(microbatch["batch"])
+        assert calls == 2  # input_ids and labels
+    finally:
+        torch.Tensor.to = original_to
+
+    assert microbatch["num_valid_tokens"] == batch.labels.numel() - 4
+
+
+def test_exclude_from_loading_accepts_the_dataloader_key(tmp_path) -> None:
+    """``exclude_from_loading=["dataloader"]`` must not raise for its absence.
+
+    Every loader -- the synthetic one included -- is registered in ``states``
+    now, so the key always exists; excluding it just skips the restore.
+    """
+    model, optimizer = _model_and_optimizer()
+    loader = RandomTokenDataLoader(
+        seed=3, vocab_size=16, batch_size=4, seq_len=6, dp_rank=0, dp_world_size=1
+    )
+    for _ in range(3):
+        next(iter(loader))
+
+    manager = CheckpointManager(
+        CheckpointConfig(
+            enable=True,
+            folder="checkpoint",
+            keep_latest_k=0,
+            interval=1,
+            exclude_from_loading=["dataloader"],
+        ),
+        model_parts=[model],
+        optimizer=optimizer,
+        lr_scheduler=_lr_scheduler(optimizer),
+        states={TRAIN_STATE: _TrainState(), DATALOADER: loader},
+        folder=str(tmp_path),
+    )
+    assert manager.save(3)
+    manager.close()
+
+    fresh_model, fresh_optimizer = _model_and_optimizer()
+    fresh_loader = RandomTokenDataLoader(
+        seed=3, vocab_size=16, batch_size=4, seq_len=6, dp_rank=0, dp_world_size=1
+    )
+    resumed = CheckpointManager(
+        CheckpointConfig(
+            enable=True,
+            folder="checkpoint",
+            keep_latest_k=0,
+            interval=1,
+            exclude_from_loading=["dataloader"],
+        ),
+        model_parts=[fresh_model],
+        optimizer=fresh_optimizer,
+        lr_scheduler=_lr_scheduler(fresh_optimizer),
+        states={TRAIN_STATE: _TrainState(), DATALOADER: fresh_loader},
+        folder=str(tmp_path),
+    )
+    assert resumed.load(-1) is True
+    resumed.close()
+
+    # Excluded: the fresh loader still sits at batch 0.
+    first = next(iter(fresh_loader))
+    reference = next(
+        iter(RandomTokenDataLoader(seed=3, vocab_size=16, batch_size=4, seq_len=6))
+    )
+    assert torch.equal(first.input_ids, reference.input_ids)
+
+
 def test_synthetic_batch_is_deterministic() -> None:
     """Two independent iterators over one config must agree.
 
@@ -890,3 +997,48 @@ def test_dp_slice_partitions_global_batch() -> None:
     rank_1 = batch.input_ids[per_rank : 2 * per_rank]
 
     assert torch.equal(torch.cat([rank_0, rank_1]), batch.input_ids)
+
+
+# -- the console entry point ----------------------------------------------------
+
+
+def test_create_seed_checkpoint_writes_a_step_0_checkpoint_and_exits(tmp_path) -> None:
+    """``--create_seed_checkpoint`` saves the untrained model at step 0.
+
+    The flag existed in the config with no reader -- a run that set it simply
+    trained. Wired up (torchtitan ``train.py``'s semantics), it must write the
+    seed checkpoint and exit WITHOUT training: no step-5 checkpoint may appear.
+    """
+    import os
+    import subprocess
+    import sys
+
+    repo_root = os.path.dirname(
+        os.path.dirname(os.path.dirname(os.path.dirname(__file__)))
+    )
+    env = {**os.environ, "PYTHONPATH": repo_root}
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "hpmesh",
+            "--steps",
+            "5",
+            "--max_seq_len",
+            "32",
+            "--global_batch_size",
+            "4",
+            "--enable",
+            "--create_seed_checkpoint",
+            "--dump_folder",
+            str(tmp_path),
+        ],
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=300,
+    )
+    assert result.returncode == 0, result.stderr
+    assert "Created seed checkpoint" in result.stdout
+    assert (tmp_path / "checkpoint" / "step-0" / ".metadata").is_file()
+    assert not (tmp_path / "checkpoint" / "step-5").exists()

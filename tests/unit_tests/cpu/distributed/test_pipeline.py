@@ -16,10 +16,13 @@ import torch.nn as nn
 from torch.distributed.device_mesh import init_device_mesh
 
 from hpmesh.models.hf_wrapper import HFTransformerModel, build_model_config
+from hpmesh.parallel.parallel_dims import ParallelDims
 from hpmesh.parallel.pipeline_parallel.pipeline import (
     generate_llm_fqn_per_model_part,
     split_model_into_stages,
 )
+from hpmesh.parallel.pipeline_parallel.pp import _validate_microbatches, apply_pp
+from hpmesh.trainer import ParallelConfig
 
 
 def test_single_stage_owns_everything() -> None:
@@ -233,3 +236,56 @@ def test_the_smallest_fillable_split_works() -> None:
 
     assert len(stages) == 4
     assert all(stage for stage in stages), "no stage may be empty"
+
+
+# -- apply_pp guards: microbatch validation and the cp/ep refusal --------------
+
+
+def _dims(*, pp: int = 2, ep: int = 1, world_size: int = 2) -> ParallelDims:
+    """Mesh-free ``ParallelDims``: the guards run before any mesh is touched."""
+    return ParallelDims(
+        dp_replicate=1,
+        dp_shard=-1,
+        cp=1,
+        tp=1,
+        pp=pp,
+        ep=ep,
+        world_size=world_size,
+    )
+
+
+def test_zero_or_negative_microbatches_is_rejected() -> None:
+    """A 0 would otherwise surface as a ZeroDivisionError on the divisibility
+    check -- torchtitan raises this in its config's ``__post_init__``, which
+    hpmesh's config does not do, so ``_validate_microbatches`` owns it."""
+    for n in (0, -2):
+        with pytest.raises(ValueError, match="num_pp_microbatches"):
+            _validate_microbatches(
+                _dims(), ParallelConfig(num_pp_microbatches=n), global_batch_size=8
+            )
+
+
+def test_microbatch_divisibility_is_still_enforced() -> None:
+    with pytest.raises(ValueError, match="divisible"):
+        _validate_microbatches(
+            _dims(), ParallelConfig(num_pp_microbatches=3), global_batch_size=8
+        )
+    # 8 rows over dp=1, 4 microbatches: legal.
+    _validate_microbatches(
+        _dims(), ParallelConfig(num_pp_microbatches=4), global_batch_size=8
+    )
+
+
+def test_pp_with_ep_is_refused_loudly() -> None:
+    """pp+ep is not wired through the pipeline; it must raise at setup, not
+    silently drop the EP degree."""
+    dims = _dims(pp=2, ep=2, world_size=8)
+    cfg = ParallelConfig(pipeline_parallel_size=2, expert_parallel_size=2)
+    with pytest.raises(NotImplementedError, match="does not compose"):
+        apply_pp(
+            nn.Module(),
+            parallel_dims=dims,
+            cfg=cfg,
+            device=torch.device("cpu"),
+            global_batch_size=8,
+        )

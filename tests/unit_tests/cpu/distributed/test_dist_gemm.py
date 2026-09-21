@@ -199,6 +199,39 @@ def test_row_parallel_linear_holds_its_weight_as_a_parameter() -> None:
     assert row.bias.requires_grad
 
 
+def test_row_parallel_linear_initializes_its_parameters() -> None:
+    """``torch.empty`` leaves memory uninitialized; the constructor must init.
+
+    Pinned by the same statistics ``nn.Linear``'s kaiming-uniform init has:
+    finite, nonzero variance, and bounded by ``1/sqrt(fan_in)``.
+    """
+    row = RowParallelLinear(DIM, 2 * DIM, bias=True)
+    bound = 1 / DIM**0.5
+    assert torch.isfinite(row.weight).all()
+    assert torch.isfinite(row.bias).all()
+    assert row.weight.std() > 0
+    assert row.weight.abs().max() <= bound
+    assert row.bias.abs().max() <= bound
+
+
+def test_row_parallel_linear_init_is_seeded() -> None:
+    """Same seed, same weights -- an uninitialized buffer would not be."""
+    torch.manual_seed(11)
+    a = RowParallelLinear(DIM, DIM, bias=True)
+    torch.manual_seed(11)
+    b = RowParallelLinear(DIM, DIM, bias=True)
+    assert torch.equal(a.weight, b.weight)
+    assert torch.equal(a.bias, b.bias)
+
+
+def test_row_parallel_linear_reset_parameters_reinitializes() -> None:
+    row = RowParallelLinear(DIM, DIM, bias=True)
+    with torch.no_grad():
+        row.weight.fill_(0.0)
+    row.reset_parameters()
+    assert row.weight.std() > 0
+
+
 # -- AllGatherFusedQKVLinear -------------------------------------------------
 
 

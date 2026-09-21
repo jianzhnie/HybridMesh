@@ -42,7 +42,7 @@ TOL = 1e-6
 
 
 def _config() -> AutoConfig:
-    return AutoConfig.for_model(
+    cfg = AutoConfig.for_model(
         "qwen3_moe",
         vocab_size=128,
         hidden_size=64,
@@ -56,6 +56,11 @@ def _config() -> AutoConfig:
         norm_topk_prob=True,
         max_position_embeddings=256,
     )
+    # transformers 5.x defaults MoE experts to its grouped_mm integration, which
+    # this torch build does not support in float64 -- the reference model here
+    # runs in fp64, so force the eager expert path.
+    cfg._experts_implementation = "eager"
+    return cfg
 
 
 def _model(seed: int = 0) -> HFTransformerModel:
@@ -117,8 +122,12 @@ def main() -> None:
                 f"experts, want {num_local} -- EP did not shard"
             )
         lo = rank * num_local
+        # transformers 5.x keeps all experts fused in gate_up_proj (E, 2F, D);
+        # the gate is the first F slice along dim 1 (mirrors ep.py's probe).
+        gate_up = layer_ref.mlp.experts.gate_up_proj
+        f = gate_up.shape[1] // 2
         for e in range(num_local):
-            hf_w = layer_ref.mlp.experts[lo + e].gate_proj.weight
+            hf_w = gate_up[lo + e, :f]
             if not torch.equal(grouped.w1_EFD[e], hf_w):
                 failures.append(
                     f"rank {rank} layer {layer_idx}: local expert {e} is not "
