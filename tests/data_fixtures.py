@@ -10,7 +10,9 @@ from __future__ import annotations
 
 import json
 import os
+from typing import Any
 
+import grain.python as grain
 import pytest
 from tokenizers import Tokenizer, models, pre_tokenizers
 
@@ -19,9 +21,9 @@ from hpmesh.datasets import (
     DatasetBuildContext,
     DatasetIterationPolicy,
     IndexedJsonlSource,
-    SingleDatasetConfig,
+    SingleDataset,
 )
-from hpmesh.datasets.hf.text import TextProcessor
+from hpmesh.datasets.text.text import TextProcessor
 
 # A whitespace WordLevel vocabulary: small enough to reason about by hand, and
 # whitespace-based rather than BPE so a document's tokens are predictable.
@@ -148,8 +150,8 @@ def make_context(
     )
 
 
-def text_dataset(corpus, *, processor=TextProcessor) -> SingleDatasetConfig:
-    return SingleDatasetConfig(
+def text_dataset(corpus, *, processor=TextProcessor) -> SingleDataset:
+    return SingleDataset(
         source=IndexedJsonlSource(patterns=(corpus,)),
         processor=processor,
         post_filters=(lambda sample: sample is not None,),
@@ -158,3 +160,39 @@ def text_dataset(corpus, *, processor=TextProcessor) -> SingleDatasetConfig:
 
 def token_ids(sequences) -> list[tuple[int, ...]]:
     return [tuple(sequence.input_ids.tolist()) for sequence in sequences]
+
+
+def in_memory_stream(rows: list[dict[str, Any]]) -> grain.IterDataset:
+    """A streaming node over in-memory rows.
+
+    A source slot takes an already-built node as well as a description, and
+    this is the local stand-in for one: streaming rather than random-access,
+    so a dataset built on it takes the ``_build_iter_dataset`` branch. That
+    branch is otherwise reachable only through the Hugging Face streaming
+    source, which needs the network.
+    """
+    # A generator would be exhausted by the first iteration; grain may
+    # iterate the source more than once. A list is the contract.
+    return grain.MapDataset.source(list(rows)).to_iter_dataset()
+
+
+def in_memory_stream_from_corpus(corpus: str) -> grain.IterDataset:
+    with open(corpus) as handle:
+        return in_memory_stream([json.loads(line) for line in handle])
+
+
+def streaming_text_dataset(corpus) -> SingleDataset:
+    return SingleDataset(
+        source=in_memory_stream_from_corpus(corpus),
+        processor=TextProcessor,
+        post_filters=(lambda sample: sample is not None,),
+    )
+
+
+def streaming_text_dataset_from_texts(texts: list[str]) -> SingleDataset:
+    """A stream of the given texts, for cases needing two *different* streams."""
+    return SingleDataset(
+        source=in_memory_stream([{"text": text} for text in texts]),
+        processor=TextProcessor,
+        post_filters=(lambda sample: sample is not None,),
+    )

@@ -907,6 +907,72 @@ def test_microbatch_defers_the_device_transfer_to_consumption() -> None:
     assert microbatch["num_valid_tokens"] == batch.labels.numel() - 4
 
 
+def test_the_synthetic_loader_reports_an_absolute_position_after_a_resume() -> None:
+    """A checkpoint written *after* a resume must not lose the seek.
+
+    The loader cannot seek, so resuming replays. If the saved position were the
+    count of batches ``__iter__`` handed out, that count would start at zero on
+    the resumed loader, and the batch right after the resume would save as
+    batch 0 instead of its true index. The *next* resume would then rewind to
+    it and re-train those batches -- a silent replay of already-seen data.
+    """
+
+    def loader() -> RandomTokenDataLoader:
+        return RandomTokenDataLoader(
+            seed=3, vocab_size=64, batch_size=1, seq_len=4, dp_rank=0, dp_world_size=1
+        )
+
+    def batch_id(batch) -> tuple[int, ...]:
+        return tuple(batch.input_ids.flatten().tolist())
+
+    reference = iter(loader())
+    stream = [batch_id(next(reference)) for _ in range(12)]
+
+    def consume(loader, count, offset):
+        iterator = iter(loader)
+        for index in range(count):
+            assert batch_id(next(iterator)) == stream[offset + index]
+        return offset + count
+
+    position = 0
+    run = loader()
+    position = consume(run, 5, position)
+    first = run.state_dict()
+    assert first["steps"] == 5
+
+    resumed = loader()
+    resumed.load_state_dict(first)
+    assert resumed.state_dict()["steps"] == 5
+    position = consume(resumed, 3, position)
+
+    second = resumed.state_dict()
+    # The bug this guards: the pre-fix loader saved 0 here, not 8.
+    assert second["steps"] == 8
+
+    # And the checkpoint after the second save resumes at the right place --
+    # this is the assertion that fails when the position is relative.
+    final = loader()
+    final.load_state_dict(second)
+    position = consume(final, 4, position)
+    assert position == 12
+
+
+def test_the_synthetic_loader_still_refuses_to_rewind() -> None:
+    """The absolute position must not turn a backwards resume into an overshoot.
+
+    ``state_dict`` now carries an absolute index, so the seek drains the
+    difference. A checkpoint from *behind* the live loader stays an error --
+    replaying forward to a past batch is not something this loader can do.
+    """
+    loader = RandomTokenDataLoader(
+        seed=3, vocab_size=64, batch_size=1, seq_len=4, dp_rank=0, dp_world_size=1
+    )
+    for _ in range(6):
+        next(iter(loader))
+    with pytest.raises(ValueError, match="already yielded 6"):
+        loader.load_state_dict({"dp_world_size": 1, "steps": 5})
+
+
 def test_exclude_from_loading_accepts_the_dataloader_key(tmp_path) -> None:
     """``exclude_from_loading=["dataloader"]`` must not raise for its absence.
 

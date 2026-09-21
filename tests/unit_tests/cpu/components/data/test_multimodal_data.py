@@ -24,16 +24,21 @@ import torch
 
 from hpmesh.components.loss import IGNORE_INDEX
 from hpmesh.components.tokenizer import MultiModalTokenizer
-from hpmesh.datasets import IndexedJsonlSource, SingleDatasetConfig
-from hpmesh.datasets.hf.multimodal.mm_collator import MultiModalCollator
-from hpmesh.datasets.hf.multimodal.mm_datasets import (
-    MMSamplePackingConfig,
+from hpmesh.datasets import (
+    IndexedJsonlSource,
+    SingleDataset,
+    build_dataset,
+    build_source,
+)
+from hpmesh.datasets.multimodal.mm_collator import MultiModalCollator
+from hpmesh.datasets.multimodal.mm_datasets import (
     MultiModalProcessor,
     _packing_output_to_mm_sample,
     _process_cc12_wd_sample,
     _process_mm_sample,
+    build_mm_sample_packing,
 )
-from hpmesh.datasets.hf.multimodal.utils.image import (
+from hpmesh.datasets.multimodal.mm_image import (
     calculate_vision_tokens,
     process_image,
     resize_to_navit_patch_grid,
@@ -41,8 +46,8 @@ from hpmesh.datasets.hf.multimodal.utils.image import (
     smart_resize,
     vision_to_patches,
 )
-from hpmesh.datasets.hf.multimodal.utils.text import insert_vision_placeholders
-from hpmesh.datasets.hf.multimodal.utils.video import load_video, process_video
+from hpmesh.datasets.multimodal.mm_text_utils import insert_vision_placeholders
+from hpmesh.datasets.multimodal.mm_video import load_video, process_video
 from tests.data_fixtures import (  # noqa: F401
     VOCAB,
     make_context,
@@ -418,12 +423,9 @@ class _Base64JsonlSource:
     def __init__(self, *, patterns):
         self._patterns = patterns
 
-    def build(self, *, dataset_iteration_policy):
-        return self
-
     def _index(self):
-        return IndexedJsonlSource(patterns=self._patterns).build(
-            dataset_iteration_policy=None
+        return build_source(
+            IndexedJsonlSource(patterns=self._patterns), dataset_iteration_policy=None
         )
 
     def __len__(self):
@@ -455,7 +457,7 @@ def test_multimodal_processor_runs_over_a_jsonl_corpus(
                 json.dumps({"txt": f"w{i} hello", "jpg": {"bytes": encoded}}) + "\n"
             )
 
-    config = SingleDatasetConfig(
+    config = SingleDataset(
         source=_Base64JsonlSource(patterns=(path,)),
         # A class, not a `partial` fixing a different context: `_build_map_dataset`
         # calls `processor(context=...)`, and a partial's bound keyword would be
@@ -463,7 +465,8 @@ def test_multimodal_processor_runs_over_a_jsonl_corpus(
         processor=_CtxSizedMMProcessor,
         post_filters=(lambda sample: sample is not None,),
     )
-    dataset = config.build(
+    dataset = build_dataset(
+        config,
         context=make_context(mm_tokenizer, num_tokens_per_batch=1024),
         dataset_iteration_policy=make_policy(shuffle=False),
     )
@@ -654,7 +657,15 @@ def test_mrope_positions_restart_at_each_document(mm_tokenizer):
 
 def test_mm_packing_rejects_a_non_positive_bin_count(mm_tokenizer):
     with pytest.raises(ValueError, match="num_packing_bins must be positive"):
-        MMSamplePackingConfig(dataset=object(), num_packing_bins=0)
+        build_mm_sample_packing(
+            SingleDataset(
+                source=IndexedJsonlSource(patterns=("unused",)),
+                post_filters=(lambda sample: sample is not None,),
+            ),
+            num_packing_bins=0,
+            context=make_context(mm_tokenizer, num_tokens_per_batch=1024),
+            dataset_iteration_policy=make_policy(),
+        )
 
 
 def test_mm_packing_flattens_per_document_media_into_one_list(mm_tokenizer):
