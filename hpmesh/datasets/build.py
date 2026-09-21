@@ -21,7 +21,10 @@ batch). Keeping them apart also keeps ``datasets/`` and ``components/`` free of
 any reference back to ``trainer/``.
 
 Same shape as ``components/optimizer.build_lr_scheduler``, which exists for
-the same reason.
+the same reason. Both take the whole run config and read their own fields off
+it rather than taking those fields restated as loose scalars: a scalar restated
+at the call site can drift from the field the config carries, and half of the
+ones this used to take had already stopped being read at all.
 """
 
 from __future__ import annotations
@@ -43,37 +46,42 @@ from .random_data import RandomTokenDataLoader
 from .types import DatasetBuildContext
 
 if TYPE_CHECKING:
-    from ..trainer.config import DataloaderConfig
+    from ..trainer.config import HybridMeshConfig
 
 __all__ = ["build_dataloader"]
 
 
 def build_dataloader(
-    config: DataloaderConfig,
+    config: HybridMeshConfig,
     *,
-    seed: int,
-    vocab_size: int,
-    batch_size: int,
-    seq_len: int,
     dp_rank: int,
     dp_world_size: int,
-    max_context_length: int,
     num_tokens_per_batch: int,
 ) -> BaseDataLoader:
-    """Build the loader a :class:`~hpmesh.trainer.config.DataloaderConfig` names.
+    """Build the loader a :class:`~hpmesh.trainer.config.HybridMeshConfig` names.
 
-    ``num_tokens_per_batch`` is the per-rank token count, matching
-    torchtitan's ``num_tokens_per_microbatch_per_dp_rank``: the Grain
-    loader divides every dataset's rows among ``dp_world_size`` ranks and
-    hands each one exactly that many tokens, so the DP slice the trainer
-    used to perform no longer exists on this path.
+    The config answers everything that describes the *run*; the three keyword
+    arguments answer the two things it cannot. ``config.dataloader`` (a
+    ``DataloaderConfig``) names the corpus and how to shuffle, tokenize and pack
+    it, while the flat view on the same object supplies the scalars that go with
+    it -- ``seed``, ``vocab_size``, ``global_batch_size``, ``max_seq_len``.
+
+    The keywords are all per-rank: ``dp_rank``/``dp_world_size`` say which slice
+    of the corpus this process reads, and ``num_tokens_per_batch`` is the
+    per-rank token count, matching torchtitan's
+    ``num_tokens_per_microbatch_per_dp_rank``. The Grain loader divides every
+    dataset's rows among ``dp_world_size`` ranks and hands each one exactly that
+    many tokens, so the DP slice the trainer used to perform no longer exists on
+    this path.
     """
-    if config.dataset == "random":
+    dataset_config = config.dataloader
+    max_context_length = config.max_seq_len
+    if dataset_config.dataset == "random":
         return RandomTokenDataLoader(
-            seed=seed,
-            vocab_size=vocab_size,
-            batch_size=batch_size,
-            seq_len=seq_len,
+            seed=config.seed,
+            vocab_size=config.vocab_size,
+            batch_size=config.global_batch_size,
+            seq_len=max_context_length,
             dp_rank=dp_rank,
             dp_world_size=dp_world_size,
         )
@@ -86,23 +94,26 @@ def build_dataloader(
     # ``DataloaderConfig.__post_init__``: the registries live in this package,
     # and the config layer must not import them. Checked before the tokenizer
     # is built so a bad name fails fast without loading tokenizer assets.
-    is_multimodal = config.dataset != "local_jsonl" and config.dataset not in DATASETS
+    is_multimodal = (
+        dataset_config.dataset != "local_jsonl"
+        and dataset_config.dataset not in DATASETS
+    )
     if is_multimodal:
         try:
             from .hf.multimodal.mm_collator import MultiModalCollator
             from .hf.multimodal.mm_datasets import MM_DATASETS, MMSamplePackingConfig
         except ImportError as exc:
             raise ImportError(
-                f"dataset {config.dataset!r} is not one of the text recipes "
-                f"{sorted(DATASETS)}, so it was looked up in the multimodal "
-                "registry -- which failed to import. Multimodal recipes need "
-                "the optional dependencies torchvision and Pillow (and av for "
-                "video): install them with `pip install torchvision pillow av`, "
-                "or name a text recipe instead."
+                f"dataset {dataset_config.dataset!r} is not one of the text "
+                f"recipes {sorted(DATASETS)}, so it was looked up in the "
+                "multimodal registry -- which failed to import. Multimodal "
+                "recipes need the optional dependencies torchvision and Pillow "
+                "(and av for video): install them with `pip install torchvision "
+                "pillow av`, or name a text recipe instead."
             ) from exc
-        if config.dataset not in MM_DATASETS:
+        if dataset_config.dataset not in MM_DATASETS:
             raise ValueError(
-                f"unknown dataset {config.dataset!r}. Expected 'random', "
+                f"unknown dataset {dataset_config.dataset!r}. Expected 'random', "
                 f"'local_jsonl', a text recipe {sorted(DATASETS)}, or a "
                 f"multimodal recipe {sorted(MM_DATASETS)}"
             )
@@ -116,25 +127,25 @@ def build_dataloader(
         from hpmesh.components.tokenizer import MultiModalTokenizer
 
         tokenizer = MultiModalTokenizer(
-            tokenizer_path=config.tokenizer_path,
-            image_token=config.mm_image_token,
-            video_token=config.mm_video_token,
-            vision_start_token=config.mm_vision_start_token,
-            vision_end_token=config.mm_vision_end_token,
-            pad_token=config.mm_pad_token,
+            tokenizer_path=dataset_config.tokenizer_path,
+            image_token=dataset_config.mm_image_token,
+            video_token=dataset_config.mm_video_token,
+            vision_start_token=dataset_config.mm_vision_start_token,
+            vision_end_token=dataset_config.mm_vision_end_token,
+            pad_token=dataset_config.mm_pad_token,
         )
-        recipe = MM_DATASETS[config.dataset]
+        recipe = MM_DATASETS[dataset_config.dataset]
         # Multimodal samples carry media lists alongside their token fields,
         # so they pack by whole documents (FirstFit) rather than concat-then-
         # split, and the collator reshapes the media into patches.
         packing_config = MMSamplePackingConfig(dataset=recipe)
         collator = MultiModalCollator
     else:
-        tokenizer = HuggingFaceTokenizer(tokenizer_path=config.tokenizer_path)
+        tokenizer = HuggingFaceTokenizer(tokenizer_path=dataset_config.tokenizer_path)
         recipe = (
-            make_local_jsonl(path=config.dataset_path)
-            if config.dataset == "local_jsonl"
-            else DATASETS[config.dataset]
+            make_local_jsonl(path=dataset_config.dataset_path)
+            if dataset_config.dataset == "local_jsonl"
+            else DATASETS[dataset_config.dataset]
         )
         packing_config = ConcatThenSplitPackingConfig(dataset=recipe)
         collator = TextCollator
@@ -143,7 +154,7 @@ def build_dataloader(
         max_context_length=max_context_length,
         num_tokens_per_batch=num_tokens_per_batch,
         read_options=grain.ReadOptions(),
-        max_num_documents=config.max_num_documents,
+        max_num_documents=dataset_config.max_num_documents,
     )
     # The loader's config is built first and the graph filled in after,
     # because ``build_dataset_iteration_policy`` derives the policy the
@@ -154,11 +165,11 @@ def build_dataloader(
     loader_config = GrainDataLoaderConfig(
         dataset=None,
         collator=collator,
-        seed=seed,
-        shuffle=config.shuffle,
-        streaming_shuffle_buffer_size=config.streaming_shuffle_buffer_size,
-        num_prefetch_batches=config.num_prefetch_batches,
-        max_num_documents=config.max_num_documents,
+        seed=config.seed,
+        shuffle=dataset_config.shuffle,
+        streaming_shuffle_buffer_size=dataset_config.streaming_shuffle_buffer_size,
+        num_prefetch_batches=dataset_config.num_prefetch_batches,
+        max_num_documents=dataset_config.max_num_documents,
     )
     graph = packing_config.build(
         context=context,

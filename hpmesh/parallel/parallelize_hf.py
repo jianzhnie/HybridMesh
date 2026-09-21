@@ -1,9 +1,10 @@
 """One entry point that applies parallelism to a HuggingFace model.
 
 Order matters, and it is the whole content of this file: TP / CP / EP are
-declared first, ``torch.compile`` sits between, and FSDP wraps last so its hooks
-sit outermost. Each ``apply_*`` is a no-op when its degree is 1, so the same call
-runs from a single device up to a full hybrid mesh.
+declared first, activation checkpointing wraps each decoder layer next, then
+``torch.compile``, and FSDP wraps last so its hooks sit outermost. Each
+``apply_*`` is a no-op when its degree is 1 (or its mode off), so the same
+call runs from a single device up to a full hybrid mesh.
 
 PP is the exception to "one model in, one model out": with ``pp > 1`` the model
 is cut into per-stage chunks first (``pipeline_parallel.apply_pp``), each chunk
@@ -40,6 +41,7 @@ import torch.nn as nn
 
 from hpmesh.trainer.config import ParallelConfig
 
+from .activation_checkpoint import apply_ac
 from .context_parallel import apply_cp
 from .expert_parallel import apply_ep
 from .fully_shard.fsdp_wrap import apply_fsdp
@@ -59,17 +61,18 @@ def parallelize_hf_transformers(
     parallel_dims,
     device: torch.device | None = None,
     compile: bool = False,
+    activation_checkpoint: str = "none",
     global_batch_size: int | None = None,
     dataset: str = "random",
 ) -> nn.Module | PipelineParallelSetup:
     """Apply every parallelism dimension the config asks for, in order.
 
-    ``compile``, ``global_batch_size`` and ``dataset`` are training-side
-    values, passed explicitly rather than read off a run-wide config: this
-    layer's contract is ``ParallelConfig`` plus the handful of scalars the
-    guards actually need. ``global_batch_size`` is required only on the
-    ``pp > 1`` path (microbatch validation); ``dataset`` gates the same
-    path's corpus restriction.
+    ``compile``, ``activation_checkpoint``, ``global_batch_size`` and
+    ``dataset`` are training-side values, passed explicitly rather than read
+    off a run-wide config: this layer's contract is ``ParallelConfig`` plus the
+    handful of scalars the guards actually need. ``global_batch_size`` is
+    required only on the ``pp > 1`` path (microbatch validation); ``dataset``
+    gates the same path's corpus restriction.
 
     Returns the (possibly wrapped) model -- or, with ``pp > 1``, a
     ``PipelineParallelSetup``: pipeline parallelism cuts the model into
@@ -77,6 +80,12 @@ def parallelize_hf_transformers(
     return shapes are how the caller learns which case it is in.
     """
     if parallel_dims is not None and parallel_dims.pp_enabled:
+        if activation_checkpoint != "none":
+            raise NotImplementedError(
+                "activation checkpointing is not wired through the pp > 1 path: "
+                "it belongs between apply_tp and compile inside apply_pp's "
+                "per-chunk pipeline, which does not accept it yet."
+            )
         if global_batch_size is None:
             raise ValueError(
                 "pp > 1 needs global_batch_size for microbatch validation; "
@@ -125,6 +134,10 @@ def parallelize_hf_transformers(
     model = apply_tp(model, mesh, cfg)
     model = apply_ep(model, cfg, ep_group=ep_group)
     model = apply_cp(model, mesh, cfg)
+    # AC after the sharding wrappers (it must enclose the TP/CP-modified
+    # layer), before compile and FSDP -- torchtitan's order in
+    # ``parallelize_llama``.
+    model = apply_ac(model, activation_checkpoint)
 
     if compile:
         model = torch.compile(model)

@@ -33,6 +33,7 @@ import torch.nn.functional as F
 __all__ = [
     "IGNORE_INDEX",
     "LossFunction",
+    "chunked_lm_head_cross_entropy",
     "compute_logprobs",
     "cross_entropy_loss",
     "mse_loss",
@@ -273,6 +274,90 @@ class _LossParallelCrossEntropy(torch.autograd.Function):
 def mse_loss(pred: torch.Tensor, labels: torch.Tensor) -> torch.Tensor:
     """MSE loss with sum reduction, for models trained on continuous targets."""
     return F.mse_loss(pred.float(), labels.float().detach(), reduction="sum")
+
+
+def chunked_lm_head_cross_entropy(
+    lm_head: torch.nn.Module,
+    hidden_states: torch.Tensor,
+    labels: torch.Tensor,
+    *,
+    num_chunks: int,
+    grad_scale: torch.Tensor | float,
+) -> torch.Tensor:
+    """Summed next-token CE, computed in sequence chunks to bound peak memory.
+
+    Materializing ``lm_head(hidden_states)`` costs ``T * V`` floats at once,
+    which with a 150k vocabulary dwarfs the rest of the step. This splits the
+    token axis into ``num_chunks`` pieces and runs ``lm_head`` + cross-entropy
+    on one piece at a time, so the peak logits memory is ``T * V / num_chunks``
+    (the accumulated gradients are ``T * H`` and ``V * H`` -- independent of
+    the chunking).
+
+    The function runs the backward ITSELF and returns the detached summed loss
+    (un-normalized, the same sum reduction ``cross_entropy_loss`` uses). The
+    backward is per chunk -- that is what keeps the peak low, since each
+    chunk's logits are freed before the next chunk's are computed -- and each
+    chunk's backward is scaled by ``grad_scale`` (the trainer passes
+    ``1 / global_valid_tokens``), so the accumulated gradients equal those of
+    ``(full_sum * grad_scale).backward()``. Chunking a sum and backwarding the
+    pieces is exact: one chunk's logits gradient does not depend on any other
+    chunk.
+
+    Two rounds of backward happen: the per-chunk ones (which accumulate the
+    lm_head weight gradient and each chunk's hidden-state gradient), then a
+    single ``torch.autograd.backward(hidden_states, assembled_grads)`` that
+    propagates the assembled ``T * H`` gradient through the decoder in one
+    pass -- the decoder graph is traversed once, not once per chunk.
+
+    Chunks need not divide the sequence: ``torch.chunk`` leaves a short final
+    piece, and the sum reduction makes the split invisible to the value. Under
+    CP/TP the hidden states are already a shard of the sequence along the
+    token axis; chunking that local shard composes with the sum reduction the
+    same way.
+
+    ``hidden_states`` must require grad -- this is a training path, and a
+    silent no-backward would look like a working step.
+    """
+    if num_chunks < 1:
+        raise ValueError(f"num_chunks must be >= 1, got {num_chunks}")
+    if hidden_states.ndim != 2:
+        raise ValueError(
+            f"hidden_states must be (T, H), got shape {tuple(hidden_states.shape)}"
+        )
+    if labels.shape[0] != hidden_states.shape[0]:
+        raise ValueError(
+            f"labels length {labels.shape[0]} does not match the token axis of "
+            f"hidden_states ({hidden_states.shape[0]})"
+        )
+    if not hidden_states.requires_grad:
+        raise ValueError(
+            "chunked_lm_head_cross_entropy is a training path: hidden_states "
+            "must require grad."
+        )
+
+    hidden_chunks = hidden_states.chunk(num_chunks, dim=0)
+    label_chunks = labels.chunk(num_chunks, dim=0)
+    total = hidden_states.new_zeros((), dtype=torch.float32)
+    hidden_grads: list[torch.Tensor] = []
+    for hidden_chunk, label_chunk in zip(hidden_chunks, label_chunks, strict=True):
+        # detach + requires_grad_ makes the chunk a leaf, so its backward
+        # stops at the lm_head boundary and the chunk's hidden gradient lands
+        # in ``.grad`` for assembly below.
+        detached = hidden_chunk.detach().requires_grad_(True)
+        logits = lm_head(detached)
+        chunk_loss = F.cross_entropy(
+            logits.float(),
+            label_chunk,
+            reduction="sum",
+            ignore_index=IGNORE_INDEX,
+        )
+        total = total + chunk_loss.detach()
+        (chunk_loss * grad_scale).backward()
+        assert detached.grad is not None
+        hidden_grads.append(detached.grad)
+
+    torch.autograd.backward(hidden_states, grad_tensors=torch.cat(hidden_grads))
+    return total
 
 
 def compute_logprobs(
