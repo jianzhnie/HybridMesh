@@ -264,6 +264,7 @@ class Trainer:
             device=self.device,
             compile=cfg.training.compile,
             activation_checkpoint=cfg.training.activation_checkpoint_mode,
+            selective_ac=cfg.training.selective_ac,
             global_batch_size=cfg.training.global_batch_size,
             dataset=cfg.training.dataloader.dataset,
         )
