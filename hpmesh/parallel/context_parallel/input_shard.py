@@ -36,6 +36,7 @@ __all__ = [
     "MASK_Q_SEQ_DIM",
     "shard_attention_mask_for_cp",
     "shard_batch_for_cp",
+    "shard_batch_for_tp",
 ]
 
 # BlockMask is (B, H, Q, KV); only the Q axis is sequence-sharded. The KV axis
@@ -128,6 +129,57 @@ def shard_batch_for_cp(
         buffers=[input_ids, labels, positions],
         seq_dims=[0, 0, 0],
         load_balancer=balancer,
+    )
+    return tuple(sharded)
+
+
+def shard_batch_for_tp(
+    input_ids: torch.Tensor,
+    labels: torch.Tensor,
+    tp_mesh: DeviceMesh,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Shard the flattened batch along the sequence dim across the TP mesh.
+
+    This is what makes sequence parallelism's premise true for TP: hpmesh's
+    fused TP GEMMs (``AllGatherLinear`` / ``LinearReduceScatter``) all-gather
+    the sequence *inside* the projection, so every rank must enter the forward
+    holding only its ``T / tp`` slice. Without this cut the gather concatenates
+    ``tp`` copies of the full sequence and every sharded weight gradient comes
+    out ``tp`` times too large.
+
+    Args:
+        input_ids: ``(T,)`` flat token ids; already CP-sharded when CP is on,
+            so the TP slice lands inside this rank's CP shard and the
+            in-projection all-gather reassembles exactly that shard.
+        labels: ``(T,)`` next-token labels, sharded identically so the loss
+            pairs each logit with the right target.
+        tp_mesh: the TP axis mesh.
+
+    Returns:
+        The sharded ``(input_ids, labels)`` pair, each of length ``T / tp``.
+
+    Positions are deliberately not taken: after the in-projection gather each
+    rank's attention and RoPE see the assembled sequence (the CP shard, or the
+    full sequence with CP off), so the positions the forward needs are the
+    CP-sharded -- or full -- ones, never a TP slice. The same holds for the
+    attention mask, which is why Q-sharding stays a CP-only operation.
+
+    Contiguous, never load-balanced: the causal-triangle imbalance a load
+    balancer smooths exists between the assembled CP shards, so balancing is
+    the CP shard's business; slicing inside it evenly keeps every TP rank at
+    the same GEMM size.
+    """
+    _require_torch_cp()
+    if input_ids.shape[0] % tp_mesh.size() != 0:
+        raise ValueError(
+            f"sequence length {input_ids.shape[0]} is not divisible by "
+            f"tp={tp_mesh.size()}; seq_len must be a multiple of the TP degree."
+        )
+    sharded = _context_parallel_shard(
+        mesh=tp_mesh,
+        buffers=[input_ids, labels],
+        seq_dims=[0, 0],
+        load_balancer=None,
     )
     return tuple(sharded)
 

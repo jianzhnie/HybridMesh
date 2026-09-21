@@ -37,6 +37,8 @@ import torch.distributed.distributed_c10d as c10d
 import torch.nn as nn
 from torch.distributed.device_mesh import DeviceMesh
 
+from hpmesh.utils.batch_invariant import is_in_batch_invariant_mode
+
 __all__ = ["CPFlexKernel"]
 
 # q/k/v arrive HF-shaped: (batch, heads, seq, dim). The sequence axis the CP
@@ -161,8 +163,10 @@ class CPFlexKernel(nn.Module):
             self._flex_cp_allgather = flex_cp_allgather
             self._cp_pg_name = c10d._get_process_group_name(cp_mesh.get_group())
         # Ulysses rebuilds the full-length causal mask per forward (see the
-        # module docstring); cache it per (length, device) so the rebuild
-        # happens once per step, not once per layer per step.
+        # module docstring); cache it per (length, device, batch-invariant
+        # mode). The cache lives on the kernel instance -- one per attention
+        # layer -- so the rebuild happens once per length per layer, not once
+        # per forward.
         self._full_masks: dict = {}
 
     def forward(self, query, key, value, *, module, block_mask=None, **kwargs):
@@ -241,11 +245,14 @@ class CPFlexKernel(nn.Module):
         return out.transpose(1, 2)  # HF's interface contract is (b, s/cp, h, d)
 
     def _full_length_causal_mask(self, q_BHSD: torch.Tensor):
-        """The full-sequence causal BlockMask, built once per length and device.
+        """The full-sequence causal BlockMask, built once per length, device,
+        and batch-invariant mode.
 
         Under ulysses, q/k/v arrive at flex with the full sequence, so the mask
         is the unsharded causal one -- the same mask the wrapper builds
-        internally before Q-sharding it for kv_allgather.
+        internally before Q-sharding it for kv_allgather. ``separate_full_blocks``
+        tracks the wrapper's batch-invariant-mode choice, so the ulysses
+        decomposition matches every other path's numerics.
         """
         from torch.nn.attention.flex_attention import create_block_mask
 
@@ -253,7 +260,7 @@ class CPFlexKernel(nn.Module):
             return q_idx >= kv_idx
 
         seq_len = q_BHSD.shape[_SEQ_DIM]
-        key = (seq_len, q_BHSD.device)
+        key = (seq_len, q_BHSD.device, is_in_batch_invariant_mode())
         mask = self._full_masks.get(key)
         if mask is None:
             mask = create_block_mask(
@@ -264,6 +271,7 @@ class CPFlexKernel(nn.Module):
                 seq_len,
                 device=q_BHSD.device,
                 BLOCK_SIZE=128,
+                separate_full_blocks=not is_in_batch_invariant_mode(),
             )
             self._full_masks[key] = mask
         return mask

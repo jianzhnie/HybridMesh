@@ -80,6 +80,7 @@ import torch
 import torch.distributed as dist
 import torch.nn.functional as F
 from torch.distributed.device_mesh import DeviceMesh
+from torch.distributed.tensor import DTensor
 
 from .. import parallel
 from ..components.checkpointer import DATALOADER, TRAIN_STATE, CheckpointManager
@@ -100,6 +101,7 @@ from ..models.common.aux_loss import (
     collect_aux_loss_metrics,
     register_aux_loss_zero_hook,
 )
+from ..models.common.moe import register_moe_load_balancing_hook
 from ..models.hf_wrapper import (
     HFTransformerModel,
     build_model_config_for,
@@ -108,6 +110,11 @@ from ..models.hf_wrapper import (
 from ..parallel.collectives import clip_grad_norm_, dist_max, dist_sum, dist_sum_tensor
 from ..parallel.parallel_dims import ParallelDims
 from ..parallel.pipeline_parallel import PipelineParallelSetup
+from ..parallel.tensor_parallel.tp import (
+    ColwiseLinear,
+    ColwiseLinearNoGather,
+    RowwiseLinear,
+)
 from ..utils.gc import GarbageCollection
 from ..utils.logger_utils import get_logger
 from ..utils.spmd_context import spmd_context
@@ -143,8 +150,8 @@ class Trainer:
     optimizer: torch.optim.Optimizer
     # Defaulted, not just annotated: ``_data_iterator`` reads it, and that is
     # the one helper the tests drive off a ``Trainer`` built with ``__new__``.
-    # ``None`` is also a real state -- it means "fall back to the synthetic
-    # source" -- so the default is the correct value, not just a placeholder.
+    # A real Trainer always holds a loader (it is registered in the checkpoint
+    # states), so ``None`` is only the not-built state of such a test double.
     dataloader: BaseDataLoader | None = None
     lr_scheduler: LRSchedulersContainer | None
     checkpointer: CheckpointManager | None
@@ -182,6 +189,28 @@ class Trainer:
             self.mesh = build_mesh(self.parallel_dims)
 
         # 2. the model -- HF's own initialization, wrapped for this loop
+        #
+        # EP + gradient clipping is rejected up front: hpmesh's EP physically
+        # partitions experts across the ep ranks (plain or efsdp-sharded
+        # tensors, never DTensors on an "ep" mesh axis), so neither the dense
+        # ``clip_grad_norm_`` nor torchtitan's ``_clip_grad_norm_with_ep``
+        # (which asserts exactly that DTensor premise) sums expert-gradient
+        # norms across the EP group. The clip threshold would be computed from
+        # this rank's experts alone. Loud-raise rather than clip to a wrong
+        # norm; see ``parallel/collectives.py``.
+        if (
+            self.parallel_dims is not None
+            and self.parallel_dims.ep_enabled
+            and cfg.max_norm > 0
+        ):
+            raise NotImplementedError(
+                f"expert_parallel_size={self.parallel_dims.ep} with gradient "
+                f"clipping (max_norm={cfg.max_norm}) is not supported: the "
+                "EP-aware grad-norm reduction is not ported (hpmesh's expert "
+                "parameters are not DTensors on an 'ep' mesh axis, the premise "
+                "torchtitan's _clip_grad_norm_with_ep asserts). Set max_norm "
+                "<= 0 to train without clipping."
+            )
         model = HFTransformerModel(build_model_config_for(cfg)).to(self.device)
 
         # 3. parallelism, in Titan's order: tp/pp/cp/ep declared first, fsdp last
@@ -245,6 +274,12 @@ class Trainer:
         # not once per inner optimizer, which is what a loop over the inner
         # optimizers would give under pipeline parallelism.
         register_aux_loss_zero_hook(
+            self.optimizer, self.model_parts, self.parallel_dims
+        )
+        # A second pre-hook on the same container, same granularity. No-op for
+        # a model without MoE layers, which is every model except a swapped-in
+        # one (the swap is what installs ``load_balance_coeff``).
+        register_moe_load_balancing_hook(
             self.optimizer, self.model_parts, self.parallel_dims
         )
 
@@ -374,10 +409,12 @@ class Trainer:
     def _build_dataloader(self) -> BaseDataLoader | None:
         """Build the micro-batch source the config names.
 
-        Returns ``None`` when the source cannot be checkpointed, which today
-        means the synthetic one: its position is derivable from the step
-        counter, so carrying it separately would only add a second copy of
-        state that could disagree with the first.
+        Whatever the source, it rides along in the checkpoint's ``states``:
+        resuming without its read position would resume the weights and restart
+        the data, silently training a second pass over the beginning of the
+        corpus. The synthetic loader's ``load_state_dict`` reaches the saved
+        position by replaying generated batches, which is exact (batch k is a
+        pure function of ``(seed, k)``) if not free.
         """
         dp_rank, dp_world_size = self._dp_rank_world_size()
         batch_size_per_rank = self._batch_size_per_rank(dp_world_size)
@@ -395,10 +432,6 @@ class Trainer:
             # per rank is this many tokens per rank of the global batch.
             num_tokens_per_batch=batch_size_per_rank * self.cfg.max_seq_len,
         )
-        if isinstance(loader, RandomTokenDataLoader):
-            # The random positions ARE the step counter, already in the
-            # checkpoint -- a separate cursor would be a second copy of it.
-            return None
         return loader
 
     def _data_iterator(self) -> Iterator[Batch | TrainerBatch]:
@@ -520,11 +553,11 @@ class Trainer:
           ("tokens it produced"), not about the loss. The two numbers differ --
           a document's final position is loaded but never predicted -- and that
           is why they are not one field.
-        * **Everything else moves to the device and goes to the model**, whose
-          ``preprocess_inputs`` owns the shapes. Tensors move here, in the step,
-          rather than on read: ``batch_generator`` documents the CPU invariant
-          ``torchtitan`` keeps for the same reason, so holding the rest of the
-          accumulation window costs host memory, not device memory.
+        * **Everything else stays on the host until its group is consumed.**
+          ``_preprocess`` moves one group's tensors to the device just ahead of
+          that group's forward (see ``_to_device``), so holding the rest of the
+          accumulation window costs host memory, not device memory -- the CPU
+          invariant ``torchtitan`` documents for ``batch_generator``.
         """
         labels = batch.labels if isinstance(batch, Batch) else batch["labels"]
         self.ntokens_seen += labels.numel()
@@ -534,18 +567,27 @@ class Trainer:
             # ``num_valid_tokens`` is the model's to ignore, and a plain int
             # among tensors would be splatted into the forward as a kwarg.
             batch.pop("num_valid_tokens", None)
-            batch = {
+        return {"batch": batch, "num_valid_tokens": num_valid_tokens}
+
+    def _to_device(self, batch: Batch | TrainerBatch) -> Batch | TrainerBatch:
+        """Move one consumption group's tensors to the training device.
+
+        Called by ``_preprocess``, once per group just ahead of that group's
+        forward -- not at read time. Reading the whole accumulation window onto
+        the device up front would keep every micro-batch resident in device
+        memory for the whole window, which is exactly what deferring avoids.
+        """
+        if isinstance(batch, dict):
+            return {
                 key: value.to(self.device, non_blocking=True)
                 if isinstance(value, torch.Tensor)
                 else value
                 for key, value in batch.items()
             }
-        else:
-            batch = Batch(
-                input_ids=batch.input_ids.to(self.device, non_blocking=True),
-                labels=batch.labels.to(self.device, non_blocking=True),
-            )
-        return {"batch": batch, "num_valid_tokens": num_valid_tokens}
+        return Batch(
+            input_ids=batch.input_ids.to(self.device, non_blocking=True),
+            labels=batch.labels.to(self.device, non_blocking=True),
+        )
 
     def _preprocess(
         self, microbatch: dict[str, Any]
@@ -553,10 +595,12 @@ class Trainer:
         """Ask the model to turn its batch into forward inputs.
 
         A thin wrapper so the two bodies call the seam the same way and neither
-        has to know which model object is canonical on its stage.
+        has to know which model object is canonical on its stage. The group's
+        tensors are moved to the device here -- at consumption, not at read --
+        so an accumulation window's unread groups stay on the host.
         """
         return self._example_model.preprocess_inputs(
-            microbatch["batch"],
+            self._to_device(microbatch["batch"]),
             parallel_dims=self.parallel_dims,
             parallelism=self.cfg.parallel,
             max_context_length=self.cfg.max_seq_len,
@@ -762,6 +806,50 @@ class Trainer:
         # last-stage rank.
         return self._pp_loss_sentinel
 
+    def _allreduce_replicated_tp_grads(self) -> None:
+        """Sum the gradients of TP-*replicated* parameters across the TP group.
+
+        Under tensor parallelism every rank enters the forward holding only its
+        own ``T / tp`` sequence shard (the sequence-parallelism premise), so a
+        parameter that is not itself TP-sharded -- the token embedding, the
+        RMSNorms, the LM head -- accumulates a gradient over just this rank's
+        tokens. No collective inside the TP modules covers them (the fused
+        GEMMs reduce only their own sharded weights' gradients), so without
+        this all-reduce the copies train on ``1/tp`` of the tokens and drift
+        apart. The sharded weights are identified by module type: ``apply_tp``
+        realizes every sharded projection as one of the three classes below,
+        and everything else in the model is replicated.
+
+        Sum, not average: each rank's partial gradient covers a disjoint set of
+        tokens, and the true gradient is the total. No-op when tp == 1.
+        """
+        tp_mesh = (
+            None
+            if self.parallel_dims is None
+            else self.parallel_dims.get_optional_mesh("tp")
+        )
+        if tp_mesh is None:
+            return
+        sharded_ids = {
+            id(module.weight)
+            for part in self.model_parts
+            for module in part.modules()
+            if isinstance(module, (ColwiseLinear, RowwiseLinear, ColwiseLinearNoGather))
+        }
+        group = tp_mesh.get_group()
+        for part in self.model_parts:
+            for param in part.parameters():
+                if param.grad is None or id(param) in sharded_ids:
+                    continue
+                grad = param.grad
+                # FSDP2 parameters carry DTensor gradients; reducing the local
+                # shard in place is the reduction, since every rank of a TP
+                # group holds the same shard of the same parameter.
+                if isinstance(grad, DTensor):
+                    dist.all_reduce(grad.local_tensor, group=group)
+                else:
+                    dist.all_reduce(grad, group=group)
+
     def _param_context(self):
         """The context a forward/backward runs inside.
 
@@ -895,6 +983,10 @@ class Trainer:
 
         loss_sum = torch.sum(torch.stack(loss_sums))
 
+        # After the last backward, before clipping: replicated parameters under
+        # TP hold token-partial gradients that nothing else reduces.
+        self._allreduce_replicated_tp_grads()
+
         grad_norm = clip_grad_norm_(
             [p for part in self.model_parts for p in part.parameters()],
             max_norm=self.cfg.max_norm,
@@ -961,17 +1053,22 @@ class Trainer:
         if not should_log:
             return None
 
-        if loss_mesh is not None and local_valid_tokens > 0:
-            # The maximum is over each rank's *average* loss, so the local sum
-            # is divided by the local count -- a rank holding a short slice of
-            # the sequence is not penalized for it.
-            local_avg = loss_sum / local_valid_tokens_tensor
+        if loss_mesh is not None:
+            # The collectives are entered UNCONDITIONALLY: gating them on a
+            # local predicate (this rank saw no valid tokens this window) would
+            # let that rank skip a reduction the others enter, hanging the
+            # step. Only the per-rank division needs the guard -- a rank with
+            # no valid tokens contributes 0 to the max.
+            local_avg = (
+                loss_sum / local_valid_tokens_tensor
+                if local_valid_tokens > 0
+                else torch.zeros_like(loss_sum)
+            )
             global_avg_loss = float(dist_sum(loss, loss_mesh))
             global_max_loss = float(dist_max(local_avg, loss_mesh))
         else:
-            # Single rank, or a rank holding no valid tokens: the two are the
-            # same number by construction in the first case, and the second has
-            # no local average to report.
+            # Single rank: the two reported losses are the same number by
+            # construction.
             global_avg_loss = global_max_loss = float(loss)
         metrics = {
             "loss": global_avg_loss,

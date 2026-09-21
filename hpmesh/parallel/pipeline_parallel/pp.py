@@ -153,6 +153,13 @@ def _validate_microbatches(
         )
     rows_per_rank = global_batch_size // dp
     num_microbatches = cfg.num_pp_microbatches
+    # torchtitan validates this in its config's __post_init__ (trainer.py);
+    # hpmesh's config does not, so the check lives here -- a 0 would otherwise
+    # surface as a ZeroDivisionError on the modulo below.
+    if num_microbatches <= 0:
+        raise ValueError(
+            f"num_pp_microbatches must be greater than 0, got {num_microbatches}."
+        )
     if rows_per_rank % num_microbatches != 0:
         raise ValueError(
             f"per-rank batch rows ({global_batch_size} / {dp} = "
