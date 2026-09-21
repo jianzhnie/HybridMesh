@@ -1,19 +1,10 @@
 # hpmesh -> torchtitan 对应关系表
 
-基线: **hpmesh** **`58eb279`** / **torchtitan** **`1c7ab8089`**(2026-09-21 全表重算,
-torchtitan 工作区在该 sha 上无未提交改动)。表内所有 `ratio` 都是本次重算的
-值。重算的结果是**大部分行复现了原值**,但**若干行改判、几条事实性说法是错的**,
-另有已加的模块未进表(见文末"本次重算的改动")。
+[hpmesh](/Users/robin/work_dir/HybridMesh) 拿掉了 [TorchTitan](/Users/robin/work_dir/torchtitan) 的 `Configurable` 与 `Module` 两个抽象层，换来一个明显更短
+的框架：约 91 个模块、20.6k 行，覆盖 TP / FSDP2 / CP / EP / PP 五条并行路径的装配、
+训练循环、checkpoint 与等价性测试。
 
-**例外**:`parallel/activation_checkpoint.py` 在 2026-09-21 当天补完 `SelectiveAC`
-(原基线 0.149 -> 现在 0.374),`test_trainer.py` 那次 `trainer/config.py` 改动也没进
-基线 sha,所以这两行(连同连带微动的 `parallelize_hf.py`)的 ratio 是对**当前
-工作区**测的,不是对 `58eb279`。
-
-回答的问题是:*torchtitan 改了文件 X,hpmesh 哪些文件必须跟着改?* 以及反过来
-*这个 hpmesh 文件的上游是谁*。
-
-***
+下面是对应关系表：
 
 ## 怎么用这张表
 
