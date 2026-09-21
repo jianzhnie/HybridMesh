@@ -27,10 +27,7 @@ the first two plus whatever the caller passes in ``states``:
 * ``optimizer`` -- the ``OptimizersContainer`` itself, passed through. It is
   already a ``Stateful`` whose state dict is flat and FQN-keyed, which is what
   DCP needs to reshard a pipeline checkpoint, and it materializes a fresh
-  optimizer's Adam moments before DCP plans a load. Both jobs used to be an
-  ``OptimizerWrapper``'s; the container absorbed them. The wrapper still exists
-  in ``components/optimizer/`` for the single-optimizer case, but nothing in
-  this package is handed one.
+  optimizer's Adam moments before DCP plans a load.
 * ``train_state`` -- the ``Trainer`` itself. torchtitan's ``Trainer`` is a
   ``Stateful`` exposing ``step`` and ``ntokens_seen``; hpmesh's trainer exposes
   the same two through ``state_dict``/``load_state_dict`` for the same reason:

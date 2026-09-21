@@ -41,10 +41,10 @@ torchtitan's component containers, so which of them a run actually populates
 differs -- see ``components/checkpointer/__init__.py`` for the mapping.
 
 The ``Stateful`` views a checkpoint wraps its inputs in -- ``ModelWrapper`` here,
-``OptimizerWrapper`` in ``components/optimizer/`` -- are not part of this
-contract: they are what a model or an optimizer looks like *to* a checkpointer,
-and they live with the thing they wrap. This module keeps the model one only
-because a model has no other home.
+and the ``OptimizersContainer`` itself on the optimizer side -- are not part of
+this contract: they are what a model or an optimizer looks like *to* a
+checkpointer, and they live with the thing they wrap. This module keeps the
+model one only because a model has no other home.
 """
 
 from __future__ import annotations

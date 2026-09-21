@@ -1,31 +1,28 @@
-# Copyright (c) Meta Platforms, Inc. and affiliates.
-# All rights reserved.
-#
-# This source code is licensed under the BSD-style license found in the
-# LICENSE file in the root directory of this source tree.
+"""The optimizer container a run trains with, and the ``Stateful`` view over it.
 
-"""The optimizers a run trains with, and the ``Stateful`` view over them.
-
-Moved here from ``components/checkpointer/base.py``: neither ``OptimizerWrapper``
+Moved here from ``components/checkpointer/base.py``: neither the materialization
 nor ``init_optim_state`` is checkpoint machinery. The materialization is an
 optimizer operation the checkpointer happens to need, and the FQN re-keying is
 the on-disk *format* of optimizer state, which is a property of the optimizer,
 not of the thing writing it out.
 
-Vendored from torchtitan's ``components/optimizer/optimizer.py``: the same
-``OptimizersContainer``, split across the same two roles.
+Vendored from torchtitan's ``components/optimizer/optimizer.py``. The unit that
+came across is ``OptimizersContainer``, driven by the training loop and handed
+to the checkpointer.
 
-* **``OptimizersContainer``** is what the training loop drives. It owns one
-  ``torch.optim.Optimizer`` per (model part, optimizer name) pair, so a run with
-  pipeline parallelism and two optimizer types holds four inner optimizers.
-  ``step`` / ``zero_grad`` fan out over them; ``state_dict`` /
+* It owns one ``torch.optim.Optimizer`` per (model part, optimizer name) pair, so
+  a run with pipeline parallelism and two optimizer types holds four inner
+  optimizers. ``step`` / ``zero_grad`` fan out over them; ``state_dict`` /
   ``load_state_dict`` flatten them into one FQN-keyed dict, which is what makes
   a PP checkpoint unambiguous (see ``utils.get_flat_optim_state_dict``).
-* **``OptimizerWrapper``** is the older, narrower spelling of the same idea: one
-  inner optimizer, no parameter grouping. The trainer still builds a bare
-  ``AdamW``, so this remains the object the checkpointer is handed until that
-  changes. ``OptimizersContainer`` supersedes it -- a container with a single
-  catch-all group carries the same state.
+* One of its behaviors is load-bearing beyond its name: ``state_dict``
+  **materializes** optimizer state first (``init_optim_state``, a zero-gradient,
+  zero-lr step) before reporting it. PyTorch's ``Optimizer`` already satisfies
+  ``Stateful``, so that is what makes this object usable as one -- a resumed run
+  builds a fresh optimizer whose Adam moments do not exist until its first
+  ``step()``, and DCP, handed an unmaterialized state dict, would find no
+  ``exp_avg`` to write into and silently restart from a cold optimizer under
+  warm weights.
 
 Departures from upstream, all subtractive:
 
@@ -40,10 +37,12 @@ Departures from upstream, all subtractive:
   setting stops at ``fused`` / ``foreach`` / ``for-loop``.
 * **No ``optimizer_factory_kwargs_by_name``.** That hook exists for per-parameter
   compute metadata and communication bucket specs; nothing in hpmesh passes it.
-* **``_validate_params`` raises ``ValueError``, not ``AssertionError``.** An
-  unclaimed trainable parameter is reachable from user config -- list explicit
-  ``param_groups`` and forget the catch-all -- and the contract is that
-  user-facing errors are ``ValueError``.
+* **``_validate_params`` raises ``ValueError``, not ``AssertionError``, and
+  names the offending parameters.** An unclaimed trainable parameter is
+  reachable from user config -- list explicit ``param_groups`` and forget the
+  catch-all -- and the contract is that user-facing errors are ``ValueError``.
+  A parameter left out and a parameter assigned twice are different mismatches
+  with different fixes, which a pair of counts cannot tell apart.
 """
 
 from __future__ import annotations
@@ -67,13 +66,14 @@ from .utils import (
 )
 
 if TYPE_CHECKING:
-    # Type-only: ``trainer.config`` imports this package, so a runtime import
-    # here would close the cycle config -> optimizer -> config.
-    from ...trainer.config import ParamGroupConfig
+    # Type-only. ``trainer.config`` does not import this package at runtime (it
+    # describes the object; the trainer builds it), so there is no cycle to
+    # break -- this matches ``lr_scheduler.py``'s import of ``LRSchedulerConfig``.
+    from ...trainer.config import OptimizerConfig, ParamGroupConfig
 
 logger = get_logger(__name__)
 
-__all__ = ["OptimizersContainer", "OptimizerWrapper"]
+__all__ = ["OptimizersContainer"]
 
 
 class OptimizersContainer(Optimizer, Stateful):
@@ -116,7 +116,9 @@ class OptimizersContainer(Optimizer, Stateful):
     optimizers: list[Optimizer]
     model_parts: list[nn.Module]
 
-    def __init__(self, config: Any, *, model_parts: list[nn.Module]) -> None:
+    def __init__(
+        self, config: OptimizerConfig, *, model_parts: list[nn.Module]
+    ) -> None:
         impl_kwargs = self._build_impl_kwargs(config)
         all_params: list[nn.Parameter] = []
         self.optimizers = []
@@ -147,7 +149,7 @@ class OptimizersContainer(Optimizer, Stateful):
         return optimizer_factories[name]
 
     @staticmethod
-    def _build_impl_kwargs(config: Any) -> dict[str, Any]:
+    def _build_impl_kwargs(config: OptimizerConfig) -> dict[str, Any]:
         """The implementation kwargs (``fused`` / ``foreach``) applied to all groups.
 
         An ``optimizer_kwargs`` entry on a ``ParamGroupConfig`` overrides these --
@@ -252,23 +254,41 @@ class OptimizersContainer(Optimizer, Stateful):
     def _validate_params(self, all_params: list[nn.Parameter]) -> None:
         """Every trainable parameter must land in exactly one group.
 
-        Upstream asserts this; it is user-reachable here -- supplying explicit
-        ``param_groups`` without a catch-all silently leaves parameters frozen at
-        their initial values -- so it raises ``ValueError`` with the count.
+        Upstream asserts equality of the id sets; this names *which* invariant
+        broke, because the two directions have different fixes and upstream's
+        count-only message leaves them indistinguishable. User-reachable both
+        ways, which is why this raises ``ValueError`` rather than asserting:
+
+        * missing -- explicit ``param_groups`` without a catch-all, so a
+          parameter would silently stay frozen at its initial value.
+        * assigned twice -- two overlapping patterns (first-match-wins makes
+          this unreachable through the public path today, but the equality
+          upstream tests for would miss it, and silently double-stepping a
+          parameter is the failure it was there to catch).
         """
-        expected = {
-            id(param)
+        registered = {id(param) for param in all_params}
+        missing = [
+            (name, param)
             for model in self.model_parts
-            for param in model.parameters()
-            if param.requires_grad
-        }
-        actual = {id(param) for param in all_params}
-        if expected != actual:
+            for name, param in model.named_parameters()
+            if param.requires_grad and id(param) not in registered
+        ]
+        if missing:
+            names = ", ".join(
+                f"{name} ({tuple(param.shape)})" for name, param in missing
+            )
             raise ValueError(
-                "optimizer.param_groups left trainable parameters unassigned: "
-                f"{len(expected)} trainable params in the model, "
-                f"{len(actual)} assigned. Add a catch-all "
-                "ParamGroupConfig(pattern='.*') last."
+                f"optimizer.param_groups left {len(missing)} trainable parameter(s) "
+                f"unassigned, so they would keep their initial values: {names}. "
+                "Add a catch-all ParamGroupConfig(pattern='.*') last."
+            )
+
+        duplicates = len(all_params) - len(registered)
+        if duplicates:
+            raise ValueError(
+                f"optimizer.param_groups assigned {duplicates} parameter(s) to more "
+                f"than one group; let the first matching pattern win. Overlapping "
+                f"patterns are the usual cause."
             )
 
     def __iter__(self) -> Iterator[Optimizer]:
@@ -316,6 +336,15 @@ class OptimizersContainer(Optimizer, Stateful):
             init_optim_state(optimizer)
             load_flat_optim_state_dict(optimizer, state_dict)
 
+    def init_cache_state_dict(self) -> None:
+        """Initialize cached state dict for TorchFT. No-op for base class.
+
+        Present because upstream's subclasses override it and the training loop
+        would call it unconditionally; keeping the no-op means such a caller
+        does not have to know which container it holds.
+        """
+        pass
+
     def _post_init(self, all_params: list[nn.Parameter]) -> None:
         # ``Optimizer.__init__`` is what populates ``param_groups`` and sets up
         # the hook machinery that ``register_step_pre_hook`` needs. The empty
@@ -323,117 +352,3 @@ class OptimizersContainer(Optimizer, Stateful):
         # only a view over the inner optimizers' parameters, and each inner
         # optimizer already holds the hyperparameters for its groups.
         Optimizer.__init__(self, all_params, {})
-
-
-class OptimizerWrapper(Stateful):
-    """A ``Stateful`` view over one optimizer that survives a fresh load.
-
-    ``torch.optim.Optimizer`` already satisfies ``Stateful``, and DCP writes
-    straight into the tensors a ``Stateful`` reports -- which is why a *plain*
-    optimizer works for saving and for loading into an optimizer that has
-    already taken a step. It does not work for the case that matters: a resumed
-    run builds a fresh optimizer, whose Adam moments do not exist until its
-    first ``step()``, so DCP finds no ``exp_avg`` to write into and the run
-    silently restarts from a cold optimizer under warm weights.
-
-    The fix is to give DCP the tensors to load into before it plans the load.
-    ``load_state_dict`` therefore materializes the state first (via
-    ``init_optim_state``, a zero-gradient, zero-lr step) and only then hands the
-    state dict to the optimizer, which -- with the state present -- restores in
-    place.
-
-    PyTorch expects this of a ``Stateful`` wrapper: it calls ``load_state_dict``
-    on the *object it was given*, and that object is responsible for pushing the
-    values into whatever it manages. hpmesh hands DCP this wrapper instead of
-    the bare optimizer, so the contract is met.
-
-    Args:
-        optimizer: the optimizer to wrap.
-        fqn_keying: when on, optimizer state is keyed by parameter FQN rather
-            than by positional index, and the ``param_groups`` entry is reduced
-            to the values that are identical across stages. Pipeline parallelism
-            needs this: every stage's optimizer numbers its own parameters from
-            0, so the positional keys of two stages collide in one shared
-            checkpoint (torchtitan solves the same collision with its
-            ``OptimizersContainer``'s FQN flattening). The FQNs are read off the
-            wrapper's own ``fqns``, so the caller must have built the optimizer
-            over exactly those parameters in that order -- the trainer does
-            (``chain(*(part.parameters() ...))``). Off keeps the positional
-            format, which every non-PP checkpoint already on disk uses.
-        fqns: the parameter FQNs, in optimizer order. Only read when
-            ``fqn_keying`` is on.
-    """
-
-    def __init__(
-        self,
-        optimizer: torch.optim.Optimizer,
-        *,
-        fqn_keying: bool = False,
-        fqns: list[str] | None = None,
-    ) -> None:
-        if fqn_keying and fqns is None:
-            raise ValueError(
-                "OptimizerWrapper(fqn_keying=True) needs the parameter FQNs in "
-                "optimizer order; pass fqns=[name for part in parts "
-                "for name, _ in part.named_parameters()]."
-            )
-        self.optimizer = optimizer
-        self._fqns = fqns if fqn_keying else None
-
-    def state_dict(self) -> dict[str, Any]:
-        # Materialize first, on both directions. On a save, DCP reads whatever
-        # tensors this reports -- an optimizer that has never stepped reports
-        # none, so the checkpoint would quietly carry weights and no optimizer
-        # state. On a load, DCP calls ``state_dict()`` to learn where the values
-        # are going and only afterwards calls ``load_state_dict()``, so a
-        # version that materialized lazily would be a step too late for the
-        # planner to have anywhere to put ``exp_avg``.
-        init_optim_state(self.optimizer)
-        state_dict = self.optimizer.state_dict()
-        if self._fqns is None:
-            return state_dict
-        return {
-            "state": {
-                # ``state_dict`` packs state positionally; the FQN order is the
-                # same parameter order, so the re-keying is a rename only.
-                self._fqns[index]: state
-                for index, state in state_dict["state"].items()
-            },
-            # The positional ``params`` list must not be saved: under PP each
-            # stage's optimizer numbers its own parameters from 0, so every
-            # rank would write the same ``optimizer.param_groups`` key with a
-            # list of its own length (stages differ in parameter count), and
-            # one shared checkpoint key cannot hold them all. What remains --
-            # lr, betas, and friends -- is config-level and identical across
-            # stages, so a single shared copy is correct. ``load_state_dict``
-            # rebuilds the list from the live optimizer.
-            "param_groups": [
-                {key: value for key, value in group.items() if key != "params"}
-                for group in state_dict["param_groups"]
-            ],
-        }
-
-    def load_state_dict(self, state_dict: dict[str, Any]) -> None:
-        # Already materialized by the ``state_dict()`` call that precedes this
-        # one on the DCP path; idempotent here, and load-bearing for any caller
-        # that restores without going through DCP.
-        init_optim_state(self.optimizer)
-        if self._fqns is not None:
-            fqn_to_index = {fqn: i for i, fqn in enumerate(self._fqns)}
-            state_dict = {
-                "state": {
-                    fqn_to_index[fqn]: state
-                    for fqn, state in state_dict["state"].items()
-                },
-                "param_groups": [
-                    # Re-inject the positional ``params`` list ``state_dict``
-                    # dropped: index i is the i-th parameter of the live group.
-                    {**group, "params": list(range(len(live["params"])))}
-                    for group, live in zip(
-                        state_dict["param_groups"],
-                        self.optimizer.param_groups,
-                        strict=True,
-                    )
-                ],
-            }
-        self.optimizer.load_state_dict(state_dict)
