@@ -21,7 +21,7 @@ import torchvision.io
 import torchvision.transforms.v2.functional as TVF
 from PIL import Image
 
-from .....utils.logger_utils import get_logger
+from ...utils.logger_utils import get_logger
 
 logger = get_logger(__name__)
 

@@ -71,15 +71,15 @@ import grain.python as grain
 import numpy as np
 import torch
 
-from ....components.loss import IGNORE_INDEX
-from ....components.tokenizer import MultiModalTokenizer
-from ....utils.logger_utils import get_logger
-from ...dataset import DatasetConfig as GrainDatasetConfig
-from ...dataset import SampleProcessor, SingleDatasetConfig
-from ...sources import HuggingFaceStreamingSource
-from ...types import DatasetBuildContext, DatasetIterationPolicy
-from .utils.image import calculate_vision_tokens, process_image, resize_to_pixel_budget
-from .utils.text import insert_vision_placeholders
+from ...components.loss import IGNORE_INDEX
+from ...components.tokenizer import MultiModalTokenizer
+from ...utils.logger_utils import get_logger
+from ..dataset import DatasetConfig as GrainDatasetConfig
+from ..dataset import SampleProcessor, SingleDatasetConfig
+from ..sources import HuggingFaceStreamingSource
+from ..types import DatasetBuildContext, DatasetIterationPolicy
+from .mm_image import calculate_vision_tokens, process_image, resize_to_pixel_budget
+from .mm_text_utils import insert_vision_placeholders
 
 logger = get_logger(__name__)
 
