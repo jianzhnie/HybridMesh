@@ -381,6 +381,22 @@ class HFTransformerModel(nn.Module):
         super().__init__()
 
         config = _unwrap_text_config(config)
+        num_heads = getattr(config, "num_attention_heads", None)
+        num_kv_heads = getattr(config, "num_key_value_heads", None)
+        num_kv_heads = num_heads if num_kv_heads is None else num_kv_heads
+        if num_heads is not None and num_heads < 1:
+            raise ValueError(f"num_attention_heads must be >= 1, got {num_heads}")
+        if num_kv_heads is not None and num_kv_heads < 1:
+            raise ValueError(f"num_key_value_heads must be >= 1, got {num_kv_heads}")
+        if (
+            num_heads is not None
+            and num_kv_heads is not None
+            and num_heads % num_kv_heads != 0
+        ):
+            raise ValueError(
+                f"num_attention_heads ({num_heads}) must be divisible by "
+                f"num_key_value_heads ({num_kv_heads})"
+            )
         config._attn_implementation = _flex_supported()
         AttentionInterface._global_mapping[_ATTN_IMPLEMENTATION] = _flex_attention_hf
 
