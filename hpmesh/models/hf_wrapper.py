@@ -263,6 +263,17 @@ def _unwrap_text_config(config: PretrainedConfig) -> PretrainedConfig:
         return config
     text_config = config.text_config
     text_config._attn_implementation = _ATTN_IMPLEMENTATION
+    # ``build_model_config_for`` derives ``attn_mask_type`` and sets it on the
+    # TOP config, but the model class is built from this sub-config and every
+    # reader of that flag -- the packed guard, the mask builder, and
+    # ``apply_cp``'s ulysses check -- reads ``self.model.config``. Left on the
+    # top config it is invisible on a composite model: a packed corpus would
+    # train with a causal-only mask (attention straight across document
+    # boundaries), and the ulysses packed refusal would never fire. Carrying it
+    # down here is what keeps "which corpus did the trainer load" answerable
+    # from the object that actually runs.
+    if hasattr(config, "attn_mask_type"):
+        text_config.attn_mask_type = config.attn_mask_type
     if not getattr(text_config, "architectures", None):
         from transformers.models.auto.modeling_auto import (
             MODEL_FOR_CAUSAL_LM_MAPPING_NAMES,
