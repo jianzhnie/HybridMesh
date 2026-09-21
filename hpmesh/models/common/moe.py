@@ -199,11 +199,14 @@ class TokenChoiceTopKRouter(nn.Module):
 
         unselected_groups_TG = torch.ones_like(group_scores_TG, dtype=torch.bool)
         unselected_groups_TG.scatter_(-1, selected_group_ids_TL, False)
-        # -inf rather than the 0.0 HF uses: the bias can push
-        # ``scores_for_choice`` negative, and a masked 0.0 would then outrank a
-        # real expert inside a selected group. The two agree whenever every
-        # ``scores_for_choice`` is positive, which is the case until the bias
-        # grows past the smallest score.
+        # ``-inf``, which is what torchtitan (``models/deepseek_v3/moe.py``)
+        # uses and what HF's DeepSeek-V3, GLM4 and OLMoE use. HF's DeepSeek-V2
+        # and Mistral4 are the exceptions: they mask to ``0.0``, which breaks
+        # once the load-balancing bias can push ``scores_for_choice`` negative
+        # -- a masked 0.0 then outranks a real expert inside a selected group.
+        # V2 never reaches this code (its ``topk_method`` is "greedy", so
+        # ``ep.py`` builds it no group restriction), but matching the majority
+        # spelling is the right default for the ones that do.
         scores_for_choice_TE = scores_TGP.masked_fill(
             unselected_groups_TG.unsqueeze(-1), float("-inf")
         ).flatten(-2)

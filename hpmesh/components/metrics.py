@@ -408,6 +408,7 @@ class MetricsProcessor:
             if colors_enabled(disable_color_printing=config.disable_color_printing)
             else NoColor()
         )
+        self._pp_schedule = pp_schedule
         self.gpu_peak_flops = get_peak_flops(self.device_memory_monitor.device_name)
         self.num_flops_per_token = num_flops_per_token
 
@@ -424,6 +425,23 @@ class MetricsProcessor:
         the model, and the number cannot be known until it exists.
         """
         self.num_flops_per_token = num_flops_per_token
+
+    def ensure_pp_loss_visible(self) -> None:
+        """Run :func:`ensure_pp_loss_visible` with this processor's settings.
+
+        The standalone function needs three arguments, two of which the
+        processor already holds -- the resolved parallel dims and the schedule.
+        Exposing it as a method keeps the call site one line and keeps the
+        color policy in the one place that owns it, so a warning emitted from
+        here cannot disagree with the colors the metrics themselves print in.
+        """
+        if self.parallel_dims is None:
+            return
+        ensure_pp_loss_visible(
+            parallel_dims=self.parallel_dims,
+            pp_schedule=self._pp_schedule,
+            color=self.color,
+        )
 
     @property
     def _non_data_parallel_size(self) -> int:

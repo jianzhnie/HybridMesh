@@ -31,6 +31,34 @@ from .activation import SwiGLU
 __all__ = ["GroupedExperts"]
 
 
+def _grouped_mm_available() -> bool:
+    """Whether ``torch._grouped_mm`` can run here.
+
+    Probed by doing it, rather than by checking the device or the torch
+    version: the op is reachable on CPU as well as CUDA, and it imposes shape
+    constraints of its own (strides must be 16-byte multiples, so the innermost
+    dim has to be at least 8 bf16 elements). A version or device test would be
+    wrong on both counts and would go stale silently.
+
+    The probe is necessarily approximate -- a shape that satisfies the op need
+    not be one a real layer uses. It is deliberately shaped like the real call
+    (``(T, K) @ (E, K, N)``, bf16, int32 offsets) so that it fails for the same
+    reasons a real call would.
+    """
+    grouped_mm = getattr(torch, "_grouped_mm", None)
+    if grouped_mm is None:
+        return False
+    try:
+        grouped_mm(
+            torch.zeros(8, 8, dtype=torch.bfloat16),
+            torch.zeros(2, 8, 8, dtype=torch.bfloat16),
+            offs=torch.tensor([4, 8], dtype=torch.int32),
+        )
+    except Exception:
+        return False
+    return True
+
+
 class GroupedExperts(nn.Module):
     """All experts' weights as three ``(E, O, I)`` tensors.
 
@@ -39,9 +67,10 @@ class GroupedExperts(nn.Module):
         hidden_dim: expert hidden dimension (``F``).
         num_experts: number of experts (``E``).
         activation_fn: the gated activation; defaults to SwiGLU.
-        use_grouped_mm: dispatch the expert GEMMs to ``torch._grouped_mm``
-            instead of a per-expert loop. See ``_grouped_mm`` for why the
-            default is the loop.
+        use_grouped_mm: run the expert GEMMs as one ``torch._grouped_mm``
+            instead of a per-expert loop. ``None`` (the default) decides by
+            probing the op, which is what a run wants; pass a bool to pin it,
+            which is what a test wants. See ``_grouped_mm`` for the trade-off.
     """
 
     def __init__(
@@ -51,13 +80,15 @@ class GroupedExperts(nn.Module):
         num_experts: int,
         *,
         activation_fn: nn.Module | None = None,
-        use_grouped_mm: bool = False,
+        use_grouped_mm: bool | None = None,
     ) -> None:
         super().__init__()
         self.num_experts = num_experts
         self.hidden_dim = hidden_dim
         self.dim = dim
-        self.use_grouped_mm = use_grouped_mm
+        self.use_grouped_mm = (
+            _grouped_mm_available() if use_grouped_mm is None else use_grouped_mm
+        )
         self.activation_fn = activation_fn if activation_fn is not None else SwiGLU()
 
         # ``w1``/``w3`` are the gate and up projections, ``w2`` the down one.
@@ -98,27 +129,31 @@ class GroupedExperts(nn.Module):
         so segment ``e`` spans ``offsets_E[e-1] : offsets_E[e]`` -- exactly what
         ``torch._grouped_mm`` expects. Pass an empty tensor for expert 0.
 
-        Two implementations sit behind this one call, and the choice is a
-        correctness decision, not a performance one:
+        Two implementations sit behind this one call:
 
         * ``torch._grouped_mm`` -- one kernel for all experts, the shape
-          torchtitan's FSDP and MoE code is written against. It casts to bf16,
-          which is what makes it fast.
-        * a per-expert loop of ``F.linear`` -- slower, but it is the *same*
+          torchtitan's MoE is written against, and the one taken whenever the op
+          is available (``use_grouped_mm``) *and* the activations are already
+          bf16 or narrower.
+        * a per-expert loop of ``F.linear`` -- the fallback. It is the *same*
           arithmetic HF's own MoE does (v5's ``Qwen3MoeExperts.forward`` also
-          loops with ``nn.functional.linear``), and it keeps the input dtype.
-          That is what lets a swapped-in MoE be checked against the HF block it
-          replaced on a machine with no GPU.
+          loops with ``nn.functional.linear``), which is what makes a swapped-in
+          MoE checkable against the HF block it replaced, and it keeps the
+          input dtype.
 
-        The seam lives here so the low-precision variants can be swapped in
-        without touching the forward, and so an FX tracer sees the op.
+        The dtype gate is not a nicety. ``torch._grouped_mm`` is bf16-only, so
+        on an fp32 or fp64 model the fused path would round every expert input
+        and weight to 8 mantissa bits: measured 1.4e-1 relative error on fp32
+        and 1.3e0 on fp64, silently, which is exactly the class of change a
+        numeric baseline cannot see. At or below bf16 the cast is the identity
+        or a widening, so there is nothing to lose.
         """
-        if self.use_grouped_mm:
+        if self.use_grouped_mm and x_TD.dtype in (torch.bfloat16, torch.float16):
             return torch._grouped_mm(
                 x_TD.bfloat16(),
                 weight_EOI.bfloat16().transpose(-2, -1),
                 offs=offsets_E,
-            )
+            ).type_as(x_TD)
 
         counts = offsets_E.clone()
         counts[1:] = offsets_E[1:] - offsets_E[:-1]
