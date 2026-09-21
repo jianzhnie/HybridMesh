@@ -340,7 +340,26 @@ class ParallelConfig:
     backend: str = "nccl"
     """Distributed backend: nccl (CUDA), gloo (CPU), or hccl (Ascend)."""
 
+    train_timeout_seconds: int = 100
+    """Timeout, in seconds, applied to every process group once training starts.
+
+    The process groups are created with a deliberately long timeout, because
+    startup -- model build, the first collective, compile -- is what actually
+    takes minutes on a large run. Left at that value, a later hang is
+    indistinguishable from a slow start: the job waits out the startup timeout,
+    which can be half an hour. The trainer therefore lowers every group's
+    timeout to this after the first completed train step, at which point the
+    startup work is known to be behind it.
+
+    Default matches torchtitan's ``comm.train_timeout_seconds``.
+    """
+
     def __post_init__(self):
+        if self.train_timeout_seconds <= 0:
+            raise ValueError(
+                "train_timeout_seconds must be greater than 0, got "
+                f"{self.train_timeout_seconds}"
+            )
         for name in (
             "tensor_parallel_size",
             "pipeline_parallel_size",

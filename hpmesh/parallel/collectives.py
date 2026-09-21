@@ -23,14 +23,70 @@ The single non-obvious line kept from upstream is the ``DTensor`` branch in
 
 from __future__ import annotations
 
+import logging
 import math
 from collections.abc import Iterable
+from datetime import timedelta
 
 import torch
 import torch.distributed as dist
 from torch.distributed.tensor import DTensor
 
-__all__ = ["clip_grad_norm_", "dist_max", "dist_sum", "dist_sum_tensor"]
+logger = logging.getLogger(__name__)
+
+__all__ = [
+    "clip_grad_norm_",
+    "dist_max",
+    "dist_sum",
+    "dist_sum_tensor",
+    "set_pg_timeouts",
+]
+
+
+def set_pg_timeouts(
+    timeout: timedelta,
+    parallel_dims,
+    *,
+    device: torch.device | None = None,
+) -> None:
+    """Lower every process group's timeout, once startup is behind the run.
+
+    Called after the first completed train step. The groups are created with a
+    long timeout because startup -- model build, the first collective, compile --
+    is what genuinely takes minutes; left there, a later hang looks the same as a
+    slow start and the job waits out the startup value. By this point that work
+    is done, so the timeout can become the one a stall should be measured
+    against.
+
+    ``device`` is the rank's device, used only for the barrier's ``device_ids``
+    and the device-side sync (NCCL needs both; gloo rejects ``device_ids``, so
+    ``None`` -- the default -- omits them).
+
+    The barrier before the change is the point of the whole function: a slow rank
+    may still be inside an operation permitted by the OLD timeout while a fast
+    rank moves on and issues a collective under the new, shorter one, and
+    times out waiting for it. Synchronizing first means every rank crosses the
+    reduction together.
+    """
+    if device is not None and device.type == "cuda":
+        dist.barrier(device_ids=[device.index])
+        torch.cuda.synchronize(device)
+    else:
+        dist.barrier()
+
+    # ``None`` names the default (world) group, which is not part of any mesh.
+    groups = [
+        mesh.get_group()
+        for mesh in parallel_dims.get_all_one_dimensional_meshes().values()
+    ]
+    logger.info(
+        "Adjusting the timeout of %d process group(s) plus the default to %s",
+        len(groups),
+        timeout,
+    )
+    for group in groups:
+        dist.set_timeout(timeout, group)
+    dist.set_timeout(timeout)
 
 
 def _reduce(x: torch.Tensor, *, reduce_op: dist.ReduceOp, mesh) -> torch.Tensor:
