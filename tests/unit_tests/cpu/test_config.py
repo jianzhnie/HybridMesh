@@ -100,7 +100,18 @@ def test_an_unknown_context_parallel_strategy_is_rejected() -> None:
 
 
 def test_ulysses_cannot_share_a_load_balancer() -> None:
-    """The all-to-all reassembles by rank order, which only a contiguous split gives.
+    """The permutation would land in the tokens but not in the mask.
+
+    Ulysses hands flex the full sequence, and flex's only mask input is a mask
+    over the order of the tensors it is given. The kernel rebuilds the
+    full-length causal mask from the length alone -- correct for a contiguous
+    split, where the causal mask is the same no matter how it was sharded. A
+    load-balanced shard is a rearrangement of the sequence, though, and the
+    rebuild cannot see which one, so attention runs over the permutation. It
+    is bit-exactly the model trained on the reordered corpus, with nothing
+    raised. kv_allgather has no such constraint: its pre-shard sequence -- and
+    so the order the mask was built and sharded in -- is recoverable from the
+    rearranged shards by the all-gather.
 
     Worth noting how easy this is to trip: the load balancer defaults to
     ``'headtail'``, so selecting ``ulysses`` on its own is already the illegal
