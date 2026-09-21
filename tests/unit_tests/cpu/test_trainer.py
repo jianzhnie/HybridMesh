@@ -54,6 +54,7 @@ from hpmesh.trainer.config import (
     HybridMeshConfig,
     LRSchedulerConfig,
     OptimizerConfig,
+    ParallelConfig,
     ParamGroupConfig,
     TrainingConfig,
 )
@@ -145,6 +146,54 @@ def test_reductions_are_the_identity_without_a_mesh() -> None:
     assert dist_sum(x, None) == 3.0
     assert dist_max(x, None) == 3.0
     assert torch.equal(dist_sum_tensor(x, None), x)
+
+
+def test_the_timeout_applies_to_every_one_dimensional_group_and_the_default(
+    monkeypatch,
+) -> None:
+    """``set_pg_timeouts`` must reach *all* the groups, plus the world group.
+
+    The failure this guards against is a timeout lowered on some groups and not
+    others: a hang on an untouched group would still wait out the long startup
+    value, which is exactly what the function exists to prevent. The world group
+    (``None``) is the easy one to forget, because it is not part of any mesh.
+    """
+    from datetime import timedelta
+
+    from hpmesh.parallel import collectives
+
+    lowered: list[tuple[timedelta, object]] = []
+
+    class _Mesh:
+        def __init__(self, name: str) -> None:
+            self.name = name
+
+        def get_group(self):
+            return f"group:{self.name}"
+
+    class _Dims:
+        def get_all_one_dimensional_meshes(self):
+            return {"tp": _Mesh("tp"), "dp_shard": _Mesh("dp_shard")}
+
+    monkeypatch.setattr(collectives.dist, "barrier", lambda **_: None)
+    monkeypatch.setattr(
+        collectives.dist, "set_timeout", lambda t, g=None: lowered.append((t, g))
+    )
+
+    collectives.set_pg_timeouts(timedelta(seconds=7), _Dims())
+
+    assert lowered == [
+        (timedelta(seconds=7), "group:tp"),
+        (timedelta(seconds=7), "group:dp_shard"),
+        (timedelta(seconds=7), None),  # the default (world) group, not a mesh
+    ]
+
+
+def test_a_non_positive_train_timeout_is_rejected() -> None:
+    """A zero timeout is a typo for "no limit", and breaks every collective."""
+    with pytest.raises(ValueError, match="train_timeout_seconds must be greater"):
+        ParallelConfig(train_timeout_seconds=0)
+    assert ParallelConfig().train_timeout_seconds == 100
 
 
 # -- gradient clipping --------------------------------------------------------

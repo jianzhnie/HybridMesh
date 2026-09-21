@@ -246,10 +246,23 @@ def main() -> None:
     # -- the trajectory ------------------------------------------------------
     data_iterator = trainer._data_iterator()
     pp_losses = []
-    for _ in range(STEPS):
+    for step in range(STEPS):
         trainer.step += 1
         metrics = trainer.train_step(data_iterator)
         assert metrics is not None  # log_freq=1: every step reports
+        # Every rank must report the same cumulative token count. It describes
+        # the data the step read, not the layer slice this stage holds, so a
+        # count taken from a stage's own (sharded, micro-batched) slice would
+        # disagree here -- and it is logged beside a loss normalized by the
+        # whole batch, so the two would contradict each other. Reduced inside
+        # the loop because the process group is gone once the run ends.
+        tally = torch.tensor([metrics["n_tokens_seen"]])
+        dist.all_reduce(tally, op=dist.ReduceOp.MAX)
+        if int(tally[0]) != metrics["n_tokens_seen"]:
+            failures.append(
+                f"rank {rank}: token count {metrics['n_tokens_seen']} at step "
+                f"{step + 1}, another rank reported {int(tally[0])}"
+            )
         if trainer.pp_has_last_stage:
             # Only the last stage holds a real loss; other stages carry the
             # sentinel, which is never logged (the metrics rank is the
