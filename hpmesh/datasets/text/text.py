@@ -22,7 +22,7 @@ import numpy as np
 
 from ...components.loss import IGNORE_INDEX
 from ...utils.logger_utils import get_logger
-from ..dataset import SampleProcessor, SingleDatasetConfig, TextSequence
+from ..dataset import SampleProcessor, SingleDataset, TextSequence
 from ..sources import (
     HuggingFaceRandomAccessSource,
     HuggingFaceStreamingSource,
@@ -193,21 +193,21 @@ class ChatProcessor(SampleProcessor):
         return self._tokenize_sample(sample)
 
 
-def make_local_jsonl(*, path: str) -> SingleDatasetConfig:
+def make_local_jsonl(*, path: str) -> SingleDataset:
     """Build the ``local_jsonl`` recipe over a caller-supplied corpus.
 
     A function rather than an entry in :data:`DATASETS`: the path is a runtime
     argument, so it cannot live in a module-level dict without a global.
     """
-    return SingleDatasetConfig(
+    return SingleDataset(
         source=IndexedJsonlSource(patterns=(path,)),
         processor=TextProcessor,
         post_filters=(lambda sample: sample is not None,),
     )
 
 
-DATASETS: dict[str, SingleDatasetConfig] = {
-    "c4": SingleDatasetConfig(
+DATASETS: dict[str, SingleDataset] = {
+    "c4": SingleDataset(
         source=HuggingFaceStreamingSource(
             path="allenai/c4",
             name="en",
@@ -216,7 +216,7 @@ DATASETS: dict[str, SingleDatasetConfig] = {
         processor=TextProcessor,
         post_filters=(lambda sample: sample is not None,),
     ),
-    "c4_test": SingleDatasetConfig(
+    "c4_test": SingleDataset(
         source=HuggingFaceRandomAccessSource(
             path="json",
             split="train",
@@ -227,7 +227,7 @@ DATASETS: dict[str, SingleDatasetConfig] = {
         processor=TextProcessor,
         post_filters=(lambda sample: sample is not None,),
     ),
-    "c4_validation": SingleDatasetConfig(
+    "c4_validation": SingleDataset(
         source=HuggingFaceStreamingSource(
             path="allenai/c4",
             name="en",

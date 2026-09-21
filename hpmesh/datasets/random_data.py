@@ -146,22 +146,29 @@ class RandomTokenDataLoader(BaseDataLoader):
             seed=seed, vocab_size=vocab_size, batch_size=batch_size, seq_len=seq_len
         )
         self._iterator = self._slice_each(batch_iterator(self._source))
-        # The number of batches handed out so far. The source is a pure
+        # The position in the global stream: how many batches this loader has
+        # consumed, by training or by resuming alike. The source is a pure
         # function of ``(seed, step)`` and cannot restart from an arbitrary
         # cursor -- Grain derives such a cursor from the index, but a plain
-        # generator does not -- so resuming replays this many batches forward.
-        self._num_batches_yielded = 0
+        # generator does not -- so this count is both what a checkpoint saves
+        # and how far a resume replays.
+        #
+        # Deliberately *not* the number of batches ``__iter__`` has handed out:
+        # a resume seeks by replaying, and resetting that count would make the
+        # next checkpoint report a position relative to the resume -- so the
+        # resume after that would rewind to it.
+        self._position = 0
 
     def __iter__(self) -> Iterator[Batch]:
         for batch in self._iterator:
-            self._num_batches_yielded += 1
+            self._position += 1
             yield batch
 
     def state_dict(self) -> dict[str, Any]:
-        # See ``_num_batches_yielded``: the position is what a resume needs.
+        # See ``_position``: the position is what a resume needs.
         return {
             "dp_world_size": self._dp_world_size,
-            "steps": self._num_batches_yielded,
+            "steps": self._position,
         }
 
     def load_state_dict(self, state_dict: dict[str, Any]) -> None:
@@ -175,17 +182,19 @@ class RandomTokenDataLoader(BaseDataLoader):
                 "cannot resume after changing the effective data-parallel degree"
             )
         resume_at = state_dict.get("steps", 0)
-        if resume_at < self._num_batches_yielded:
+        if resume_at < self._position:
             raise ValueError(
                 f"cannot resume at batch {resume_at}: this loader has already "
-                f"yielded {self._num_batches_yielded}. A fresh loader is required."
+                f"yielded {self._position}. A fresh loader is required."
             )
         # This loader cannot seek, so a replay from the start is the only way
         # to reach ``resume_at``: a checkpoint must be loaded into a FRESH
-        # loader, and the seek is followed by re-counting from zero.
-        self._num_batches_yielded = 0
-        for _ in range(resume_at):
+        # loader. Drain the difference, not ``resume_at``, so a resume onto a
+        # loader that has already seeked stops at the absolute position rather
+        # than overshooting by however far it had seeked already.
+        for _ in range(resume_at - self._position):
             next(self._iterator)
+        self._position = resume_at
 
     def _slice_each(self, batches: Iterator[Batch]) -> Iterator[Batch]:
         start = self._dp_rank * self._rows_per_rank

@@ -1,11 +1,12 @@
 """Grain-backed dataloader.
 
-Vendored from torchtitan ``components/data/loader.py``. The config is a plain
-dataclass and the runtime objects the loader needs -- the tokenizer, the DP
-extent -- stay constructor arguments, because a dataclass cannot hold a built
-pipeline node.
+Vendored from torchtitan ``components/data/loader.py``. Everything the loader
+needs is a constructor argument: the already-built graph, the collator, the
+iteration knobs, and the runtime objects -- the tokenizer, the DP extent -- that
+no description can hold. There is no config dataclass in between, because a
+config here would be a parameter bag built one line before its only consumer.
 
-``GrainDataLoaderConfig.dataset`` is the already-built Grain graph, not something
+``GrainDataLoader``'s ``dataset`` is the already-built Grain graph, not something
 this module constructs. The caller has the dataset registry, and building it
 there is what keeps ``loader.py`` free of a dependency on every concrete dataset
 -- which is also why :func:`~hpmesh.datasets.build.build_dataloader`, which does
@@ -16,7 +17,6 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 from collections.abc import Iterator
-from dataclasses import dataclass, field
 from typing import Any
 
 import grain.python as grain
@@ -25,13 +25,12 @@ from torch.distributed.checkpoint.stateful import Stateful
 
 from ..components.tokenizer import BaseTokenizer
 from .collators import Collator, TextCollator, TrainerBatch
-from .types import DatasetBuildContext, DatasetIterationPolicy
+from .types import DatasetBuildContext
 
 __all__ = [
     "BaseDataLoader",
     "DataloaderExhaustedError",
     "GrainDataLoader",
-    "GrainDataLoaderConfig",
 ]
 
 
@@ -60,45 +59,42 @@ class BaseDataLoader(Stateful, ABC):
         pass
 
 
-@dataclass(kw_only=True)
-class GrainDataLoaderConfig:
-    """What a :class:`GrainDataLoader` reads, and how."""
-
-    dataset: grain.MapDataset | grain.IterDataset
-    """The built dataset graph. Which node it starts from decides shuffle
-    order, so it is built by the caller, not here."""
-
-    collator: type[Collator] = TextCollator
-    seed: int = 42
-    shuffle: bool = True
-    repeat: bool = True
-    streaming_shuffle_buffer_size: int = 1_000
-    """Streaming rows retained per rank for approximate shuffling."""
-    read_options: grain.ReadOptions = field(default_factory=grain.ReadOptions)
-    """Concurrent reads used when a `MapDataset` becomes an `IterDataset`."""
-    num_prefetch_batches: int = 2
-    """Collated batches queued per rank for trainer consumption."""
-    max_num_documents: int | None = None
-    """Maximum non-padding document segments in one local token batch."""
-
-    def __post_init__(self) -> None:
-        if self.max_num_documents is not None and self.max_num_documents <= 0:
-            raise ValueError("max_num_documents must be positive")
-
-
 class GrainDataLoader(BaseDataLoader):
     """Batches and checkpoints one composed Grain dataset graph."""
 
     def __init__(
         self,
-        config: GrainDataLoaderConfig,
+        dataset: grain.MapDataset | grain.IterDataset,
         *,
         dp_world_size: int,
         dp_rank: int,
         tokenizer: BaseTokenizer,
         max_context_length: int,
         num_tokens_per_batch: int,
+        collator: type[Collator] = TextCollator,
+        repeat: bool = True,
+        read_options: grain.ReadOptions | None = None,
+        num_prefetch_batches: int = 2,
+        max_num_documents: int | None = None,
     ) -> None:
+        """``dataset`` is the built graph: which node it starts from decides
+        shuffle order, so it is built by the caller, not here.
+
+        Without a config there is no field list to declare, so this is the flat
+        version of one: everything the loader reads is a named argument and
+        nothing else is carried. The seed and the shuffle flags are *not* here,
+        because the graph has already consumed them by the time it arrives --
+        keeping a copy would be a knob that changes no behavior.
+
+        ``read_options`` defaults to a fresh ``grain.ReadOptions`` rather than
+        being shared as a mutable default. ``max_num_documents`` is the maximum
+        non-padding document segments in one local token batch, so the same
+        argument reaches both the build context and ``collator``.
+        """
+        if max_num_documents is not None and max_num_documents <= 0:
+            raise ValueError("max_num_documents must be positive")
+        if read_options is None:
+            read_options = grain.ReadOptions()
         # The graph is built before this loader exists and may already have been
         # built for a different rank -- the trainer derives the policy from a
         # config that is not handed here. Catch the mismatch rather than train
@@ -106,7 +102,7 @@ class GrainDataLoader(BaseDataLoader):
         expected_rank_id = f"dp_rank_{dp_rank}"
         self._dp_world_size = dp_world_size
         self._rank_id = expected_rank_id
-        self.max_num_documents = config.max_num_documents
+        self.max_num_documents = max_num_documents
 
         # A finite dataset cannot be shared by several ranks: each one reaches
         # the end at a different step, and the ranks that ran out first stop
@@ -117,23 +113,21 @@ class GrainDataLoader(BaseDataLoader):
         # remainder policy. Simple map datasets can truncate or pad before DP
         # sharding; filtered, mixed, packed, and streaming datasets need
         # coordinated exhaustion so every rank runs the same number of steps.
-        if dp_world_size > 1 and not config.repeat:
+        if dp_world_size > 1 and not repeat:
             raise ValueError(
                 "repeat=False with data parallelism can exhaust ranks at different "
                 "steps and hang collectives; use repeat=True with a trainer-"
                 "controlled step count"
             )
-        read_options = config.read_options
         context = DatasetBuildContext(
             tokenizer=tokenizer,
             max_context_length=max_context_length,
             num_tokens_per_batch=num_tokens_per_batch,
             read_options=read_options,
-            max_num_documents=config.max_num_documents,
+            max_num_documents=max_num_documents,
         )
 
-        dataset = config.dataset
-        collator = config.collator(context=context)
+        collator = collator(context=context)
 
         # TODO(data-multiprocessing): CPU-heavy processing should use multiple
         # processes rather than only threads. Grain can divide map-style data among
@@ -147,13 +141,13 @@ class GrainDataLoader(BaseDataLoader):
         # Batch and collate samples.
         dataset = dataset.batch(
             collator.num_rows_per_batch(),
-            drop_remainder=config.repeat,
+            drop_remainder=repeat,
             batch_fn=collator,
         )
 
         # Queue completed batches while the trainer consumes the previous batch.
         dataset = grain_experimental.ThreadPrefetchIterDataset(
-            dataset, prefetch_buffer_size=config.num_prefetch_batches
+            dataset, prefetch_buffer_size=num_prefetch_batches
         )
         self._iterator = iter(dataset)
 
@@ -190,24 +184,3 @@ class GrainDataLoader(BaseDataLoader):
 
     def close(self) -> None:
         self._iterator.close()
-
-
-def build_dataset_iteration_policy(
-    config: GrainDataLoaderConfig,
-    *,
-    dp_rank: int,
-    dp_world_size: int,
-) -> DatasetIterationPolicy:
-    """The policy a dataset graph is built with, derived from the loader config.
-
-    Lives here so the loader's knobs and the policy that consumes them cannot
-    drift: a shuffle flag the graph never sees is a silent no-op.
-    """
-    return DatasetIterationPolicy(
-        seed=config.seed,
-        shuffle=config.shuffle,
-        repeat=config.repeat,
-        dp_rank=dp_rank,
-        dp_world_size=dp_world_size,
-        streaming_shuffle_buffer_size=config.streaming_shuffle_buffer_size,
-    )

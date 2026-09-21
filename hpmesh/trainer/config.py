@@ -933,6 +933,23 @@ class DataloaderConfig:
         default=2,
         metadata={"help": "Collated batches queued per rank for the trainer"},
     )
+    packing: Literal["concat_then_split", "first_fit"] = field(
+        default="concat_then_split",
+        metadata={
+            "help": "Text packing recipe. 'concat_then_split' concatenates "
+            "documents and chunks them into fixed-length rows; 'first_fit' "
+            "lays documents of up to the context window into bins instead, "
+            "which sustains single-document rows. Ignored for multimodal "
+            "recipes, which pack whole documents regardless."
+        },
+    )
+    num_packing_bins: int = field(
+        default=8,
+        metadata={
+            "help": "Candidate rows 'first_fit' keeps open. More bins can "
+            "reduce padding, but buffer more documents. Ignored otherwise."
+        },
+    )
     max_num_documents: int | None = field(
         default=None,
         metadata={
@@ -979,6 +996,11 @@ class DataloaderConfig:
         # would import the datasets package into the config layer.
         if self.max_num_documents is not None and self.max_num_documents <= 0:
             raise ValueError("max_num_documents must be positive")
+        # Validated here even though only 'first_fit' reads it: the field is
+        # always parsed, so a bad value would otherwise be accepted silently
+        # under the default recipe and only fail after switching to first_fit.
+        if self.num_packing_bins <= 0:
+            raise ValueError("num_packing_bins must be positive")
 
 
 @dataclass

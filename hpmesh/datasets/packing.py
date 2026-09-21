@@ -1,8 +1,16 @@
-"""Stateful packing recipes for tokenized documents.
+"""Stateful packing: turning a tokenized dataset into fixed-length rows.
 
-Vendored from torchtitan ``components/data/packing.py``. Both packing configs
-are plain dataclasses that build their own child, so a packing node drops into
-a dataset config wherever its child would have gone.
+Vendored from torchtitan ``components/data/packing.py``. The two recipes are
+free functions, not configs. A packing config would only ever hold the dataset
+it wraps plus one or two knobs, and every caller constructs it one line before
+building it -- so the description earned nothing the parameters do not already
+carry. ``num_packing_bins`` moves into :func:`build_first_fit_packing`'s
+signature with its validation, and the choice between the two recipes moves to
+the call site.
+
+The multimodal packing node is the third recipe and lives in
+``multimodal/mm_datasets.py``, next to the dataset it packs: naming it here
+would make the text-only path import torchvision.
 
 The state handling is the subtle part. ``_DocumentAwareConcatThenSplitIterator``
 records the parent's cursor *before* it pulls a document, not after, because a
@@ -13,7 +21,6 @@ skips documents at a resume boundary, and nothing downstream would notice.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
 from functools import partial
 from typing import Any
 
@@ -21,61 +28,65 @@ import grain.python as grain
 import numpy as np
 
 from ..components.loss import IGNORE_INDEX
-from .dataset import DatasetConfig, TextSequence
+from .dataset import (
+    DatasetConcat,
+    DatasetMix,
+    SingleDataset,
+    TextSequence,
+    build_dataset,
+)
 from .types import DatasetBuildContext, DatasetIterationPolicy
 
-__all__ = ["ConcatThenSplitPackingConfig", "FirstFitPackingConfig"]
+__all__ = ["build_concat_then_split_packing", "build_first_fit_packing"]
 
 
-@dataclass(frozen=True, kw_only=True, slots=True)
-class ConcatThenSplitPackingConfig:
-    """Concatenates documents, chunking them into fixed-length rows."""
-
-    dataset: DatasetConfig
-
-    def build(
-        self,
-        *,
-        context: DatasetBuildContext,
-        dataset_iteration_policy: DatasetIterationPolicy,
-    ) -> grain.IterDataset:
-        dataset = self.dataset.build(
-            context=context,
-            dataset_iteration_policy=dataset_iteration_policy,
-        )
-        if context.max_num_documents is not None:
-            if isinstance(dataset, grain.MapDataset):
-                dataset = dataset.to_iter_dataset(read_options=context.read_options)
-            return _DocumentAwareConcatThenSplitIterDataset(
-                dataset,
-                max_num_documents_per_row=context.max_num_documents,
-                max_context_length=context.max_context_length,
-                num_tokens_per_row=context.num_tokens_per_batch,
+def build_concat_then_split_packing(
+    dataset: (SingleDataset | DatasetMix | DatasetConcat),
+    *,
+    context: DatasetBuildContext,
+    dataset_iteration_policy: DatasetIterationPolicy,
+) -> grain.IterDataset:
+    """Concatenate documents, chunking them into fixed-length rows."""
+    dataset_graph = build_dataset(
+        dataset,
+        context=context,
+        dataset_iteration_policy=dataset_iteration_policy,
+    )
+    if context.max_num_documents is not None:
+        if isinstance(dataset_graph, grain.MapDataset):
+            dataset_graph = dataset_graph.to_iter_dataset(
+                read_options=context.read_options
             )
-        dataset = dataset.map(
-            partial(
-                _text_sequence_to_packing_input,
-                max_context_length=context.max_context_length,
-            )
+        return _DocumentAwareConcatThenSplitIterDataset(
+            dataset_graph,
+            max_num_documents_per_row=context.max_num_documents,
+            max_context_length=context.max_context_length,
+            num_tokens_per_row=context.num_tokens_per_batch,
         )
-        if isinstance(dataset, grain.MapDataset):
-            dataset = dataset.to_iter_dataset(read_options=context.read_options)
-        dataset = grain.experimental.ConcatThenSplitIterDataset(
-            dataset,
-            length_struct={
-                "input_ids": context.num_tokens_per_batch,
-                "labels": context.num_tokens_per_batch,
-                "positions": context.num_tokens_per_batch,
-                "padding_mask": context.num_tokens_per_batch,
-            },
+    dataset_graph = dataset_graph.map(
+        partial(
+            _text_sequence_to_packing_input,
+            max_context_length=context.max_context_length,
         )
-        dataset = dataset.filter(_packing_output_is_full)
-        return dataset.map(
-            partial(
-                _packing_output_to_text_sequence,
-                max_context_length=context.max_context_length,
-            )
+    )
+    if isinstance(dataset_graph, grain.MapDataset):
+        dataset_graph = dataset_graph.to_iter_dataset(read_options=context.read_options)
+    dataset_graph = grain.experimental.ConcatThenSplitIterDataset(
+        dataset_graph,
+        length_struct={
+            "input_ids": context.num_tokens_per_batch,
+            "labels": context.num_tokens_per_batch,
+            "positions": context.num_tokens_per_batch,
+            "padding_mask": context.num_tokens_per_batch,
+        },
+    )
+    dataset_graph = dataset_graph.filter(_packing_output_is_full)
+    return dataset_graph.map(
+        partial(
+            _packing_output_to_text_sequence,
+            max_context_length=context.max_context_length,
         )
+    )
 
 
 class _DocumentAwareConcatThenSplitIterDataset(grain.IterDataset):
@@ -230,76 +241,70 @@ class _DocumentAwareConcatThenSplitIterator(grain.DatasetIterator):
             self._remainder_offset = state["remainder_offset"]
 
 
-@dataclass(frozen=True, kw_only=True, slots=True)
-class FirstFitPackingConfig:
-    """Packs document chunks no longer than the context window."""
+def build_first_fit_packing(
+    dataset: (SingleDataset | DatasetMix | DatasetConcat),
+    *,
+    context: DatasetBuildContext,
+    dataset_iteration_policy: DatasetIterationPolicy,
+    num_packing_bins: int = 8,
+) -> grain.IterDataset:
+    """Pack document chunks no longer than the context window.
 
-    dataset: DatasetConfig
-    num_packing_bins: int = 8
-    """Candidate rows kept open.
+    ``num_packing_bins`` is how many candidate rows are kept open; more bins can
+    reduce padding, but buffer more samples.
+    """
+    if num_packing_bins <= 0:
+        raise ValueError("num_packing_bins must be positive")
 
-    More bins can reduce padding, but buffer more samples."""
-
-    def __post_init__(self) -> None:
-        if self.num_packing_bins <= 0:
-            raise ValueError("num_packing_bins must be positive")
-
-    def build(
-        self,
-        *,
-        context: DatasetBuildContext,
-        dataset_iteration_policy: DatasetIterationPolicy,
-    ) -> grain.IterDataset:
-        dataset = self.dataset.build(
-            context=context,
-            dataset_iteration_policy=dataset_iteration_policy,
+    dataset_graph = build_dataset(
+        dataset,
+        context=context,
+        dataset_iteration_policy=dataset_iteration_policy,
+    )
+    if isinstance(dataset_graph, grain.MapDataset):
+        dataset_graph = dataset_graph.to_iter_dataset(read_options=context.read_options)
+    dataset_graph = grain.experimental.FlatMapIterDataset(
+        dataset_graph,
+        _SplitTextSequenceDocuments(
+            max_context_length=context.max_context_length,
+        ),
+    )
+    dataset_graph = dataset_graph.map(
+        partial(
+            _text_sequence_to_packing_input,
+            max_context_length=context.max_context_length,
         )
-        if isinstance(dataset, grain.MapDataset):
-            dataset = dataset.to_iter_dataset(read_options=context.read_options)
-        dataset = grain.experimental.FlatMapIterDataset(
-            dataset,
-            _SplitTextSequenceDocuments(
-                max_context_length=context.max_context_length,
-            ),
+    )
+    # TODO(data-global-pack-plan): Consider packing before DP sharding so
+    # ranks receive similarly filled rows.
+    dataset_graph = grain.experimental.FirstFitPackIterDataset(
+        dataset_graph,
+        length_struct={
+            "input_ids": context.num_tokens_per_batch,
+            "labels": context.num_tokens_per_batch,
+            "positions": context.num_tokens_per_batch,
+            "padding_mask": context.num_tokens_per_batch,
+        },
+        padding_struct={
+            "input_ids": 0,
+            "labels": IGNORE_INDEX,
+            "positions": 0,
+            "padding_mask": True,
+        },
+        num_packing_bins=num_packing_bins,
+        meta_features=("labels", "positions"),
+        seed=dataset_iteration_policy.seed,
+        shuffle_bins=dataset_iteration_policy.shuffle,
+        max_sequences_per_bin=(
+            context.max_num_documents if context.max_num_documents is not None else None
+        ),
+    )
+    return dataset_graph.map(
+        partial(
+            _packing_output_to_text_sequence,
+            max_context_length=context.max_context_length,
         )
-        dataset = dataset.map(
-            partial(
-                _text_sequence_to_packing_input,
-                max_context_length=context.max_context_length,
-            )
-        )
-        # TODO(data-global-pack-plan): Consider packing before DP sharding so
-        # ranks receive similarly filled rows.
-        dataset = grain.experimental.FirstFitPackIterDataset(
-            dataset,
-            length_struct={
-                "input_ids": context.num_tokens_per_batch,
-                "labels": context.num_tokens_per_batch,
-                "positions": context.num_tokens_per_batch,
-                "padding_mask": context.num_tokens_per_batch,
-            },
-            padding_struct={
-                "input_ids": 0,
-                "labels": IGNORE_INDEX,
-                "positions": 0,
-                "padding_mask": True,
-            },
-            num_packing_bins=self.num_packing_bins,
-            meta_features=("labels", "positions"),
-            seed=dataset_iteration_policy.seed,
-            shuffle_bins=dataset_iteration_policy.shuffle,
-            max_sequences_per_bin=(
-                context.max_num_documents
-                if context.max_num_documents is not None
-                else None
-            ),
-        )
-        return dataset.map(
-            partial(
-                _packing_output_to_text_sequence,
-                max_context_length=context.max_context_length,
-            )
-        )
+    )
 
 
 class _SplitTextSequenceDocuments(grain.experimental.FlatMapTransform):
