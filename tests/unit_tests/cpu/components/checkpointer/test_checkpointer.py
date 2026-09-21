@@ -277,6 +277,41 @@ def test_init_optim_state_preserves_existing_gradients() -> None:
         assert torch.equal(original, param.grad)
 
 
+def test_init_optim_state_completes_a_partially_initialized_optimizer() -> None:
+    """A parameter that has not received a gradient still needs checkpoint state.
+
+    Adam initializes state lazily per parameter. A conditional branch can
+    therefore leave one parameter cold while another has already stepped; an
+    early return based on ``optim.state`` being merely non-empty produces an
+    incomplete checkpoint that a fresh optimizer cannot restore.
+    """
+    model = nn.Linear(4, 4)
+    optimizer = torch.optim.AdamW(model.parameters(), lr=0.1)
+
+    # Initialize only the weight. The bias deliberately receives no gradient.
+    model.weight.sum().backward()
+    optimizer.step()
+    optimizer.zero_grad(set_to_none=True)
+    assert model.weight in optimizer.state
+    assert model.bias not in optimizer.state
+
+    weight_state = {
+        key: value.detach().clone() if torch.is_tensor(value) else value
+        for key, value in optimizer.state[model.weight].items()
+    }
+    init_optim_state(optimizer)
+
+    assert model.bias in optimizer.state
+    for key, expected in weight_state.items():
+        actual = optimizer.state[model.weight][key]
+        if torch.is_tensor(expected):
+            assert torch.equal(actual, expected)
+        else:
+            assert actual == expected
+    # The newly materialized state must still make the next real update step 1.
+    assert int(optimizer.state[model.bias]["step"]) == 0
+
+
 def test_model_wrapper_keeps_tensor_storage_stable_across_calls() -> None:
     """Stable storage is what lets async DCP reuse its pinned host buffers."""
     model = nn.Linear(4, 4)

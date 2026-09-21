@@ -630,6 +630,59 @@ def test_mrope_rejects_a_raster_patch_order(mm_tokenizer):
         )
 
 
+def test_mrope_rejects_media_grid_count_mismatches(mm_tokenizer):
+    collator = _collator(mm_tokenizer, build_mrope_positions=True)
+    ids = _ids_of(mm_tokenizer)
+    tokens = torch.tensor([ids["image"], VOCAB["lorem"]])
+
+    with pytest.raises(ValueError, match="media/grid mismatch"):
+        collator._build_mrope_positions(
+            tokens,
+            None,
+            None,
+            torch.arange(2),
+            image_token_id=ids["image"],
+            video_token_id=ids["video"],
+        )
+
+
+def test_mrope_rejects_placeholder_lengths_that_disagree_with_the_grid(mm_tokenizer):
+    collator = _collator(mm_tokenizer, build_mrope_positions=True)
+    ids = _ids_of(mm_tokenizer)
+    # A [1, 4, 4] raw grid with spatial_merge_size=2 requires four LLM
+    # placeholder tokens, but this prompt contains only three.
+    tokens = torch.tensor([ids["image"]] * 3 + [VOCAB["lorem"]])
+
+    with pytest.raises(ValueError, match="placeholder run has 3 token.*requires 4"):
+        collator._build_mrope_positions(
+            tokens,
+            torch.tensor([[1, 4, 4]]),
+            None,
+            torch.arange(4),
+            image_token_id=ids["image"],
+            video_token_id=ids["video"],
+        )
+
+
+def test_mrope_treats_adjacent_image_and_video_placeholders_as_two_runs(
+    mm_tokenizer,
+):
+    collator = _collator(mm_tokenizer, build_mrope_positions=True)
+    ids = _ids_of(mm_tokenizer)
+    tokens = torch.tensor([ids["image"], ids["video"], VOCAB["lorem"]])
+
+    positions = collator._build_mrope_positions(
+        tokens,
+        torch.tensor([[1, 2, 2]]),
+        torch.tensor([[1, 2, 2]]),
+        torch.arange(3),
+        image_token_id=ids["image"],
+        video_token_id=ids["video"],
+    )
+
+    assert positions.shape == (3, 3)
+
+
 def test_mrope_positions_restart_at_each_document(mm_tokenizer):
     """Two documents in one row are positioned independently, which is what the
     position reset encodes: document 2 does not continue document 1's count."""
