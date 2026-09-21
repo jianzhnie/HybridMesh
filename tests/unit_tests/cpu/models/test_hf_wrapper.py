@@ -258,6 +258,96 @@ def test_the_mask_type_follows_the_corpus_rather_than_being_configured() -> None
     assert packed.attn_mask_type == "block_causal"
 
 
+def test_arch_overrides_reach_an_architecture_without_its_own_config_field() -> None:
+    """The six explicit sizes cannot describe an MoE or an MLA attention.
+
+    ``ModelConfig`` names hidden_size / intermediate_size / the head counts and
+    nothing else, so a DeepSeek-V3 built from those alone gets the architecture's
+    *published* defaults for everything else -- 256 experts per layer, not a toy.
+    ``arch_overrides`` is the path those settings take, and this pins that it
+    lands on the built config rather than being silently dropped.
+    """
+    from hpmesh.trainer import ModelConfig
+
+    cfg = HybridMeshConfig(
+        model=ModelConfig(
+            model_name_or_path="deepseek_v3",
+            vocab_size=128,
+            hidden_size=64,
+            intermediate_size=128,
+            num_hidden_layers=4,
+            num_attention_heads=4,
+            num_key_value_heads=4,
+            arch_overrides={
+                "n_routed_experts": 4,
+                "num_experts_per_tok": 1,
+                "moe_intermediate_size": 64,
+                "first_k_dense_replace": 2,
+                "q_lora_rank": 32,
+                "kv_lora_rank": 16,
+            },
+        ),
+        training=TrainingConfig(seed=42),
+    )
+
+    config = build_model_config_for(cfg)
+
+    assert config.n_routed_experts == 4  # not the published 256
+    assert config.num_experts_per_tok == 1
+    assert config.moe_intermediate_size == 64
+    assert config.first_k_dense_replace == 2
+    assert config.q_lora_rank == 32
+    assert config.kv_lora_rank == 16
+
+
+def test_arch_overrides_win_over_the_explicit_sizes() -> None:
+    """Both name the same field; the override is the more specific one.
+
+    The six sizes come from ``ModelConfig``'s own defaults, so a caller setting
+    only ``arch_overrides`` would otherwise lose the merge to a field it never
+    set. Merged last, the override decides.
+    """
+    from hpmesh.trainer import ModelConfig
+
+    cfg = HybridMeshConfig(
+        model=ModelConfig(
+            model_name_or_path="llama", arch_overrides={"vocab_size": 99}
+        ),
+        training=TrainingConfig(seed=42),
+    )
+
+    assert build_model_config_for(cfg).vocab_size == 99
+
+
+def test_arch_overrides_are_ignored_when_the_config_file_wins(tmp_path) -> None:
+    """A local checkpoint carries its own architecture; overriding it by hand is
+    the one thing that would make the built model disagree with its weights."""
+    from transformers import AutoConfig
+
+    from hpmesh.trainer import ModelConfig
+
+    saved = AutoConfig.for_model(
+        "qwen3",
+        vocab_size=99,
+        hidden_size=24,
+        intermediate_size=48,
+        num_hidden_layers=1,
+        num_attention_heads=2,
+        num_key_value_heads=2,
+    )
+    saved.save_pretrained(tmp_path)
+
+    cfg = HybridMeshConfig(
+        model=ModelConfig(
+            model_name_or_path=str(tmp_path),
+            arch_overrides={"vocab_size": 7},
+        ),
+        training=TrainingConfig(seed=42),
+    )
+
+    assert build_model_config_for(cfg).vocab_size == 99
+
+
 def test_wrapper_forward_returns_logits_the_trainer_can_score() -> None:
     """The contract the training loop relies on: flat ids in, flat logits out.
 
