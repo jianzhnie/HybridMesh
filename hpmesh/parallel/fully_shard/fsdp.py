@@ -6,12 +6,15 @@ import torch
 import torch.nn as nn
 from torch.distributed._composable.fsdp import FSDPModule
 from torch.distributed.device_mesh import DeviceMesh
-from torch.distributed.fsdp import (
-    CPUOffloadPolicy,
-    DataParallelMeshDims,
-    MixedPrecisionPolicy,
-    fully_shard,
-)
+from torch.distributed.fsdp import CPUOffloadPolicy, MixedPrecisionPolicy, fully_shard
+
+try:
+    from torch.distributed.fsdp import DataParallelMeshDims
+except ImportError:
+    # PyTorch 2.10 (used by the current vLLM Ascend image) predates this public
+    # type. hpmesh passes a dedicated one/two-dimensional FSDP mesh instead of
+    # ``dp_mesh_dims``, so the symbol is only needed for annotations here.
+    DataParallelMeshDims = Any
 from torch.distributed.tensor import Shard
 from torch.nn import ModuleDict
 
@@ -192,8 +195,9 @@ def apply_fsdp_to_vision_encoder(
         "mesh": dp_mesh,
         "mp_policy": mp_policy,
         "reshard_after_forward": reshard_after_forward,
-        "dp_mesh_dims": dp_mesh_dims,
     }
+    if dp_mesh_dims is not None:
+        fsdp_config["dp_mesh_dims"] = dp_mesh_dims
     if cpu_offload:
         fsdp_config["offload_policy"] = CPUOffloadPolicy()
     fully_shard(vision_encoder, **fsdp_config)

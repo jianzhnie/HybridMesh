@@ -21,6 +21,7 @@ Shape legend, scoped to this file: ``T`` = tokens, ``D`` = model dimension.
 
 from __future__ import annotations
 
+import inspect
 from typing import NamedTuple
 
 import torch
@@ -290,9 +291,16 @@ def create_varlen_metadata_for_document(
     )
 
 
+_CREATE_BLOCK_MASK_HAS_SEPARATE_FULL_BLOCKS = (
+    "separate_full_blocks" in inspect.signature(create_block_mask).parameters
+)
 _compiled_create_block_mask = torch.compile(create_block_mask)
 
 
 def create_attention_mask(*args, **kwargs):
     """Build a BlockMask, with the (re)compilation cached across calls."""
+    if not _CREATE_BLOCK_MASK_HAS_SEPARATE_FULL_BLOCKS:
+        # PyTorch 2.10 (the current vLLM Ascend image) predates this tuning
+        # knob. Its create_block_mask always uses the older combined layout.
+        kwargs.pop("separate_full_blocks", None)
     return _compiled_create_block_mask(*args, **kwargs)
