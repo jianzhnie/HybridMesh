@@ -256,14 +256,18 @@ def test_the_hook_updates_a_real_swapped_model() -> None:
     register_moe_load_balancing_hook(optimizer, [model], parallel_dims=None)
     balanced = torch.zeros(8)
     for moe in layers:
-        moe.tokens_per_expert_E.copy_(torch.tensor([10.0, 0.0, 5.0, 5.0, 3.0, 3.0, 2.0, 2.0]))
+        moe.tokens_per_expert_E.copy_(
+            torch.tensor([10.0, 0.0, 5.0, 5.0, 3.0, 3.0, 2.0, 2.0])
+        )
         assert torch.equal(moe.expert_bias_E, balanced)
 
     optimizer.step()
 
     for moe in layers:
         assert not torch.equal(moe.expert_bias_E, balanced), "the bias never moved"
-        assert float(moe.tokens_per_expert_E.sum()) == 0.0, "the counter was not drained"
+        assert float(moe.tokens_per_expert_E.sum()) == 0.0, (
+            "the counter was not drained"
+        )
 
 
 def test_the_collective_runs_over_a_real_process_group(single_rank_group) -> None:

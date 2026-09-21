@@ -136,7 +136,7 @@ def main() -> None:
     tp_modules = [
         (path, mod)
         for path, mod in model.named_modules()
-        if isinstance(mod, (ColwiseLinear, ColwiseLinearNoGather, RowwiseLinear))
+        if isinstance(mod, ColwiseLinear | ColwiseLinearNoGather | RowwiseLinear)
     ]
     if not tp_modules:
         failures.append("apply_tp swapped no projections -- test is vacuous")
@@ -145,7 +145,7 @@ def main() -> None:
         ref_lin = ref.get_submodule(path)
         w_ref = ref_lin.weight
         n, k = w_ref.shape
-        if isinstance(mod, (ColwiseLinear, ColwiseLinearNoGather)):
+        if isinstance(mod, ColwiseLinear | ColwiseLinearNoGather):
             own = w_ref[rank * n // world : (rank + 1) * n // world]
             other = w_ref[(1 - rank) * n // world : (2 - rank) * n // world]
             want_grad = ref_lin.weight.grad[rank * n // world : (rank + 1) * n // world]

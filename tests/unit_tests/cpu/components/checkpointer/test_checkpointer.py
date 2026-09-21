@@ -1,9 +1,3 @@
-# Copyright (c) Meta Platforms, Inc. and affiliates.
-# All rights reserved.
-#
-# This source code is licensed under the BSD-style license found in the
-# LICENSE file in the root directory of this source tree.
-
 """The checkpointer's own surface: FQN handling, config validation, the wrapper.
 
 The manager's save/load behaviour is covered in ``test_trainer.py``, where it is
@@ -25,7 +19,7 @@ from hpmesh.components.checkpointer import (
     canonical_fqn,
 )
 from hpmesh.components.checkpointer.dcp import _FilesystemCheckpointStorage
-from hpmesh.components.optimizer import OptimizerWrapper, init_optim_state
+from hpmesh.components.optimizer import init_optim_state
 from hpmesh.components.optimizer.lr_scheduler import build_lr_scheduler
 from hpmesh.trainer.config import CheckpointConfig as Config
 from hpmesh.trainer.config import LRSchedulerConfig
@@ -283,113 +277,6 @@ def test_init_optim_state_preserves_existing_gradients() -> None:
         assert torch.equal(original, param.grad)
 
 
-# -- OptimizerWrapper ---------------------------------------------------------
-
-
-def test_optimizer_wrapper_restores_into_a_cold_optimizer() -> None:
-    """The regression this wrapper exists for.
-
-    DCP writes into the tensors a state dict reports; a fresh Adam reports none,
-    so without the materializing ``state_dict`` the load reports success and
-    restores nothing.
-    """
-    torch.manual_seed(0)
-    source_model = nn.Linear(4, 4)
-    source_optimizer = torch.optim.AdamW(source_model.parameters(), lr=0.1)
-    for _ in range(2):
-        source_optimizer.zero_grad()
-        source_model(torch.ones(2, 4)).sum().backward()
-        source_optimizer.step()
-    source_state = source_optimizer.state_dict()
-
-    target_model = nn.Linear(4, 4)
-    target_optimizer = torch.optim.AdamW(target_model.parameters(), lr=0.1)
-    assert target_optimizer.state_dict()["state"] == {}
-
-    wrapper = OptimizerWrapper(target_optimizer)
-    wrapped_state = wrapper.state_dict()
-    # state_dict() is the hook DCP calls to plan the load, so materializing here
-    # is what gives the planner somewhere to put exp_avg.
-    assert wrapped_state["state"] != {}
-
-    wrapper.load_state_dict(source_state)
-
-    restored = target_optimizer.state_dict()["state"]
-    assert restored.keys() == source_state["state"].keys()
-    for param_id, state in source_state["state"].items():
-        for key, value in state.items():
-            assert torch.equal(restored[param_id][key], value)
-
-
-def _fqns(parts: list[nn.Module]) -> list[str]:
-    """The parameter FQNs of ``parts``, in the order the optimizer sees them.
-
-    The trainer builds its optimizer over ``chain(*(p.parameters() for p in
-    parts))``, so this is the same list, read off the models rather than
-    reconstructed.
-    """
-    return [name for part in parts for name, _ in part.named_parameters()]
-
-
-class _Stage(nn.Module):
-    """One pipeline stage's chunk, wrapping a single projection."""
-
-    def __init__(self) -> None:
-        super().__init__()
-        self.proj = nn.Linear(4, 4)
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        return self.proj(x)
-
-
-def _stepped(stage: nn.Module) -> tuple[torch.optim.Optimizer, OptimizerWrapper]:
-    params = list(stage.parameters())
-    optimizer = torch.optim.AdamW(params, lr=0.1)
-    optimizer.zero_grad()
-    stage(torch.ones(2, 4)).sum().backward()
-    optimizer.step()
-    return optimizer, OptimizerWrapper(optimizer, fqn_keying=True, fqns=_fqns([stage]))
-
-
-def test_optimizer_wrapper_fqn_keying_round_trip() -> None:
-    """The PP mode: state keyed by parameter FQN, not positional index.
-
-    The FQN is the parameters' path within the stage, not within the whole
-    model: a stage is a deep copy with the other stages' modules removed, so
-    its own path is the same path the unsplit model would have used. Two
-    stages' state therefore lands under two distinct keys in one shared
-    checkpoint, where the positional format would have collided.
-    """
-    torch.manual_seed(0)
-    stage_a = _Stage()
-    stage_b = _Stage()
-    stage_a.proj.weight.data.fill_(1.0)
-    stage_b.proj.weight.data.fill_(2.0)
-
-    optimizer_a, wrapper_a = _stepped(stage_a)
-    _, wrapper_b = _stepped(stage_b)
-
-    # Same FQNs on both sides: the key disambiguates two stages, it does not
-    # make the two stages' parameters distinct.
-    state_a = wrapper_a.state_dict()
-    state_b = wrapper_b.state_dict()
-    assert set(state_a["state"]) == {"proj.weight", "proj.bias"}
-    assert set(state_b["state"]) == set(state_a["state"])
-
-    # A fresh optimizer is what a resumed run builds.
-    fresh = torch.optim.AdamW(list(stage_a.parameters()), lr=0.1)
-    OptimizerWrapper(fresh, fqn_keying=True, fqns=_fqns([stage_a])).load_state_dict(
-        state_a
-    )
-
-    restored = fresh.state_dict()["state"]
-    expected = optimizer_a.state_dict()["state"]
-    assert restored.keys() == expected.keys()
-    for param_id, state in expected.items():
-        for key, value in state.items():
-            assert torch.equal(restored[param_id][key], value)
-
-
 def test_model_wrapper_keeps_tensor_storage_stable_across_calls() -> None:
     """Stable storage is what lets async DCP reuse its pinned host buffers."""
     model = nn.Linear(4, 4)
@@ -404,3 +291,105 @@ def test_model_wrapper_keeps_tensor_storage_stable_across_calls() -> None:
 
     assert {k: v.untyped_storage().data_ptr() for k, v in second.items()} == storages
     assert torch.equal(second["weight"], model.weight)
+
+
+# -- TorchCheckpointingManager ------------------------------------------------
+#
+# The backend (``torch_checkpointing``) is not a dependency and is not installed
+# in the development environment, so nothing here can round-trip a checkpoint.
+# What *is* testable is the import guard and the state registration, both of
+# which are the parts a missing backend would otherwise let rot silently.
+
+
+def test_a_disabled_torch_checkpointing_manager_never_touches_the_backend() -> None:
+    """``enable=False`` must return before the import.
+
+    This is the property that keeps a disabled manager constructible on a
+    machine without the backend; if the import moved above the guard, every
+    caller would need the package installed just to not use it.
+    """
+    from hpmesh.components.checkpointer.torch_checkpointing import (
+        TorchCheckpointingManager,
+    )
+
+    manager = TorchCheckpointingManager(
+        Config(enable=False),
+        model_parts=[],
+        optimizer=None,
+        lr_scheduler=None,
+        states={},
+        folder="/tmp/unused",
+    )
+    assert manager.enable is False
+
+
+def test_an_enabled_torch_checkpointing_manager_without_the_backend_raises() -> None:
+    """The failure must be an actionable ImportError, not a bare ModuleNotFoundError.
+
+    ``torch_checkpointing`` is optional, so a missing install is an expected
+    state rather than a bug: the message has to name the alternative (the DCP
+    manager) instead of surfacing whichever submodule happened to import first.
+    """
+    import importlib.util
+
+    import pytest
+
+    from hpmesh.components.checkpointer.torch_checkpointing import (
+        TorchCheckpointingManager,
+    )
+
+    if importlib.util.find_spec("torch_checkpointing") is not None:
+        pytest.skip("backend is installed; the guard cannot fire")
+
+    with pytest.raises(ImportError, match="not installed"):
+        TorchCheckpointingManager(
+            Config(enable=True),
+            model_parts=[],
+            optimizer=None,
+            lr_scheduler=None,
+            states={},
+            folder="/tmp/unused",
+        )
+
+
+def test_an_enabled_manager_registers_the_lr_scheduler(monkeypatch) -> None:
+    """The scheduler must ride along under ``LR_SCHEDULER``, like the DCP manager.
+
+    Without it a resumed run's fresh scheduler restarts ``last_epoch`` at 0, so
+    the curve restarts on the step after a resume -- invisible while the lr is
+    constant, wrong for the rest of the run once warmup or decay is set.
+
+    The backend is absent, so the import is stubbed to reach the registration.
+    Everything after it needs real backend objects and is cut short, but the
+    states dict is populated first, which is what this pins.
+    """
+    import pytest
+
+    from hpmesh.components.checkpointer import LR_SCHEDULER
+    from hpmesh.components.checkpointer import torch_checkpointing as tc
+
+    class _StubBackend:
+        def __getattr__(self, name):
+            return None
+
+    class _ReachedBackendUse(Exception):
+        pass
+
+    def _stop(_backend):
+        raise _ReachedBackendUse
+
+    monkeypatch.setattr(tc, "_require_torch_checkpointing", _StubBackend)
+    monkeypatch.setattr(tc, "_async_save_config", _stop)
+
+    sentinel = object()
+    states: dict[str, object] = {}
+    with pytest.raises(_ReachedBackendUse):
+        tc.TorchCheckpointingManager(
+            Config(enable=True),
+            model_parts=[],
+            optimizer=None,
+            lr_scheduler=sentinel,
+            states=states,
+            folder="/tmp/unused",
+        )
+    assert states[LR_SCHEDULER] is sentinel

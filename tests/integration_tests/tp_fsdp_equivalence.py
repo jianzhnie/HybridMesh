@@ -204,7 +204,7 @@ def main() -> None:
     # colwise shards rows, rowwise shards columns.
     tp_layouts = {}
     for path, mod in model.named_modules():
-        if isinstance(mod, (ColwiseLinear, ColwiseLinearNoGather)):
+        if isinstance(mod, ColwiseLinear | ColwiseLinearNoGather):
             tp_layouts[f"{path}.weight"] = "row"
         elif isinstance(mod, RowwiseLinear):
             tp_layouts[f"{path}.weight"] = "col"
