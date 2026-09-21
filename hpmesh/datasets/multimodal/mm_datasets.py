@@ -418,9 +418,7 @@ def build_mm_sample_packing(
     )
     dataset_graph = dataset_graph.map(_mm_sample_to_packing_input)
     if isinstance(dataset_graph, grain.MapDataset):
-        dataset_graph = dataset_graph.to_iter_dataset(
-            read_options=context.read_options
-        )
+        dataset_graph = dataset_graph.to_iter_dataset(read_options=context.read_options)
     # TODO(data-global-pack-plan): Consider packing before DP sharding so
     # ranks receive similar text and media work.
     dataset_graph = grain.experimental.FirstFitPackIterDataset(

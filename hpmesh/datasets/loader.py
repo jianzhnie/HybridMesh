@@ -50,8 +50,6 @@ class DataloaderExhaustedError(Exception):
 class BaseDataLoader(Stateful, ABC):
     """Enforces the `Stateful`, `state_dict()`, and `load_state_dict()` contract."""
 
-    max_num_documents: int | None = None
-
     @abstractmethod
     def __iter__(self) -> Iterator[TrainerBatch]: ...
 
@@ -82,14 +80,23 @@ class GrainDataLoader(BaseDataLoader):
 
         Without a config there is no field list to declare, so this is the flat
         version of one: everything the loader reads is a named argument and
-        nothing else is carried. The seed and the shuffle flags are *not* here,
-        because the graph has already consumed them by the time it arrives --
-        keeping a copy would be a knob that changes no behavior.
+        nothing else is carried.
+
+        Upstream builds this graph here, from a ``DatasetIterationPolicy`` it
+        assembles on the spot. That is not available to us: building the
+        registry's recipes means importing the registry, which is the coupling
+        :func:`~hpmesh.datasets.build.build_dataloader` exists to absorb. So the
+        policy is spent there, when the caller builds the graph, and only the
+        knobs the batching below actually reads -- ``repeat`` and the prefetch
+        depth -- arrive here. ``seed``, ``shuffle`` and the streaming window
+        describe order the graph has already fixed; a copy here would be a field
+        no line below reads.
 
         ``read_options`` defaults to a fresh ``grain.ReadOptions`` rather than
         being shared as a mutable default. ``max_num_documents`` is the maximum
-        non-padding document segments in one local token batch, so the same
-        argument reaches both the build context and ``collator``.
+        non-padding document segments in one local token batch; it is carried
+        into the build context for the packing nodes to read, and the collators
+        ignore it.
         """
         if max_num_documents is not None and max_num_documents <= 0:
             raise ValueError("max_num_documents must be positive")
@@ -102,7 +109,6 @@ class GrainDataLoader(BaseDataLoader):
         expected_rank_id = f"dp_rank_{dp_rank}"
         self._dp_world_size = dp_world_size
         self._rank_id = expected_rank_id
-        self.max_num_documents = max_num_documents
 
         # A finite dataset cannot be shared by several ranks: each one reaches
         # the end at a different step, and the ranks that ran out first stop

@@ -14,7 +14,7 @@ a separate act with its own arguments (which rank am I, how many tokens per
 batch). Keeping them apart also keeps ``datasets/`` and ``components/`` free of
 any reference back to ``trainer/``.
 
-Same shape as ``components/optimizer.build_lr_scheduler``, which exists for
+Same shape as ``components/optimizer/lr_scheduler.build_lr_scheduler``, which exists for
 the same reason. Both take the whole run config and read their own fields off
 it rather than taking those fields restated as loose scalars: a scalar restated
 at the call site can drift from the field the config carries, and half of the
@@ -23,7 +23,7 @@ ones this used to take had already stopped being read at all.
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING
 
 import grain.python as grain
 
@@ -133,10 +133,12 @@ def build_dataloader(
         # ``--packing``: that selector names a text recipe, and the media path
         # ignores it.
         build_packing = build_mm_sample_packing
-        packing_kwargs: dict[str, Any] = {}
+        packing_kwargs: dict[str, int] = {}
         collator = MultiModalCollator
     else:
-        tokenizer = HuggingFaceTokenizer(tokenizer_path=dataloader_config.tokenizer_path)
+        tokenizer = HuggingFaceTokenizer(
+            tokenizer_path=dataloader_config.tokenizer_path
+        )
         recipe = (
             make_local_jsonl(path=dataloader_config.dataset_path)
             if dataloader_config.dataset == "local_jsonl"
@@ -161,10 +163,11 @@ def build_dataloader(
         read_options=grain.ReadOptions(),
         max_num_documents=dataloader_config.max_num_documents,
     )
-    # The policy is built here and given straight to the graph, and the loader
-    # is handed the same knobs the graph was not built from. The seed and the
-    # shuffle flags deliberately stop here: they decide the graph's order, and
-    # a copy on the loader would be an argument that changes nothing.
+    # The iteration policy is spent here, on the graph it orders, rather than
+    # handed down: the loader takes the built graph, so a policy on the loader
+    # would be a parameter no line of it reads. What does reach the loader is
+    # what batching -- not ordering -- reads: the prefetch depth, the drop
+    # policy, and the token batch the collator assembles into.
     graph = build_packing(
         recipe,
         **packing_kwargs,

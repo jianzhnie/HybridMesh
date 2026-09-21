@@ -45,7 +45,7 @@ dependencies = [
     # but that is incidental -- the data layer must not break when used without
     # a model. `datasets` and `tokenizers` back the sources and the tokenizer,
     # `jinja2` renders chat templates; the rest are reached only on the
-    # multimodal path (datasets/hf/multimodal/utils/{image,video}.py).
+    # multimodal path (datasets/multimodal/mm_image.py, mm_video.py).
     "datasets>=3.6.0",
     "tokenizers>=0.15.0",
     "jinja2",
