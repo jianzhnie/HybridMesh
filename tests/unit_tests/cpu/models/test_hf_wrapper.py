@@ -144,13 +144,35 @@ def test_flex_backend_passes_an_explicit_mask_through(
 def test_non_flex_backend_rejects_a_packed_sequence(model: HFTransformerModel) -> None:
     """Packing cannot be expressed by the fallback; it must fail, not go unmasked.
 
-    Two documents back to back: the position counter restarts at index 3, which
-    is what marks the boundary ``get_attention_masks`` would have masked.
+    Packedness is corpus-derived (``attn_mask_type``), not inferred from the
+    positions: the guard keys off the same flag ``get_attention_masks`` builds
+    the document mask from.
     """
+    model.model.config.attn_mask_type = "block_causal"
     packed = torch.tensor([0, 1, 2, 0, 1, 2])
 
     with pytest.raises(ValueError, match="packed sequence"):
         model._apply_attention(packed, None)
+
+
+def test_non_flex_backend_rejects_a_length_one_document_boundary(
+    model: HFTransformerModel,
+) -> None:
+    """A boundary after a length-1 document has no descending position edge.
+
+    ``[0, 0, 1, 2]`` is two documents (lengths 1 and 3) with no restart for a
+    ``positions[1:] < positions[:-1]`` scan to find. Keying the guard off that
+    scan would let sdpa attend across the boundary silently; keying it off
+    ``attn_mask_type`` catches it.
+    """
+    model.model.config.attn_mask_type = "block_causal"
+    boundary_after_length_one = torch.tensor([0, 0, 1, 2])
+    assert not bool(
+        (boundary_after_length_one[1:] < boundary_after_length_one[:-1]).any()
+    )
+
+    with pytest.raises(ValueError, match="packed sequence"):
+        model._apply_attention(boundary_after_length_one, None)
 
 
 # -- the config path the trainer uses ------------------------------------------
@@ -167,6 +189,41 @@ def test_build_model_config_for_offline_arch() -> None:
     assert config.hidden_size == cfg.hidden_size
     assert config.num_hidden_layers == cfg.num_hidden_layers
     assert config.max_position_embeddings >= cfg.max_seq_len
+
+
+def test_build_model_config_for_accepts_a_local_checkpoint_path(tmp_path) -> None:
+    """An absolute checkpoint path is a local config, not a malformed hub id.
+
+    "/abs/path" contains more than one "/", so a slash-count heuristic reads it
+    as neither hub id nor bare architecture and would take the offline branch,
+    feeding the path to ``AutoConfig.for_model`` as an architecture name. The
+    on-disk config.json is authoritative instead: the saved sizes win over the
+    ones cfg carries.
+    """
+    from transformers import AutoConfig
+
+    from hpmesh.trainer import ModelConfig
+
+    saved = AutoConfig.for_model(
+        "qwen3",
+        vocab_size=99,
+        hidden_size=24,
+        intermediate_size=48,
+        num_hidden_layers=1,
+        num_attention_heads=2,
+        num_key_value_heads=2,
+    )
+    saved.save_pretrained(tmp_path)
+
+    cfg = HybridMeshConfig(
+        model=ModelConfig(model_name_or_path=str(tmp_path)),
+        training=TrainingConfig(seed=42),
+    )
+    config = build_model_config_for(cfg)
+
+    # The sizes are the file's, not cfg's defaults (128 / 64 / ...).
+    assert config.vocab_size == 99
+    assert config.hidden_size == 24
 
 
 def test_the_mask_type_follows_the_corpus_rather_than_being_configured() -> None:

@@ -25,12 +25,10 @@ not: every stage's optimizer numbers its own parameters from 0, so positional
 keys collide across ranks in one shared checkpoint (the flat FQN-keyed
 optimizer state dict is what prevents that).
 
-Known seam, worked around rather than fixed here: the synthetic random corpus
-carries no cursor in the checkpoint (``Trainer._build_dataloader`` drops it --
-batch k is a pure function of ``(seed, k)``), and ``_data_iterator`` starts a
-fresh loader at batch 0. The resume phase therefore fast-forwards the new
-iterator by N batches; replaying generation lands on exactly the batches the
-uninterrupted run consumed at steps N+1..N+M.
+The synthetic random corpus is registered in the checkpoint's ``states`` under
+``DATALOADER`` (its cursor is ``_num_batches_yielded``, restored by replaying
+generated batches), so the resume phase reads exactly the batches the
+uninterrupted run consumed at steps N+1..N+M with no manual fast-forward.
 
 Everything runs in fp32 on CPU/gloo. The workdir is removed by the resume
 phase once the comparison is done.
@@ -186,11 +184,10 @@ def _phase_resume(workdir: str) -> None:
     elif not any(float(moment.abs().sum()) > 0 for moment in moments.values()):
         failures.append(f"rank {trainer.rank}: optimizer moments are all zero")
 
-    # The synthetic source is not checkpointed (see module docstring): replay
-    # the first N batches so step N+1 sees what the uninterrupted run saw.
+    # The loader's read position came back with the checkpoint (DATALOADER is
+    # registered in ``states``), so step N+1 reads what the uninterrupted run
+    # read -- no manual fast-forward.
     data_iterator = trainer._data_iterator()
-    for _ in range(SPLIT_STEP):
-        next(data_iterator)
 
     losses = _train_steps(trainer, data_iterator, EXTRA_STEPS)
 

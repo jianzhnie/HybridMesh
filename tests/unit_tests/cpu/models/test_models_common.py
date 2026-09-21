@@ -20,6 +20,7 @@ from hpmesh.models.common.feed_forward import (
     compute_ffn_hidden_dim,
 )
 from hpmesh.models.common.linear import PartialBiasRowwiseLinear, RouterGateLinear
+from hpmesh.models.common.moe import TokenChoiceTopKRouter
 
 
 def _ffn(dim: int = 8, hidden: int = 6) -> FeedForward:
@@ -265,3 +266,126 @@ def test_partial_bias_rowwise_matches_a_plain_linear_without_a_tp_group() -> Non
     assert torch.equal(
         layer(x), torch.nn.functional.linear(x, layer.weight, layer.bias)
     )
+
+
+# -- node-limited routing (DeepSeek-V3) ----------------------------------------
+
+_E, _D, _K = 8, 16, 2
+
+
+def _router(**kw) -> TokenChoiceTopKRouter:
+    torch.manual_seed(0)
+    return TokenChoiceTopKRouter(_E, _D, _K, **kw)
+
+
+def test_group_limited_routing_confines_every_token_to_the_chosen_groups() -> None:
+    """The whole point of the restriction: no token may reach an unchosen group.
+
+    ``n_group=2`` splits the 8 experts into ``{0..3}`` and ``{4..7}``; with
+    ``topk_group=1`` every token must draw its K experts from one of them. This
+    is what bounds inter-node traffic when a group is a node, so a silent
+    regression here would be a performance bug that still trains correctly --
+    exactly the kind that never gets noticed.
+    """
+    router = _router(num_expert_groups=2, num_limited_groups=1)
+    x = torch.randn(64, _D)
+
+    ids = router._select_experts(torch.sigmoid(router.gate(x)))
+
+    group_of = ids // (_E // 2)
+    assert bool((group_of[:, :1] == group_of).all()), "a token crossed groups"
+
+
+def test_without_grouping_tokens_are_free_to_cross_groups() -> None:
+    """The non-vacuity check for the test above.
+
+    Same weights, same tokens, grouping off: if the restriction were being
+    applied unconditionally -- or if the grouping flags were ignored -- this
+    would still show every token in one group, and the test above would prove
+    nothing.
+    """
+    router = _router()
+    x = torch.randn(64, _D)
+
+    ids = router._select_experts(torch.sigmoid(router.gate(x)))
+
+    group_of = ids // (_E // 2)
+    assert not bool((group_of[:, :1] == group_of).all())
+
+
+def test_the_group_score_is_the_sum_of_the_two_best_experts() -> None:
+    """A group wins on its strongest *pair*, not its single best expert.
+
+    DeepSeek-V3 Sec 2.1.1 scores a group by its top-2 sum, so a group with two
+    solid experts beats one holding a single outlier. A ``max`` or ``mean`` rule
+    would pick the other group here -- which is why this is pinned on the ids
+    rather than on a property the two rules share.
+
+    Groups are ``{0,1,2,3}`` and ``{4,5,6,7}``. Group 1 holds the highest single
+    expert (0.90) but group 0 wins on the pair: its top two are 0.80 and 0.70,
+    summing to 1.50 against group 1's 0.90 + 0.20. Under a ``max`` rule group 1
+    would win and the top-2 ids would come from it.
+    """
+    router = _router(num_expert_groups=2, num_limited_groups=1)
+    scores = torch.tensor([[0.80, 0.70, 0.00, 0.00, 0.90, 0.20, 0.00, 0.00]])
+
+    ids = router._select_experts(scores)
+
+    assert ids.tolist() == [[0, 1]], (
+        "group 0 (top-2 sum 1.50) must beat group 1 (1.10), despite 0.90 being "
+        "the single largest expert"
+    )
+
+
+def test_the_bias_shifts_which_experts_win_but_not_their_scores() -> None:
+    """The load-balancing bias is a routing device, never a value.
+
+    ``forward`` gathers the weight from the *unbiased* scores, so a bias strong
+    enough to change the selection must leave the score carried by a given
+    expert untouched. Otherwise the bias would quietly rescale the MoE output --
+    it is added to choose experts, not to weight them.
+    """
+    router = _router()
+    x = torch.randn(32, _D)
+    unbiased = torch.sigmoid(router.gate(x))
+
+    base_scores, base_ids, _ = router(x)
+    bias = torch.zeros(_E)
+    bias[5] = 10.0
+    steered_scores, steered_ids, _ = router(x, bias)
+
+    assert int((steered_ids == 5).sum()) > int((base_ids == 5).sum()), (
+        "bias did nothing"
+    )
+
+    # Every returned score is that expert's unbiased score, wherever it landed.
+    expected = unbiased.gather(1, steered_ids)
+    torch.testing.assert_close(steered_scores, expected, rtol=0, atol=0)
+    # ...and the same for the unsteered run, so the check above is not vacuous.
+    torch.testing.assert_close(
+        base_scores, unbiased.gather(1, base_ids), rtol=0, atol=0
+    )
+
+
+@pytest.mark.parametrize(
+    ("kwargs", "message"),
+    [
+        ({"num_expert_groups": 2}, "num_limited_groups must be set"),
+        (
+            {"num_expert_groups": 3, "num_limited_groups": 1},
+            "must be divisible by num_expert_groups",
+        ),
+        (
+            {"num_expert_groups": 2, "num_limited_groups": 5},
+            "cannot exceed num_expert_groups",
+        ),
+        (
+            {"num_expert_groups": 8, "num_limited_groups": 1},
+            "must be >= 2",
+        ),
+    ],
+)
+def test_a_malformed_group_config_is_rejected(kwargs: dict, message: str) -> None:
+    """Every one of these would otherwise fail deep inside a topk with a shape error."""
+    with pytest.raises(ValueError, match=message):
+        TokenChoiceTopKRouter(_E, _D, _K, **kwargs)

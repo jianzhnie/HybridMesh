@@ -462,10 +462,11 @@ def test_balance_loss_uses_the_batch_reduce_mesh() -> None:
 def test_balance_loss_skips_reduction_without_a_registered_mesh() -> None:
     """No SPMD mesh registered means no token-sharding axis, so no collective.
 
-    This is hpmesh's state today: nothing calls ``set_spmd_meshes``, so
-    ``spmd_mesh_group`` returns None and the reduction degrades to a no-op --
-    correct while nothing shards the token dim, and a live collective once
-    something does.
+    The trainer registers meshes through ``spmd_context``; this test runs
+    outside it, so ``spmd_mesh_group`` returns None and the reduction degrades
+    to a no-op -- correct while nothing shards the token dim, and a live
+    collective once the context is entered (pinned distributed in
+    ``tests/integration_tests/moe_aux_loss_grad_equivalence.py``).
     """
     loss = MicrobatchWiseLoadBalanceLoss(coeff=1.0)
     partial = torch.ones(4)
