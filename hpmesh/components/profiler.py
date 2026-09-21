@@ -120,6 +120,11 @@ class MemoryProfiler:
         ``exit_ctx`` forces one regardless of the frequency, and names it for
         the *previous* step: the snapshot is taken while unwinding an exception,
         so the step counter has not advanced past the one that failed.
+
+        On a device whose allocator keeps no history (CPU) there is nothing to
+        write: returning here is what keeps a pickled ``None`` out of the
+        snapshot directory on the OOM path, where the frequency check below is
+        deliberately bypassed. Upstream writes the file unconditionally.
         """
         self.step_num += 1
         if not self._records_history:

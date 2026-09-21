@@ -1,9 +1,3 @@
-# Copyright (c) Meta Platforms, Inc. and affiliates.
-# All rights reserved.
-#
-# This source code is licensed under the BSD-style license found in the
-# LICENSE file in the root directory of this source tree.
-
 """The ``torch_checkpointing`` checkpoint manager.
 
 Vendored from torchtitan's ``components/checkpointer/torch_checkpointing.py``.
@@ -36,8 +30,13 @@ Reachability note, stated plainly because it is easy to mistake for working code
 nothing in hpmesh constructs this manager yet. It is here because it is the third
 of torchtitan's checkpointer backends and the port is meant to be complete, and
 because the moment someone installs ``torch_checkpointing`` it is the faster
-backend with no further porting work. Until then it is unexercised, and its tests
-are the import-guard tests rather than round-trip tests.
+backend with no further porting work. Until then it is unexercised: the tests in
+``test_checkpointer.py`` cover only the import guard and the per-config branch of
+``__init__``. Nothing above that line has ever run, so the backend-dependent
+paths -- ``_save`` / ``_load_checkpoint`` / ``_save_last_step`` and the storage
+adapter -- are a faithful transcription rather than verified behaviour, and the
+first real use should start by round-tripping a checkpoint on a machine that has
+the package installed.
 """
 
 from __future__ import annotations
@@ -58,9 +57,10 @@ from ...utils import filesystem
 from ...utils.gc import GarbageCollection
 
 if TYPE_CHECKING:
-    from ...trainer.config import TorchCheckpointingConfig
+    from ...trainer.config import CheckpointConfig
 
 from .base import (
+    LR_SCHEDULER,
     MODEL,
     OPTIMIZER,
     BaseCheckpointManager,
@@ -328,10 +328,11 @@ class TorchCheckpointingManager(BaseCheckpointManager):
 
     def __init__(
         self,
-        config: TorchCheckpointingConfig,
+        config: CheckpointConfig,
         *,
         model_parts: list[Any],
         optimizer: Any,
+        lr_scheduler: Any,
         states: dict[str, Any],
         folder: str,
         sd_adapter: Any | None = None,
@@ -369,6 +370,11 @@ class TorchCheckpointingManager(BaseCheckpointManager):
             {
                 MODEL: ModelWrapper(model_parts),
                 OPTIMIZER: optimizer,
+                # After OPTIMIZER, deliberately: DCP loads in this order, and the
+                # scheduler's restore reads the optimizers' ``base_lrs``. Without
+                # it a resumed run's fresh scheduler restarts ``last_epoch`` at 0,
+                # so a warmup or decay curve restarts on the step after a resume.
+                LR_SCHEDULER: lr_scheduler,
             }
         )
 

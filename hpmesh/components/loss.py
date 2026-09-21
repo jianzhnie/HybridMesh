@@ -6,16 +6,28 @@
 
 """Loss functions: plain next-token CE, and its vocab-parallel form.
 
-Vendored from torchtitan ``components/loss.py``. The functions are called
-directly rather than through the ``BaseLoss`` / ``CrossEntropyLoss`` /
-``MSELoss`` hierarchy, and the ``spmd.assert_type`` annotations are gone --
-hpmesh configures by argument and checks shapes, not SPMD types. What was kept
-is the arithmetic, unchanged, plus ``IGNORE_INDEX`` and ``next_token_targets``.
+Vendored from torchtitan ``components/loss.py``. The arithmetic is unchanged.
+The functions are called directly rather than through the ``BaseLoss`` /
+``CrossEntropyLoss`` / ``MSELoss`` hierarchy, and the ``spmd.assert_type``
+annotations are gone -- hpmesh configures by argument and checks shapes, not
+SPMD types. Concretely, the vocab-parallel path is selected by comparing
+``pred.shape[-1]`` with ``global_vocab_size`` rather than by upstream's
+``spmd_mesh_size("tp") > 1``, which keeps a caller that has no SPMD context
+working and cannot disagree with the tensors in front of it.
 
-Two entry points, and the difference between them is worth stating plainly:
+Two names here are hpmesh's rather than upstream's: ``next_token_targets`` and
+``vocab_shard_bounds``. Nothing in torchtitan defines either. ``next_token_targets``
+is the row-wise label shift the trainer applies; ``vocab_shard_bounds`` is the
+bound formula lifted out of upstream's ``_LossParallelCrossEntropy.forward`` so
+the vocab-parallel embedding and the vocab-parallel loss cannot disagree about
+which rank owns which token. ``IGNORE_INDEX`` is genuinely upstream.
+
+Three entry points, and the difference between them is worth stating plainly:
 
 * ``cross_entropy_loss`` -- the loss, with a sum reduction, so the caller can
   divide by a *global* token count once the per-rank counts have been reduced.
+* ``chunked_lm_head_cross_entropy`` -- the same summed CE, run in sequence
+  chunks so peak logits memory is bounded; it runs its own backward.
 * ``compute_logprobs`` -- per-token log-probabilities, for inference-side use
   (GRPO, perplexity). Different job, mostly the same math.
 """
