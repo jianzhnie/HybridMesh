@@ -890,8 +890,9 @@ class DataloaderConfig:
 
     ``random`` (the default) keeps the synthetic corpus and needs no assets, so
     the default run is unchanged and reproducible offline. Any other value
-    names a recipe from ``datasets.hf.text.DATASETS`` or
-    ``datasets.hf.multimodal.MM_DATASETS``, or the built-in ``local_jsonl`` --
+    names a recipe from ``datasets.text.text.DATASETS`` or
+    ``datasets.multimodal.mm_datasets.MM_DATASETS``, or the built-in
+    ``local_jsonl`` --
     which is deliberately NOT in either dict, because its corpus path is a
     runtime argument rather than a constant.
 
@@ -906,8 +907,8 @@ class DataloaderConfig:
         default="random",
         metadata={
             "help": "Corpus selector: 'random' (synthetic, no assets) | "
-            "'local_jsonl' | a key of datasets.hf.text.DATASETS | a key of "
-            "datasets.hf.multimodal.MM_DATASETS (needs torchvision)"
+            "'local_jsonl' | a key of datasets.text.text.DATASETS | a key of "
+            "datasets.multimodal.mm_datasets.MM_DATASETS (needs torchvision)"
         },
     )
     tokenizer_path: str | None = field(
@@ -972,8 +973,8 @@ class DataloaderConfig:
             )
         if self.dataset == "local_jsonl" and not self.dataset_path:
             raise ValueError("dataset_path is required for dataset 'local_jsonl'")
-        # Membership in ``datasets.hf.text.DATASETS`` /
-        # ``datasets.hf.multimodal.MM_DATASETS`` is checked by
+        # Membership in ``datasets.text.text.DATASETS`` /
+        # ``datasets.multimodal.mm_datasets.MM_DATASETS`` is checked by
         # ``datasets/build.py`` at build time, not here: reading the registries
         # would import the datasets package into the config layer.
         if self.max_num_documents is not None and self.max_num_documents <= 0:

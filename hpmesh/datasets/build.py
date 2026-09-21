@@ -28,7 +28,6 @@ from typing import TYPE_CHECKING
 import grain.python as grain
 
 from .collators import TextCollator
-from .hf.text import DATASETS, make_local_jsonl
 from .loader import (
     BaseDataLoader,
     GrainDataLoader,
@@ -37,6 +36,7 @@ from .loader import (
 )
 from .packing import ConcatThenSplitPackingConfig
 from .random_data import RandomTokenDataLoader
+from .text.text import DATASETS, make_local_jsonl
 from .types import DatasetBuildContext
 
 if TYPE_CHECKING:
@@ -94,8 +94,8 @@ def build_dataloader(
     )
     if is_multimodal:
         try:
-            from .hf.multimodal.mm_collator import MultiModalCollator
-            from .hf.multimodal.mm_datasets import MM_DATASETS, MMSamplePackingConfig
+            from .multimodal.mm_collator import MultiModalCollator
+            from .multimodal.mm_datasets import MM_DATASETS, MMSamplePackingConfig
         except ImportError as exc:
             raise ImportError(
                 f"dataset {dataset_config.dataset!r} is not one of the text "
