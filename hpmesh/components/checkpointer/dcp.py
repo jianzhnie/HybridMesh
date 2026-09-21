@@ -65,7 +65,7 @@ from ...utils import filesystem
 from ...utils.gc import GarbageCollection
 
 if TYPE_CHECKING:
-    from ...trainer.config import CheckpointManagerConfig
+    from ...trainer.config import CheckpointConfig
 
 from .base import (
     DATALOADER,
@@ -168,7 +168,7 @@ class CheckpointManager(BaseCheckpointManager):
 
     def __init__(
         self,
-        config: CheckpointManagerConfig,
+        config: CheckpointConfig,
         *,
         model_parts: list[nn.Module],
         optimizer: Any,
