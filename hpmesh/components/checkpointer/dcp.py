@@ -164,10 +164,6 @@ class CheckpointManager(BaseCheckpointManager):
         sd_adapter: converts model state dicts between the native layout and
             another format (HF safetensors). Required for the HF export paths.
             hpmesh ships none yet, so those paths reject at construction.
-        optimizer_fqn_keying: accepted and ignored -- optimizer state is always
-            FQN-keyed, because the container spans every model part. Kept so
-            existing callers do not have to change, and to record in one place
-            that positional optimizer state is no longer reachable.
     """
 
     def __init__(
@@ -180,7 +176,6 @@ class CheckpointManager(BaseCheckpointManager):
         states: dict[str, Any],
         folder: str,
         sd_adapter: Any | None = None,
-        optimizer_fqn_keying: bool = False,
     ) -> None:
         self.enable = config.enable
         if not self.enable:

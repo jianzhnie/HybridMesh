@@ -13,8 +13,7 @@ paths under the same names, so the two trees can be read side by side:
   Free functions over any ``torch.optim.Optimizer``; model-agnostic.
 * ``optimizer`` -- ``OptimizersContainer``, the single ``Optimizer`` the training
   loop drives, over one inner optimizer per (model part, optimizer name)
-  ``ParamGroupConfig`` produced; plus ``OptimizerWrapper``, the narrower
-  single-optimizer ``Stateful`` view.
+  ``ParamGroupConfig`` produced.
 * ``lr_scheduler`` -- ``LRSchedulersContainer``, one ``LambdaLR`` per inner
   optimizer, and the WSD curve they share.
 
@@ -24,7 +23,7 @@ where it lived only because hpmesh had nowhere to put it.
 """
 
 from .lr_scheduler import LRSchedulersContainer, build_lr_scheduler
-from .optimizer import OptimizersContainer, OptimizerWrapper
+from .optimizer import OptimizersContainer
 from .utils import (
     get_flat_optim_state_dict,
     init_optim_state,
@@ -34,7 +33,6 @@ from .utils import (
 __all__ = [
     "LRSchedulersContainer",
     "OptimizersContainer",
-    "OptimizerWrapper",
     "build_lr_scheduler",
     "get_flat_optim_state_dict",
     "init_optim_state",

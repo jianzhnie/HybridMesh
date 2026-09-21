@@ -343,11 +343,6 @@ class Trainer:
             lr_scheduler=self.lr_scheduler,
             states=states,
             folder=cfg.dump_folder,
-            # Under PP the optimizer's positional state indices collide across
-            # stages (every stage's first parameter is index 0), so the
-            # checkpoint keys optimizer state by parameter FQN instead.
-            optimizer_fqn_keying=self.parallel_dims is not None
-            and self.parallel_dims.pp_enabled,
         )
 
         # Counters the checkpoint carries. Kept as plain ints so a resumed run
