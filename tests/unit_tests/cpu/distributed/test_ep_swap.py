@@ -31,9 +31,10 @@ import torch
 from transformers import AutoConfig
 
 from hpmesh.models.common.aux_loss import AuxLoss
-from hpmesh.models.common.moe import MoE
+from hpmesh.models.common.moe import MoE, RoutedExperts
 from hpmesh.models.hf_wrapper import HFTransformerModel
 from hpmesh.parallel.expert_parallel import swap_hf_moe_blocks
+from hpmesh.parallel.expert_parallel.ep import _restore_fp32_state_buffers
 
 TOL = 1e-6
 
@@ -742,3 +743,78 @@ def test_a_block_with_the_wrong_expert_layout_is_rejected() -> None:
 
     with pytest.raises(ValueError, match="unrecognized expert weight shapes"):
         swap_hf_moe_blocks(model)
+
+
+def test_the_swap_keeps_the_token_count_buffer_in_fp32() -> None:
+    """The swapped MoE's state buffers must survive ``.to(dtype=...)`` unscathed.
+
+    ``Module.to`` converts every floating-point buffer along with the
+    parameters, and ``_convert_block`` casts the new MoE to match the HF block's
+    dtype. In a bf16 run that silently demoted the load-balancing buffers:
+    ``tokens_per_expert_E`` is a token *count*, which bf16 cannot hold exactly
+    past 256 -- 1001 becomes 1000 -- and ``expert_bias_E`` is an additive
+    correction a bf16 round per step would erode. Neither has a gradient, so the
+    cast bought nothing. hpmesh is fp32-only today, which is exactly why this
+    needs a test: the bug is invisible until a bf16 path exists, and then it is
+    silent.
+
+    Qwen3Moe carries no ``e_score_correction_bias``, so only the count buffer is
+    present here; ``_restore_fp32_state_buffers`` covers both and
+    ``test_the_fp32_restore_covers_the_bias_buffer`` pins the other.
+    """
+    swapped = _model(_config(norm_topk_prob=True))
+
+    assert swap_hf_moe_blocks(swapped) == 2
+
+    moe = swapped.layers[0].mlp
+    assert isinstance(moe, MoE)
+    assert moe.tokens_per_expert_E.dtype == torch.float32
+
+    # And the conversion really was asked for: the parameters did follow the
+    # block, so this is not passing because nothing was cast at all.
+    assert moe.router.gate.weight.dtype == torch.float64  # nosec
+
+    # A count bf16 would have mangled round-trips exactly.
+    moe.tokens_per_expert_E += 1001
+    assert moe.tokens_per_expert_E[0].item() == 1001.0
+
+
+def test_the_fp32_restore_covers_the_bias_buffer() -> None:
+    """``_restore_fp32_state_buffers`` is what the check above relies on.
+
+    Built directly rather than through the swap, because the families that carry
+    ``expert_bias_E`` are a larger fixture than this property needs. The point is
+    narrow and worth isolating: yes to float buffers, no to a plain
+    ``Module.to``.
+    """
+    from hpmesh.models.common.grouped_experts import GroupedExperts
+
+    grouped = GroupedExperts(dim=16, hidden_dim=32, num_experts=256)
+    moe = MoE(
+        num_experts=256,
+        routed_experts=RoutedExperts(grouped, None),
+        router=torch.nn.Linear(16, 256, bias=False),
+        load_balance_coeff=1e-3,
+    )
+    assert moe.expert_bias_E is not None, "no bias registered -- vacuous"
+
+    # Without the restore, this is what the swap used to do.
+    moe.to(dtype=torch.bfloat16)
+    assert moe.expert_bias_E.dtype == torch.bfloat16  # the bug, demonstrated
+
+    moe.to(dtype=torch.bfloat16)  # re-cast so the fix under test starts from it
+    _restore_fp32_state_buffers(moe)
+
+    assert moe.expert_bias_E.dtype == torch.float32
+    assert moe.tokens_per_expert_E.dtype == torch.float32
+    assert moe.router.weight.dtype == torch.bfloat16  # params still follow
+
+    # Exactness, which is the whole reason the dtype matters.
+    # 0.012345 as bf16 is 0.012329; as fp32 it is exact to float32 precision.
+    moe.expert_bias_E[0] = 0.012345
+    moe.tokens_per_expert_E += 1001
+    assert (
+        moe.expert_bias_E[0].item()
+        == torch.tensor(0.012345, dtype=torch.float32).item()
+    )
+    assert moe.tokens_per_expert_E[0].item() == 1001.0

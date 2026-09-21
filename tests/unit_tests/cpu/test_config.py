@@ -65,6 +65,35 @@ def test_a_load_balancer_that_is_not_a_known_strategy_is_rejected() -> None:
         ParallelConfig(context_parallel_load_balancer="roundrobin")
 
 
+def test_ptrr_is_rejected_at_config_time_not_at_the_first_forward() -> None:
+    """It is a *recognized* name that hpmesh does not implement.
+
+    Keeping it out of the message's "must be one of" list would report a
+    deliberate, supported-in-upstream strategy as a typo, so it stays in the
+    vocabulary and is refused explicitly instead. The failure used to surface as
+    a NotImplementedError from the mesh builder, after process groups and model
+    build -- this pins it to the config.
+    """
+    with pytest.raises(NotImplementedError, match="ptrr"):
+        ParallelConfig(context_parallel_load_balancer="ptrr")
+
+
+def test_sequence_parallel_cannot_be_turned_off() -> None:
+    """hpmesh's TP is sequence-parallel by construction, so the flag has no
+    "off" to select.
+
+    It used to be read by no line of the package: ``enable_sequence_parallel
+    =false`` was accepted and behaved exactly as ``true`` -- the silent no-op
+    this project's own rule forbids. There is no replicated-activation TP
+    realization to fall back to, so refusing is the only honest answer.
+    """
+    with pytest.raises(NotImplementedError, match="enable_sequence_parallel"):
+        ParallelConfig(enable_sequence_parallel=False)
+    # The default stays on, and saying so explicitly is not an error.
+    assert ParallelConfig().enable_sequence_parallel is True
+    assert ParallelConfig(enable_sequence_parallel=True).enable_sequence_parallel
+
+
 def test_an_unknown_context_parallel_strategy_is_rejected() -> None:
     with pytest.raises(ValueError, match="must be one of"):
         ParallelConfig(context_parallel_strategy="ring")
