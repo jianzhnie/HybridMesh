@@ -29,6 +29,7 @@ The stage-splitting arithmetic is otherwise unchanged.
 from __future__ import annotations
 
 import copy
+import inspect
 import logging
 from collections.abc import Callable
 
@@ -240,14 +241,13 @@ def split_model_into_stages(
             elif module_name not in modules_to_keep:
                 setattr(model, module_name, nn.Identity())
 
-        stage = PipelineStage(
-            model,
-            stage_idx,
-            num_stages,
-            device,
-            group=pp_mesh.get_group(),
-            get_mesh=get_mesh,
-        )
+        stage_kwargs = {"group": pp_mesh.get_group()}
+        # ``get_mesh`` was added after PyTorch 2.10. hpmesh passes None because
+        # its stages exchange plain tensors, so omitting it on older releases
+        # has exactly the same semantics.
+        if "get_mesh" in inspect.signature(PipelineStage).parameters:
+            stage_kwargs["get_mesh"] = get_mesh
+        stage = PipelineStage(model, stage_idx, num_stages, device, **stage_kwargs)
         return stage, model
 
     num_stages = len(module_names_per_stage)

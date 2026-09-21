@@ -283,9 +283,10 @@ def _resolve_plan(model: nn.Module, plan) -> dict[str, ShardingConfig | None]:
     ``plan`` may be ``None`` (use the model's declared plan), a map of patterns
     to ``ShardingConfig``, or a map of patterns to strings (the form HF ships).
 
-    Three of HF's string specs map onto a realizer: ``colwise`` and ``rowwise``
-    as below, plus ``replicated_with_grad_allreduce`` -- a projection left whole
-    on every rank whose gradient the trainer's own
+    HF's ``colwise`` and ``rowwise`` specs map onto realizers. Specs that require
+    a replicated result (``replicated_with_grad_allreduce`` and the newer
+    ``colwise_gather_output`` used for ``lm_head``) are left whole on every
+    rank; the trainer's own
     ``_allreduce_replicated_tp_grads`` already sums. That last one is not
     decoration: Qwen3's plan marks ``q_norm`` / ``k_norm`` with it, and without
     this branch every Qwen3 TP run dies here before touching a weight.
@@ -319,7 +320,7 @@ def _resolve_plan(model: nn.Module, plan) -> dict[str, ShardingConfig | None]:
             resolved[pattern] = colwise()
         elif spec == "rowwise":
             resolved[pattern] = rowwise()
-        elif spec == "replicated_with_grad_allreduce":
+        elif spec in {"replicated_with_grad_allreduce", "colwise_gather_output"}:
             # Nothing for apply_tp to do: the projection stays whole on every
             # rank. The ``_with_grad_allreduce`` half is already implemented --
             # _allreduce_replicated_tp_grads sums exactly these parameters'

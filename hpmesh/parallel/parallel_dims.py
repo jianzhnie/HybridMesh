@@ -101,18 +101,35 @@ class ParallelDims:
             self.pp,
             self.ep,
         )
-        for d in (dp_replicate, cp, tp, pp, ep):
-            assert d >= 1, "Parallelism degree should be >= 1, except for dp_shard"
-        assert dp_shard == -1 or dp_shard >= 1, "dp_shard must -1 or >=1."
+        named_degrees = {
+            "dp_replicate": dp_replicate,
+            "cp": cp,
+            "tp": tp,
+            "pp": pp,
+            "ep": ep,
+        }
+        for name, degree in named_degrees.items():
+            if degree < 1:
+                raise ValueError(f"{name} must be >= 1, got {degree}")
+        if dp_shard != -1 and dp_shard < 1:
+            raise ValueError(f"dp_shard must be -1 or >= 1, got {dp_shard}")
+        if self.world_size < 1:
+            raise ValueError(f"world_size must be >= 1, got {self.world_size}")
         if dp_shard < 0:
-            self.dp_shard = dp_shard = self.world_size // (dp_replicate * cp * tp * pp)
-        assert dp_shard >= 1
+            fixed = dp_replicate * cp * tp * pp
+            if self.world_size % fixed != 0:
+                raise ValueError(
+                    f"world_size ({self.world_size}) must be divisible by "
+                    f"dp_replicate * cp * tp * pp ({fixed}) when dp_shard=-1"
+                )
+            self.dp_shard = dp_shard = self.world_size // fixed
 
-        assert dp_replicate * dp_shard * cp * tp * pp == self.world_size, (
-            f"Invalid parallel dims: dp_replicate({dp_replicate}) * "
-            f"dp_shard({dp_shard}) * "
-            f"cp({cp}) * tp({tp}) * pp({pp}) != WORLD_SIZE({self.world_size})"
-        )
+        if dp_replicate * dp_shard * cp * tp * pp != self.world_size:
+            raise ValueError(
+                f"Invalid parallel dims: dp_replicate({dp_replicate}) * "
+                f"dp_shard({dp_shard}) * "
+                f"cp({cp}) * tp({tp}) * pp({pp}) != WORLD_SIZE({self.world_size})"
+            )
 
         sparse_region = dp_shard * cp * tp
         if sparse_region % ep != 0:

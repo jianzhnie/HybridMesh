@@ -294,6 +294,8 @@ class CPFlexKernel(nn.Module):
         and nothing in this signature says which rearrangement that was --
         ``apply_cp`` refuses ulysses with a load balancer for that reason.
         """
+        import inspect
+
         from torch.nn.attention.flex_attention import create_block_mask
 
         def _causal(b, h, q_idx, kv_idx):
@@ -303,15 +305,18 @@ class CPFlexKernel(nn.Module):
         key = (seq_len, q_BHSD.device, is_in_batch_invariant_mode())
         mask = self._full_masks.get(key)
         if mask is None:
+            mask_kwargs = {
+                "device": q_BHSD.device,
+                "BLOCK_SIZE": 128,
+            }
+            if "separate_full_blocks" in inspect.signature(
+                create_block_mask
+            ).parameters:
+                mask_kwargs["separate_full_blocks"] = (
+                    not is_in_batch_invariant_mode()
+                )
             mask = create_block_mask(
-                _causal,
-                1,
-                None,
-                seq_len,
-                seq_len,
-                device=q_BHSD.device,
-                BLOCK_SIZE=128,
-                separate_full_blocks=not is_in_batch_invariant_mode(),
+                _causal, 1, None, seq_len, seq_len, **mask_kwargs
             )
             self._full_masks[key] = mask
         return mask
