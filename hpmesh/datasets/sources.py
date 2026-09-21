@@ -1,16 +1,23 @@
 """Storage adapters for Grain datasets.
 
-Vendored from torchtitan ``components/data/sources.py``. Each source is its own
-config: the class carries its own fields and implements ``build()``, which is
-the shape ``SourceConfig`` describes -- a ``build()`` that returns either a
-random-access source or a ``grain.IterDataset``.
+Vendored from torchtitan ``components/data/sources.py``. Each source is a plain
+dataclass describing *what* to read; :func:`build_source` -- a free function, not
+a method -- is what reads it. That split is the same one every other config in
+hpmesh uses (``trainer/config.py``: configs are descriptions, not builders), and
+it is what lets a dataset catalog hold sources at module scope without touching
+the filesystem or the Hub: constructing one resolves nothing.
 
 Note the asymmetry, which is deliberate and load-bearing: the two Hugging Face
 sources take ``dataset_iteration_policy`` and ignore it, while the streaming one
 shards by it. ``split_dataset_by_node`` is what gives each DP rank a disjoint
 stream; the random-access and JSONL sources leave sharding to
-``SingleDatasetConfig._build_map_dataset``, which slices after the shuffle.
+:func:`~hpmesh.datasets.dataset.build_dataset`, which slices after the shuffle.
 Sharding twice would drop rows.
+
+A source slot takes either a description -- one of the three classes below -- or
+an already-built node, and :func:`build_source` dispatches on the concrete class
+rather than a method. That is what the union in its signature spells out, and it
+is why an unhandled source is a type error rather than a runtime one.
 """
 
 from __future__ import annotations
@@ -33,7 +40,7 @@ __all__ = [
     "HuggingFaceStreamingSource",
     "IndexedJsonlSource",
     "RandomAccessDataSource",
-    "SourceConfig",
+    "build_source",
 ]
 
 
@@ -44,16 +51,6 @@ class RandomAccessDataSource(Protocol):
     def __len__(self) -> int: ...
 
     def __getitem__(self, index: int) -> Any: ...
-
-
-class SourceConfig(Protocol):
-    """Builds a random-access or streaming source."""
-
-    def build(
-        self,
-        *,
-        dataset_iteration_policy: DatasetIterationPolicy,
-    ) -> RandomAccessDataSource | grain.IterDataset: ...
 
 
 @dataclass(kw_only=True)
@@ -73,20 +70,13 @@ class IndexedJsonlSource:
         else:
             self.patterns = tuple(self.patterns)
 
-    def build(
-        self,
-        *,
-        dataset_iteration_policy: DatasetIterationPolicy,
-    ) -> RandomAccessDataSource:
-        del dataset_iteration_policy
-        return _IndexedJsonlDataSource(self.patterns)
-
 
 class _IndexedJsonlDataSource:
-    """The offset index ``IndexedJsonlSource`` builds.
+    """The offset index :func:`build_source` builds for an ``IndexedJsonlSource``.
 
-    Separate from the config so the index is built once per ``build()`` and not
-    carried around in a dataclass that is compared and hashed as configuration.
+    Separate from the source so the index is built once per ``build_source()``
+    call and not carried around in a dataclass that is compared and hashed as
+    configuration.
     """
 
     def __init__(self, patterns: tuple[str, ...]) -> None:
@@ -141,30 +131,10 @@ class HuggingFaceRandomAccessSource:
                 f"{sorted(duplicated)}"
             )
 
-    def build(
-        self,
-        *,
-        dataset_iteration_policy: DatasetIterationPolicy,
-    ) -> RandomAccessDataSource:
-        del dataset_iteration_policy
-        dataset = datasets.load_dataset(
-            self.path,
-            name=self.name,
-            split=self.split,
-            revision=self.revision,
-            streaming=False,
-            **self.load_dataset_kwargs,
-        )
-        if not isinstance(dataset, datasets.Dataset):
-            raise TypeError(
-                "random-access Hugging Face source requires one Dataset; "
-                f"got {type(dataset).__qualname__}"
-            )
-        return _HuggingFaceRandomAccessDataSource(dataset)
-
 
 class _HuggingFaceRandomAccessDataSource:
-    """The materialized dataset ``HuggingFaceRandomAccessSource`` builds."""
+    """The materialized dataset :func:`build_source` builds for a
+    ``HuggingFaceRandomAccessSource``."""
 
     def __init__(self, dataset: datasets.Dataset) -> None:
         self._dataset = dataset
@@ -182,7 +152,7 @@ class HuggingFaceStreamingSource:
 
     The dataset is *not* loaded here. A dataset catalog holds these at module
     scope, so loading in ``__init__`` would make importing a catalog reach the
-    Hub; ``build()`` is what resolves and splits the stream.
+    Hub; :func:`build_source` is what resolves and splits the stream.
     """
 
     path: str
@@ -201,18 +171,58 @@ class HuggingFaceStreamingSource:
                 f"{sorted(duplicated)}"
             )
 
-    def build(
-        self,
-        *,
-        dataset_iteration_policy: DatasetIterationPolicy,
-    ) -> grain.IterDataset:
+
+def build_source(
+    source: (
+        IndexedJsonlSource
+        | HuggingFaceRandomAccessSource
+        | HuggingFaceStreamingSource
+        | RandomAccessDataSource
+        | grain.IterDataset
+    ),
+    *,
+    dataset_iteration_policy: DatasetIterationPolicy,
+) -> RandomAccessDataSource | grain.IterDataset:
+    """Resolve ``source`` into something Grain can read.
+
+    A source slot takes either a description -- one of the three classes above --
+    or something already built. The second form is the escape hatch for a caller
+    that has its own random-access object or a Grain stream in hand: there is no
+    ``build()`` to override any more, so without it every source would have to be
+    one of the three, and the tests that hold raw rows in memory would have to
+    write themselves a JSONL file first.
+
+    The policy argument is passed by every caller but read only by the streaming
+    source. The others ignore it deliberately: they are random-access, and the DP
+    slice is taken later, after the shuffle, by
+    :func:`~hpmesh.datasets.dataset.build_dataset`. Sharding here as well would
+    drop rows.
+    """
+    if isinstance(source, IndexedJsonlSource):
+        return _IndexedJsonlDataSource(source.patterns)
+    if isinstance(source, HuggingFaceRandomAccessSource):
         dataset = datasets.load_dataset(
-            self.path,
-            name=self.name,
-            split=self.split,
-            revision=self.revision,
+            source.path,
+            name=source.name,
+            split=source.split,
+            revision=source.revision,
+            streaming=False,
+            **source.load_dataset_kwargs,
+        )
+        if not isinstance(dataset, datasets.Dataset):
+            raise TypeError(
+                "random-access Hugging Face source requires one Dataset; "
+                f"got {type(dataset).__qualname__}"
+            )
+        return _HuggingFaceRandomAccessDataSource(dataset)
+    if isinstance(source, HuggingFaceStreamingSource):
+        dataset = datasets.load_dataset(
+            source.path,
+            name=source.name,
+            split=source.split,
+            revision=source.revision,
             streaming=True,
-            **self.load_dataset_kwargs,
+            **source.load_dataset_kwargs,
         )
         if not isinstance(dataset, datasets.IterableDataset):
             raise TypeError(
@@ -237,10 +247,16 @@ class HuggingFaceStreamingSource:
             repeat=dataset_iteration_policy.repeat,
             shuffle=dataset_iteration_policy.shuffle,
         )
+    if isinstance(source, RandomAccessDataSource) or isinstance(
+        source, grain.IterDataset
+    ):
+        return source
+    raise TypeError(f"unhandled source type {type(source).__qualname__}")
 
 
 class _HuggingFaceStreamingIterDataset(grain.IterDataset):
-    """The built node ``HuggingFaceStreamingSource`` produces.
+    """The built node :func:`build_source` produces for a
+    ``HuggingFaceStreamingSource``.
 
     Separate from the source so the source can stay an inert dataclass. This
     node has only one parent-adjacent job -- hand out a cursor iterator -- and

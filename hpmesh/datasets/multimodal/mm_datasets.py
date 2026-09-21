@@ -25,7 +25,7 @@ Workflow overview::
     |       masked to ignore_id (-100)                      |
     +-------------------------------------------------------+
             |
-            v  (optional, if MMSamplePackingConfig is configured)
+            v  (optional, if a packing step is configured)
     +-------------------------------------------------------+
     |  Sample Packer                                        |
     |  Bin-pack short samples into seq_len-token sequences  |
@@ -63,7 +63,6 @@ one in its own config subclass.
 from __future__ import annotations
 
 from collections.abc import Callable
-from dataclasses import dataclass
 from functools import partial
 from typing import Any
 
@@ -74,8 +73,13 @@ import torch
 from ...components.loss import IGNORE_INDEX
 from ...components.tokenizer import MultiModalTokenizer
 from ...utils.logger_utils import get_logger
-from ..dataset import DatasetConfig as GrainDatasetConfig
-from ..dataset import SampleProcessor, SingleDatasetConfig
+from ..dataset import (
+    DatasetConcat,
+    DatasetMix,
+    SampleProcessor,
+    SingleDataset,
+    build_dataset,
+)
 from ..sources import HuggingFaceStreamingSource
 from ..types import DatasetBuildContext, DatasetIterationPolicy
 from .mm_image import calculate_vision_tokens, process_image, resize_to_pixel_budget
@@ -85,8 +89,8 @@ logger = get_logger(__name__)
 
 __all__ = [
     "MM_DATASETS",
-    "MMSamplePackingConfig",
     "MultiModalProcessor",
+    "build_mm_sample_packing",
 ]
 
 
@@ -345,8 +349,8 @@ class MultiModalProcessor(SampleProcessor):
         return processed
 
 
-MM_DATASETS: dict[str, SingleDatasetConfig] = {
-    "obelics": SingleDatasetConfig(
+MM_DATASETS: dict[str, SingleDataset] = {
+    "obelics": SingleDataset(
         source=HuggingFaceStreamingSource(
             path="HuggingFaceM4/OBELICS",
             split="train",
@@ -357,7 +361,7 @@ MM_DATASETS: dict[str, SingleDatasetConfig] = {
         ),
         post_filters=(lambda sample: sample is not None,),
     ),
-    "cc12m": SingleDatasetConfig(
+    "cc12m": SingleDataset(
         source=HuggingFaceStreamingSource(
             path="pixparse/cc12m-wds",
             split="train",
@@ -368,7 +372,7 @@ MM_DATASETS: dict[str, SingleDatasetConfig] = {
         ),
         post_filters=(lambda sample: sample is not None,),
     ),
-    "cc12m-test": SingleDatasetConfig(
+    "cc12m-test": SingleDataset(
         source=HuggingFaceStreamingSource(
             path="tests/assets/cc12m_test",
             split="train",
@@ -385,64 +389,68 @@ MM_DATASETS: dict[str, SingleDatasetConfig] = {
 }
 
 
-@dataclass(frozen=True, kw_only=True, slots=True)
-class MMSamplePackingConfig:
-    """Packs whole multimodal documents into fixed-length rows."""
+def build_mm_sample_packing(
+    dataset: SingleDataset | DatasetMix | DatasetConcat,
+    *,
+    context: DatasetBuildContext,
+    dataset_iteration_policy: DatasetIterationPolicy,
+    num_packing_bins: int = 8,
+) -> grain.IterDataset[dict[str, Any]]:
+    """Pack whole multimodal documents into fixed-length rows.
 
-    dataset: GrainDatasetConfig
-    num_packing_bins: int = 8
-    """Candidate rows kept open; more bins can reduce padding but retain more media."""
+    Lives here rather than in ``packing.py`` beside the text recipes: this node
+    packs media arrays, and naming it from the text module would make the
+    text-only path import all of this.
 
-    def __post_init__(self) -> None:
-        if self.num_packing_bins <= 0:
-            raise ValueError("num_packing_bins must be positive")
+    ``num_packing_bins`` is how many candidate rows are kept open; more bins can
+    reduce padding, but retain more media.
+    """
+    if num_packing_bins <= 0:
+        raise ValueError("num_packing_bins must be positive")
 
-    def build(
-        self,
-        *,
-        context: DatasetBuildContext,
-        dataset_iteration_policy: DatasetIterationPolicy,
-    ) -> grain.IterDataset[dict[str, Any]]:
-        dataset = self.dataset.build(
-            context=context,
-            dataset_iteration_policy=dataset_iteration_policy,
+    dataset_graph = build_dataset(
+        dataset,
+        context=context,
+        dataset_iteration_policy=dataset_iteration_policy,
+    )
+    dataset_graph = dataset_graph.filter(
+        lambda sample: len(sample["input_ids"]) <= context.max_context_length
+    )
+    dataset_graph = dataset_graph.map(_mm_sample_to_packing_input)
+    if isinstance(dataset_graph, grain.MapDataset):
+        dataset_graph = dataset_graph.to_iter_dataset(
+            read_options=context.read_options
         )
-        dataset = dataset.filter(
-            lambda sample: len(sample["input_ids"]) <= context.max_context_length
+    # TODO(data-global-pack-plan): Consider packing before DP sharding so
+    # ranks receive similar text and media work.
+    dataset_graph = grain.experimental.FirstFitPackIterDataset(
+        dataset_graph,
+        length_struct={
+            "input_ids": context.num_tokens_per_batch,
+            "labels": context.num_tokens_per_batch,
+            "positions": context.num_tokens_per_batch,
+        },
+        padding_struct={
+            "input_ids": context.tokenizer.pad_id,
+            "labels": IGNORE_INDEX,
+            "positions": 0,
+        },
+        num_packing_bins=num_packing_bins,
+        meta_features=(
+            "labels",
+            "positions",
+            "pixel_values",
+            "pixel_values_videos",
+        ),
+        seed=dataset_iteration_policy.seed,
+        shuffle_bins=dataset_iteration_policy.shuffle,
+    )
+    return dataset_graph.map(
+        partial(
+            _packing_output_to_mm_sample,
+            max_context_length=context.max_context_length,
         )
-        dataset = dataset.map(_mm_sample_to_packing_input)
-        if isinstance(dataset, grain.MapDataset):
-            dataset = dataset.to_iter_dataset(read_options=context.read_options)
-        # TODO(data-global-pack-plan): Consider packing before DP sharding so
-        # ranks receive similar text and media work.
-        dataset = grain.experimental.FirstFitPackIterDataset(
-            dataset,
-            length_struct={
-                "input_ids": context.num_tokens_per_batch,
-                "labels": context.num_tokens_per_batch,
-                "positions": context.num_tokens_per_batch,
-            },
-            padding_struct={
-                "input_ids": context.tokenizer.pad_id,
-                "labels": IGNORE_INDEX,
-                "positions": 0,
-            },
-            num_packing_bins=self.num_packing_bins,
-            meta_features=(
-                "labels",
-                "positions",
-                "pixel_values",
-                "pixel_values_videos",
-            ),
-            seed=dataset_iteration_policy.seed,
-            shuffle_bins=dataset_iteration_policy.shuffle,
-        )
-        return dataset.map(
-            partial(
-                _packing_output_to_mm_sample,
-                max_context_length=context.max_context_length,
-            )
-        )
+    )
 
 
 def _mm_sample_to_packing_input(sample: dict[str, Any]) -> dict[str, Any]:

@@ -23,21 +23,16 @@ ones this used to take had already stopped being read at all.
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import grain.python as grain
 
 from .collators import TextCollator
-from .loader import (
-    BaseDataLoader,
-    GrainDataLoader,
-    GrainDataLoaderConfig,
-    build_dataset_iteration_policy,
-)
-from .packing import ConcatThenSplitPackingConfig
+from .loader import BaseDataLoader, GrainDataLoader
+from .packing import build_concat_then_split_packing, build_first_fit_packing
 from .random_data import RandomTokenDataLoader
 from .text.text import DATASETS, make_local_jsonl
-from .types import DatasetBuildContext
+from .types import DatasetBuildContext, DatasetIterationPolicy
 
 if TYPE_CHECKING:
     from ..trainer.config import HybridMeshConfig
@@ -68,9 +63,9 @@ def build_dataloader(
     many tokens, so the DP slice the trainer used to perform no longer exists on
     this path.
     """
-    dataset_config = config.dataloader
+    dataloader_config = config.dataloader
     max_context_length = config.max_seq_len
-    if dataset_config.dataset == "random":
+    if dataloader_config.dataset == "random":
         return RandomTokenDataLoader(
             seed=config.seed,
             vocab_size=config.vocab_size,
@@ -89,25 +84,28 @@ def build_dataloader(
     # and the config layer must not import them. Checked before the tokenizer
     # is built so a bad name fails fast without loading tokenizer assets.
     is_multimodal = (
-        dataset_config.dataset != "local_jsonl"
-        and dataset_config.dataset not in DATASETS
+        dataloader_config.dataset != "local_jsonl"
+        and dataloader_config.dataset not in DATASETS
     )
     if is_multimodal:
         try:
             from .multimodal.mm_collator import MultiModalCollator
-            from .multimodal.mm_datasets import MM_DATASETS, MMSamplePackingConfig
+            from .multimodal.mm_datasets import (
+                MM_DATASETS,
+                build_mm_sample_packing,
+            )
         except ImportError as exc:
             raise ImportError(
-                f"dataset {dataset_config.dataset!r} is not one of the text "
+                f"dataset {dataloader_config.dataset!r} is not one of the text "
                 f"recipes {sorted(DATASETS)}, so it was looked up in the "
                 "multimodal registry -- which failed to import. Multimodal "
                 "recipes need the optional dependencies torchvision and Pillow "
                 "(and av for video): install them with `pip install torchvision "
                 "pillow av`, or name a text recipe instead."
             ) from exc
-        if dataset_config.dataset not in MM_DATASETS:
+        if dataloader_config.dataset not in MM_DATASETS:
             raise ValueError(
-                f"unknown dataset {dataset_config.dataset!r}. Expected 'random', "
+                f"unknown dataset {dataloader_config.dataset!r}. Expected 'random', "
                 f"'local_jsonl', a text recipe {sorted(DATASETS)}, or a "
                 f"multimodal recipe {sorted(MM_DATASETS)}"
             )
@@ -121,62 +119,73 @@ def build_dataloader(
         from hpmesh.components.tokenizer import MultiModalTokenizer
 
         tokenizer = MultiModalTokenizer(
-            tokenizer_path=dataset_config.tokenizer_path,
-            image_token=dataset_config.mm_image_token,
-            video_token=dataset_config.mm_video_token,
-            vision_start_token=dataset_config.mm_vision_start_token,
-            vision_end_token=dataset_config.mm_vision_end_token,
-            pad_token=dataset_config.mm_pad_token,
+            tokenizer_path=dataloader_config.tokenizer_path,
+            image_token=dataloader_config.mm_image_token,
+            video_token=dataloader_config.mm_video_token,
+            vision_start_token=dataloader_config.mm_vision_start_token,
+            vision_end_token=dataloader_config.mm_vision_end_token,
+            pad_token=dataloader_config.mm_pad_token,
         )
-        recipe = MM_DATASETS[dataset_config.dataset]
+        recipe = MM_DATASETS[dataloader_config.dataset]
         # Multimodal samples carry media lists alongside their token fields,
         # so they pack by whole documents (FirstFit) rather than concat-then-
-        # split, and the collator reshapes the media into patches.
-        packing_config = MMSamplePackingConfig(dataset=recipe)
+        # split, and the collator reshapes the media into patches. This is not
+        # ``--packing``: that selector names a text recipe, and the media path
+        # ignores it.
+        build_packing = build_mm_sample_packing
+        packing_kwargs: dict[str, Any] = {}
         collator = MultiModalCollator
     else:
-        tokenizer = HuggingFaceTokenizer(tokenizer_path=dataset_config.tokenizer_path)
+        tokenizer = HuggingFaceTokenizer(tokenizer_path=dataloader_config.tokenizer_path)
         recipe = (
-            make_local_jsonl(path=dataset_config.dataset_path)
-            if dataset_config.dataset == "local_jsonl"
-            else DATASETS[dataset_config.dataset]
+            make_local_jsonl(path=dataloader_config.dataset_path)
+            if dataloader_config.dataset == "local_jsonl"
+            else DATASETS[dataloader_config.dataset]
         )
-        packing_config = ConcatThenSplitPackingConfig(dataset=recipe)
+        # Both recipes are built the same way and differ only in kind: the
+        # discriminating work is in the packing node, never in the collator,
+        # which is why the trainer needs no way to tell them apart.
+        if dataloader_config.packing == "first_fit":
+            build_packing = build_first_fit_packing
+            # Always passed, at its default when unset: forwarding it only for
+            # first_fit would make it a field whose value is silently dropped.
+            packing_kwargs = {"num_packing_bins": dataloader_config.num_packing_bins}
+        else:
+            build_packing = build_concat_then_split_packing
+            packing_kwargs = {}
         collator = TextCollator
     context = DatasetBuildContext(
         tokenizer=tokenizer,
         max_context_length=max_context_length,
         num_tokens_per_batch=num_tokens_per_batch,
         read_options=grain.ReadOptions(),
-        max_num_documents=dataset_config.max_num_documents,
+        max_num_documents=dataloader_config.max_num_documents,
     )
-    # The loader's config is built first and the graph filled in after,
-    # because ``build_dataset_iteration_policy`` derives the policy the
-    # graph is built with *from* that config -- restating the seed and
-    # shuffle flags here instead would let the two drift, and a shuffle
-    # flag the graph never sees is a silent no-op. ``dataset`` is the one
-    # field the policy does not read, so the placeholder cannot leak.
-    loader_config = GrainDataLoaderConfig(
-        dataset=None,
-        collator=collator,
-        seed=config.seed,
-        shuffle=dataset_config.shuffle,
-        streaming_shuffle_buffer_size=dataset_config.streaming_shuffle_buffer_size,
-        num_prefetch_batches=dataset_config.num_prefetch_batches,
-        max_num_documents=dataset_config.max_num_documents,
-    )
-    graph = packing_config.build(
+    # The policy is built here and given straight to the graph, and the loader
+    # is handed the same knobs the graph was not built from. The seed and the
+    # shuffle flags deliberately stop here: they decide the graph's order, and
+    # a copy on the loader would be an argument that changes nothing.
+    graph = build_packing(
+        recipe,
+        **packing_kwargs,
         context=context,
-        dataset_iteration_policy=build_dataset_iteration_policy(
-            loader_config, dp_rank=dp_rank, dp_world_size=dp_world_size
+        dataset_iteration_policy=DatasetIterationPolicy(
+            seed=config.seed,
+            shuffle=dataloader_config.shuffle,
+            repeat=True,
+            dp_rank=dp_rank,
+            dp_world_size=dp_world_size,
+            streaming_shuffle_buffer_size=dataloader_config.streaming_shuffle_buffer_size,
         ),
     )
-    loader_config.dataset = graph
     return GrainDataLoader(
-        loader_config,
+        graph,
         dp_world_size=dp_world_size,
         dp_rank=dp_rank,
         tokenizer=tokenizer,
         max_context_length=max_context_length,
         num_tokens_per_batch=num_tokens_per_batch,
+        collator=collator,
+        num_prefetch_batches=dataloader_config.num_prefetch_batches,
+        max_num_documents=dataloader_config.max_num_documents,
     )

@@ -12,45 +12,38 @@ reason; ``build_dataloader`` is the only entry point that decides.
 from .build import build_dataloader
 from .collators import HAS_PIN_MEMORY, Collator, TextCollator, TrainerBatch
 from .dataset import (
-    DatasetConcatConfig,
-    DatasetConfig,
-    DatasetMixConfig,
+    DatasetConcat,
+    DatasetMix,
     GrainDataset,
     SampleProcessor,
-    SingleDatasetConfig,
+    SingleDataset,
     TextSequence,
     WeightedDataset,
+    build_dataset,
 )
-from .loader import (
-    BaseDataLoader,
-    DataloaderExhaustedError,
-    GrainDataLoader,
-    GrainDataLoaderConfig,
-    build_dataset_iteration_policy,
+from .loader import BaseDataLoader, DataloaderExhaustedError, GrainDataLoader
+from .packing import (
+    build_concat_then_split_packing,
+    build_first_fit_packing,
 )
-from .packing import ConcatThenSplitPackingConfig, FirstFitPackingConfig
 from .sources import (
     HuggingFaceRandomAccessSource,
     HuggingFaceStreamingSource,
     IndexedJsonlSource,
     RandomAccessDataSource,
-    SourceConfig,
+    build_source,
 )
 from .types import DatasetBuildContext, DatasetIterationPolicy
 
 __all__ = [
     "BaseDataLoader",
     "Collator",
-    "ConcatThenSplitPackingConfig",
     "DatasetBuildContext",
-    "DatasetConcatConfig",
-    "DatasetConfig",
+    "DatasetConcat",
     "DatasetIterationPolicy",
-    "DatasetMixConfig",
+    "DatasetMix",
     "DataloaderExhaustedError",
-    "FirstFitPackingConfig",
     "GrainDataLoader",
-    "GrainDataLoaderConfig",
     "GrainDataset",
     "HAS_PIN_MEMORY",
     "HuggingFaceRandomAccessSource",
@@ -58,12 +51,14 @@ __all__ = [
     "IndexedJsonlSource",
     "RandomAccessDataSource",
     "SampleProcessor",
-    "SingleDatasetConfig",
-    "SourceConfig",
+    "SingleDataset",
     "TextCollator",
     "TextSequence",
     "TrainerBatch",
     "WeightedDataset",
+    "build_concat_then_split_packing",
     "build_dataloader",
-    "build_dataset_iteration_policy",
+    "build_dataset",
+    "build_first_fit_packing",
+    "build_source",
 ]
