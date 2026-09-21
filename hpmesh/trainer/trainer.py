@@ -50,7 +50,15 @@ What the migration added, and why each earned its place:
   ``logger.info``: the same loss and grad_norm, plus throughput, MFU and device
   memory, to stdout and optionally TensorBoard or WandB. The processor also owns
   the reporting frequency and the token/data-loading accounting, so the loop
-  only has to call ``add_tokens`` and ``log``.
+  only has to call ``add_tokens`` and ``log``. ``n_tokens_seen`` -- the
+  checkpointed cumulative count -- is logged alongside them, summed over the
+  same group the loss average spans so it counts each token once.
+* **A lowered process-group timeout once training is under way.** The groups
+  are created with the long startup timeout, because that is what model build
+  and the first collective genuinely need; ``train`` drops every one of them
+  (plus the world group) to ``parallel.train_timeout_seconds`` after this
+  process's first completed step, so a later hang is reported in seconds rather
+  than mistaken for a slow launch -- see ``parallel.collectives.set_pg_timeouts``.
 * **Profiling**, through ``components/profiler``: ``Profiler`` is entered once
   around the loop and stepped once per iteration, so Kineto traces land on a
   schedule and allocator memory snapshots are written periodically -- plus one
@@ -73,6 +81,7 @@ from __future__ import annotations
 
 from collections.abc import Iterable, Iterator
 from contextlib import nullcontext
+from datetime import timedelta
 from time import perf_counter
 from typing import Any
 
@@ -111,7 +120,13 @@ from ..models.hf_wrapper import (
     build_model_config_for,
     num_flops_per_token,
 )
-from ..parallel.collectives import clip_grad_norm_, dist_max, dist_sum, dist_sum_tensor
+from ..parallel.collectives import (
+    clip_grad_norm_,
+    dist_max,
+    dist_sum,
+    dist_sum_tensor,
+    set_pg_timeouts,
+)
 from ..parallel.parallel_dims import ParallelDims
 from ..parallel.pipeline_parallel import PipelineParallelSetup
 from ..parallel.tensor_parallel.tp import (
@@ -1106,14 +1121,37 @@ class Trainer:
             )
             global_avg_loss = float(dist_sum(loss, loss_mesh))
             global_max_loss = float(dist_max(local_avg, loss_mesh))
+            # Cumulative tokens seen, summed over the ranks holding *distinct*
+            # tokens: ``ntokens_seen`` is a count of labels this rank actually
+            # fed a step, and CP and TP each take their own slice of that
+            # sequence, so one rank's slice is a strict subset. ``loss_mesh`` is
+            # the group those slices partition -- the same one the loss average
+            # above spans. ``dp_mesh`` is its subgroup: summing over dp alone
+            # would under-count by ``cp * tp``, exactly as it would for the loss.
+            # (The two coincide when CP and TP are off, which is why one mesh
+            # serves both.)
+            #
+            # Unlike ``global_valid_tokens``, which counts only the *predictable*
+            # labels (the loss denominator), this counts every label -- the data
+            # consumed. Both are per-step sums over the same meshes, so they
+            # differ by exactly the final position of each document.
+            #
+            # One host sync per logging step, not per step: the tensor is int64
+            # and nothing downstream needs it on the device.
+            global_ntokens_seen = dist_sum(
+                torch.tensor(self.ntokens_seen, dtype=torch.int64, device=self.device),
+                loss_mesh,
+            )
         else:
             # Single rank: the two reported losses are the same number by
             # construction.
             global_avg_loss = global_max_loss = float(loss)
+            global_ntokens_seen = float(self.ntokens_seen)
         metrics = {
             "loss": global_avg_loss,
             "max_loss": global_max_loss,
             "grad_norm": float(grad_norm),
+            "n_tokens_seen": global_ntokens_seen,
         }
         # The snapshot from the top of the step: reported, not checkpointed.
         # The schedule is deterministic in the step number (see
@@ -1182,6 +1220,16 @@ class Trainer:
             if self.checkpointer.load(self.cfg.checkpoint.load_step):
                 logger.info(f"Resuming from step {self.step}")
 
+            # The step this process's *first* train step lands on. Startup work --
+            # process groups, the model build, the first collective, compile --
+            # runs under the long process-group timeout those groups were created
+            # with, because that is what genuinely takes minutes. Once one step
+            # has completed, that work is behind this process, so the timeout can
+            # be lowered to the one a real stall should be measured against (see
+            # ``set_pg_timeouts``). Relative to the loaded step rather than
+            # absolute ``1`` so a resumed run lowers it too.
+            first_step_of_this_process = self.step + 1
+
             # ``batch_generator`` wraps the bare source so every fetch carries
             # its token and loading-time accounting; the loop below sees only
             # batches. One exception type crosses that boundary.
@@ -1241,6 +1289,20 @@ class Trainer:
                     # active iteration covers an ordinary step rather than one
                     # that also wrote a checkpoint.
                     profiler.step()
+
+                    if self.step == first_step_of_this_process:
+                        # Startup is finished on this process; from here a long
+                        # wait is a stall, not a slow launch. Skipped entirely on
+                        # a single process: it has no group to time out, and its
+                        # barrier would be the only collective in the program.
+                        if self.parallel_dims is not None:
+                            set_pg_timeouts(
+                                timedelta(
+                                    seconds=self.cfg.parallel.train_timeout_seconds
+                                ),
+                                self.parallel_dims,
+                                device=self.device,
+                            )
         finally:
             # Teardown lives in ``close`` rather than inline so a caller that
             # drives the trainer programmatically -- rather than through

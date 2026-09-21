@@ -91,6 +91,38 @@ def _cp_all_to_all(
     return y.reshape(merged)
 
 
+def _reject_unrepresentable_attention_kwargs(kwargs: dict) -> None:
+    """Refuse attention modifiers the CPU eager fallback cannot express.
+
+    The CUDA branch hands every kwarg to HF's ``flex_attention_forward``, whose
+    ``score_mod`` applies ``softcap`` and its post-hoc ``s_aux`` renormalization.
+    The CPU branch cannot: it calls ``torch.nn.attention.flex_attention.
+    flex_attention`` directly, whose signature has no ``softcap`` at all
+    (``score_mod``/``block_mask``/``scale``/``enable_gqa``/``return_lse``/
+    ``kernel_options``/``return_aux``), so there is nothing to forward to and the
+    modification would be silently dropped -- a different model, computed
+    confidently.
+
+    Neither is reachable through the flags hpmesh reads today: nothing sets
+    ``attn_logit_softcapping`` (a Gemma-2/3 config field) or an attention-sink
+    ``s_aux``. That is exactly why this is a refusal and not a fallback: the
+    failure would be silent, and silence is indistinguishable from "this model
+    has no softcap".
+    """
+    blocking = sorted(
+        name for name in ("softcap", "s_aux") if kwargs.get(name) is not None
+    )
+    if blocking:
+        raise NotImplementedError(
+            f"CP's CPU eager attention fallback cannot represent {blocking}: "
+            "torch's flex_attention has no softcap/attention-sink parameter, so "
+            "the CUDA branch's HF score_mod would not be reproduced here and the "
+            "attention would silently compute a different model. Run this model "
+            "on CUDA (where HF's flex_attention_forward applies them), or set "
+            f"cp=1. Got {[(k, kwargs[k]) for k in blocking]}."
+        )
+
+
 class _SeqToHead(torch.autograd.Function):
     """``(b, h, s/cp, d) -> (b, h/cp, s, d)``; the backward is the inverse swap."""
 
@@ -194,9 +226,9 @@ class CPFlexKernel(nn.Module):
             return out
         # CPU: transformers routes flex through torch.compile, whose inductor
         # flex lowering has no CPU target (this is why the wrapper picks sdpa
-        # off CUDA). The eager fallback computes the same math unfused; it
-        # exists so CP is exercisable on CPU-only machines, e.g. the gloo
-        # equivalence tests.
+        # off CUDA). The eager fallback exists so CP is exercisable on CPU-only
+        # machines, e.g. the gloo equivalence tests.
+        _reject_unrepresentable_attention_kwargs(kwargs)
         from torch.nn.attention.flex_attention import flex_attention
 
         return flex_attention(
@@ -231,6 +263,7 @@ class CPFlexKernel(nn.Module):
             out = out.transpose(1, 2)  # HF returns (batch, seq, heads, dim)
         else:
             # Same CPU eager fallback as the kv_allgather path above.
+            _reject_unrepresentable_attention_kwargs(kwargs)
             from torch.nn.attention.flex_attention import flex_attention
 
             out = flex_attention(
