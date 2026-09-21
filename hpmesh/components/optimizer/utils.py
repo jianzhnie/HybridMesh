@@ -82,7 +82,7 @@ def init_optim_state(optim: torch.optim.Optimizer) -> None:
     # A zero learning rate keeps parameters unchanged, but Adam still advances
     # its step counter (and coupled weight decay can update its moments). Reset
     # the materialized state so the first real update remains Adam step 1.
-    if isinstance(optim, (torch.optim.Adam, torch.optim.AdamW)):
+    if isinstance(optim, torch.optim.Adam | torch.optim.AdamW):
         for param in params_to_initialize:
             state = optim.state[param]
             state["step"].zero_()

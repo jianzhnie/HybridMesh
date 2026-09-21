@@ -1,9 +1,3 @@
-# Copyright (c) Meta Platforms, Inc. and affiliates.
-# All rights reserved.
-#
-# This source code is licensed under the BSD-style license found in the
-# LICENSE file in the root directory of this source tree.
-
 """The projections a ``models/common`` model applies, where they differ from ``nn``.
 
 Vendored from torchtitan ``models/common/linear.py``. Upstream ``Linear`` is a

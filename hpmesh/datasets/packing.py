@@ -1,9 +1,3 @@
-# Copyright (c) Meta Platforms, Inc. and affiliates.
-# All rights reserved.
-#
-# This source code is licensed under the BSD-style license found in the
-# LICENSE file in the root directory of this source tree.
-
 """Stateful packing recipes for tokenized documents.
 
 Vendored from torchtitan ``components/data/packing.py``. Both packing configs
@@ -95,14 +89,14 @@ class _DocumentAwareConcatThenSplitIterDataset(grain.IterDataset):
         max_context_length: int,
         num_tokens_per_row: int,
     ) -> None:
+        super().__init__(parent)
         self._max_num_documents_per_row = max_num_documents_per_row
         self._max_context_length = max_context_length
         self._num_tokens_per_row = num_tokens_per_row
-        super().__init__(parent)
 
     def __iter__(self) -> grain.DatasetIterator:
         return _DocumentAwareConcatThenSplitIterator(
-            iter(self._parents[0]),
+            iter(self._parent),
             max_num_documents_per_row=self._max_num_documents_per_row,
             max_context_length=self._max_context_length,
             num_tokens_per_row=self._num_tokens_per_row,
