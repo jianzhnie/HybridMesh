@@ -30,7 +30,12 @@ import pytest
 
 from hpmesh.datasets import IndexedJsonlSource, SingleDatasetConfig, build_dataloader
 from hpmesh.datasets.hf.text import DATASETS as TEXT_DATASETS
-from hpmesh.trainer.config import DataloaderConfig
+from hpmesh.trainer.config import (
+    DataloaderConfig,
+    HybridMeshConfig,
+    ModelConfig,
+    TrainingConfig,
+)
 from tests.data_fixtures import VOCAB, write_tokenizer
 
 IMAGE_TOKEN = "<|image_pad|>"
@@ -85,14 +90,17 @@ class _Base64JsonlSource:
 
 def _build(config: DataloaderConfig, *, max_context_length=256, num_tokens=64):
     return build_dataloader(
-        config,
-        seed=1,
-        vocab_size=128,
-        batch_size=1,
-        seq_len=8,
+        HybridMeshConfig(
+            model=ModelConfig(vocab_size=128),
+            training=TrainingConfig(
+                global_batch_size=1,
+                max_seq_len=max_context_length,
+                seed=1,
+                dataloader_config=config,
+            ),
+        ),
         dp_rank=0,
         dp_world_size=1,
-        max_context_length=max_context_length,
         num_tokens_per_batch=num_tokens,
     )
 

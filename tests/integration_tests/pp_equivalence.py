@@ -4,14 +4,16 @@ Run under torchrun with 2 ranks, one schedule per invocation:
 
     torchrun --nproc_per_node=2 tests/pp_equivalence.py            # 1F1B
     torchrun --nproc_per_node=2 tests/pp_equivalence.py Interleaved1F1B
+    torchrun --nproc_per_node=2 tests/pp_equivalence.py ZBVZeroBubble
 
 A tiny offline qwen3 (random init, fixed seed) goes through the real
 ``Trainer`` with ``pp=2``, 4 micro-batches per step, for 4 optimizer steps,
-under either a single-stage schedule (1F1B: one stage per rank) or a looped
+under either a single-stage schedule (1F1B: one stage per rank), a looped
 one (Interleaved1F1B: two virtual stages per rank, over a deeper model so
-every stage holds at least one layer). The loss on the last-stage rank must
-track, step for step, a reference computed on the whole model with no
-pipeline.
+every stage holds at least one layer), or a V-block one (ZBVZeroBubble: two
+stages per rank, paired front-to-back so rank 0 holds the first AND the last
+stage). The loss on the rank holding the last stage must track, step for
+step, a reference computed on the whole model with no pipeline.
 
 What the reference is, and why it is not just the ``pp=1`` trainer: the
 trainer's non-PP body flattens the whole batch into ONE causal sequence, while
@@ -40,6 +42,7 @@ import torch.distributed as dist
 import torch.nn as nn
 
 from hpmesh.components.loss import IGNORE_INDEX, cross_entropy_loss
+from hpmesh.components.metrics import get_metrics_rank
 from hpmesh.datasets.random_data import RandomTokenSource, batch_iterator
 from hpmesh.models.hf_wrapper import HFTransformerModel, build_model_config_for
 from hpmesh.parallel.collectives import clip_grad_norm_
@@ -65,15 +68,22 @@ SEED = 42
 TOL = 1e-5
 
 
-# Per-schedule scenario: a looped schedule runs two virtual stages per rank
-# (4 stages over pp=2), so the model is deepened to give every stage at least
-# one layer. The reference trajectory is schedule-independent -- it applies
-# the same row chunking either way -- so only the split changes.
+# Per-schedule scenario: a looped or V schedule runs two virtual stages per
+# rank (4 stages over pp=2), so the model is deepened to give every stage at
+# least one layer. The reference trajectory is schedule-independent -- it
+# applies the same row chunking either way -- so only the split changes.
 SCENARIOS = {
     # schedule: (num_hidden_layers, stages_per_rank)
     "1F1B": (2, 1),
     "Interleaved1F1B": (6, 2),
+    # V-block layout: rank r takes stages (r, num_stages-1-r), so the last
+    # stage -- and the loss -- sits on rank 0 (``get_metrics_rank``), not the
+    # last rank.
+    "ZBVZeroBubble": (6, 2),
 }
+
+# Schedules whose V layout pairs the first and last stage onto rank 0.
+V_SCHEDULES = {"ZBVZeroBubble"}
 
 
 def _cfg(schedule: str) -> HybridMeshConfig:
@@ -190,11 +200,22 @@ def main() -> None:
             f"rank {rank}: holds {num_layers_held} of {cfg.num_hidden_layers} "
             "layers -- the model was not split"
         )
-    if trainer.pp_has_first_stage == trainer.pp_has_last_stage:
+    # Stage layout: single-stage and looped schedules put the first stage on
+    # rank 0 and the last on rank 1; a V schedule pairs them front-to-back, so
+    # rank 0 holds both and rank 1 neither.
+    if schedule in V_SCHEDULES:
+        want_first = want_last = rank == 0
+    else:
+        want_first = rank == 0
+        want_last = not want_first
+    if (trainer.pp_has_first_stage, trainer.pp_has_last_stage) != (
+        want_first,
+        want_last,
+    ):
         failures.append(
             f"rank {rank}: has_first={trainer.pp_has_first_stage} "
-            f"has_last={trainer.pp_has_last_stage} -- a 2-rank pipeline "
-            "assigns exactly one of them"
+            f"has_last={trainer.pp_has_last_stage} -- expected "
+            f"({want_first}, {want_last}) for a 2-rank {schedule} pipeline"
         )
     # Both layouts keep the first stage first and the last stage last in the
     # rank's part list ("loop" stages ascend; the single-stage case has one).
@@ -231,15 +252,22 @@ def main() -> None:
         assert metrics is not None  # log_freq=1: every step reports
         if trainer.pp_has_last_stage:
             # Only the last stage holds a real loss; other stages carry the
-            # sentinel, which is never logged (the metrics rank is rank 1).
+            # sentinel, which is never logged (the metrics rank is the
+            # last-stage rank -- rank 1, or rank 0 for a V layout).
             pp_losses.append(metrics["loss"])
 
     reference = _reference_trajectory(cfg)
 
-    # The real losses live on the last-stage rank; collect them on rank 0 for
-    # the report. In both layouts the last stage sits on the last rank.
+    # The real losses live on the rank holding the last stage; collect them on
+    # rank 0 for the report. That rank is the last one for single-stage and
+    # looped layouts, rank 0 itself for a V layout -- exactly what
+    # ``get_metrics_rank`` resolves.
+    metrics_rank = get_metrics_rank(
+        parallel_dims=trainer.parallel_dims, pp_schedule=schedule
+    )
+    assert pp_losses or rank != metrics_rank
     gathered = [pp_losses]
-    dist.broadcast_object_list(gathered, src=trainer.world_size - 1)
+    dist.broadcast_object_list(gathered, src=metrics_rank)
     pp_losses = gathered[0]
 
     # Every rank has both series now (the reference is computed locally and
