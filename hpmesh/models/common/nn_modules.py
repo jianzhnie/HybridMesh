@@ -1,9 +1,3 @@
-# Copyright (c) Meta Platforms, Inc. and affiliates.
-# All rights reserved.
-#
-# This source code is licensed under the BSD-style license found in the
-# LICENSE file in the root directory of this source tree.
-
 """The ``nn`` modules a ``models/common`` model composes, under one vocabulary.
 
 Vendored from torchtitan ``models/common/nn_modules.py``. Upstream each class

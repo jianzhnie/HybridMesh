@@ -1,9 +1,3 @@
-# Copyright (c) Meta Platforms, Inc. and affiliates.
-# All rights reserved.
-#
-# This source code is licensed under the BSD-style license found in the
-# LICENSE file in the root directory of this source tree.
-
 """SPMD glue shims used only inside the parallel layer.
 
 This is the upper half of what used to be ``hpmesh/parallel/spmd_types.py``.

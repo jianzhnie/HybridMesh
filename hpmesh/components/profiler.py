@@ -1,9 +1,3 @@
-# Copyright (c) Meta Platforms, Inc. and affiliates.
-# All rights reserved.
-#
-# This source code is licensed under the BSD-style license found in the
-# LICENSE file in the root directory of this source tree.
-
 """Kineto traces and allocator memory snapshots, over one training run.
 
 Vendored from torchtitan's ``observability/profiler.py``. The shape is kept: a

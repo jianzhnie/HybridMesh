@@ -1,9 +1,3 @@
-# Copyright (c) Meta Platforms, Inc. and affiliates.
-# All rights reserved.
-#
-# This source code is licensed under the BSD-style license found in the
-# LICENSE file in the root directory of this source tree.
-
 """Optimizer machinery: parameters, state serialization, and containers.
 
 The same split as torchtitan's ``components/optimizer/`` package, at the same

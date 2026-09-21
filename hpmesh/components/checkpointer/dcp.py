@@ -1,9 +1,3 @@
-# Copyright (c) Meta Platforms, Inc. and affiliates.
-# All rights reserved.
-#
-# This source code is licensed under the BSD-style license found in the
-# LICENSE file in the root directory of this source tree.
-
 """The DCP checkpoint manager: sharded I/O, async saving, HF export.
 
 Vendored from torchtitan's ``components/checkpointer/dcp.py``. ``torch.distributed
