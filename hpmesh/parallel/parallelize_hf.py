@@ -39,7 +39,7 @@ import logging
 import torch
 import torch.nn as nn
 
-from hpmesh.trainer.config import ParallelConfig
+from hpmesh.trainer.config import ParallelConfig, SelectiveACConfig
 
 from .activation_checkpoint import apply_ac
 from .context_parallel import apply_cp
@@ -62,17 +62,19 @@ def parallelize_hf_transformers(
     device: torch.device | None = None,
     compile: bool = False,
     activation_checkpoint: str = "none",
+    selective_ac: SelectiveACConfig | None = None,
     global_batch_size: int | None = None,
     dataset: str = "random",
 ) -> nn.Module | PipelineParallelSetup:
     """Apply every parallelism dimension the config asks for, in order.
 
-    ``compile``, ``activation_checkpoint``, ``global_batch_size`` and
-    ``dataset`` are training-side values, passed explicitly rather than read
-    off a run-wide config: this layer's contract is ``ParallelConfig`` plus the
-    handful of scalars the guards actually need. ``global_batch_size`` is
-    required only on the ``pp > 1`` path (microbatch validation); ``dataset``
-    gates the same path's corpus restriction.
+    ``compile``, ``activation_checkpoint``, ``selective_ac``,
+    ``global_batch_size`` and ``dataset`` are training-side values, passed
+    explicitly rather than read off a run-wide config: this layer's contract is
+    ``ParallelConfig`` plus the handful of scalars the guards actually need.
+    ``global_batch_size`` is required only on the ``pp > 1`` path (microbatch
+    validation); ``dataset`` gates the same path's corpus restriction;
+    ``selective_ac`` is read only when ``activation_checkpoint='selective'``.
 
     Returns the (possibly wrapped) model -- or, with ``pp > 1``, a
     ``PipelineParallelSetup``: pipeline parallelism cuts the model into
@@ -137,9 +139,22 @@ def parallelize_hf_transformers(
     # AC after the sharding wrappers (it must enclose the TP/CP-modified
     # layer), before compile and FSDP -- torchtitan's order in
     # ``parallelize_llama``.
-    model = apply_ac(model, activation_checkpoint)
+    model = apply_ac(model, activation_checkpoint, selective=selective_ac)
 
     if compile:
+        # Whole-model compile -- the deliberate opposite of torchtitan's
+        # ``apply_compile``, which compiles each TransformerBlock so the
+        # repeated structure is traced once and each block's graph is reused.
+        # torchtitan's version also does three other things hpmesh has no
+        # counterpart for: async TP (``inductor._micro_pipeline_tp``),
+        # ``regional_inductor`` for inductor-only regions under a non-inductor
+        # backend (its FlexInnerAttention needs one), and
+        # ``capture_scalar_outputs`` for token-choice MoE dispatch's
+        # data-dependent shapes. hpmesh relies on HF's flex implementation
+        # instead of its own, and its MoE runs eager, so none of the three is
+        # reachable here -- but a model whose MoE dispatch needs dynamic shapes
+        # under compile would fail on this line rather than being handled.
+        # See docs/hpmesh_upstream_map.md (D: ``distributed/compile.py``).
         model = torch.compile(model)
 
     return apply_fsdp(model, mesh, cfg, parallel_dims)

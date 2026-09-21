@@ -1071,6 +1071,75 @@ class DataloaderConfig:
             raise ValueError("num_packing_bins must be positive")
 
 
+@dataclass(kw_only=True)
+class SelectiveACConfig:
+    """Settings for ``activation_checkpoint_mode='selective'``.
+
+    Ported from torchtitan's ``SelectiveAC.Config``: ``preserve_rng_state``,
+    ``determinism_check`` and ``debug`` are the same knobs with the same
+    defaults. The save set itself is not configurable (it is
+    ``activation_checkpoint._get_default_save_ops``); these are the per-run
+    knobs around it.
+
+    Two deviations from upstream, both forced by what hpmesh runs:
+
+    * ``force_recompute_mm_shapes_by_fqns`` defaults to empty rather than
+      ``["moe.router.gate"]``. That default assumes the torchtitan ``Module``
+      protocol, whose MoE routers are ``nn.Linear`` as ``moe.router.gate``. In
+      HF models the router living at ``mlp.gate`` is a container (e.g.
+      ``Qwen3MoeTopKRouter``), not a ``Linear``, so the pattern matches nothing
+      on an HF MoE and the setting silently does nothing; on a dense HF model
+      there is no router at all. Set it to a real ``*.q_proj``/``*.o_proj``
+      style name to use it -- a pattern that matches a non-``Linear`` raises
+      rather than being ignored, so a wrong guess is loud.
+    * The shared save set drops ``aten.topk`` (see that function's docstring:
+      HF's routers mutate topk's output in place, which torch's selective
+      checkpoint rejects outright). The consequence is that a selective run
+      over an HF MoE recomputes its topk and so inherits topk's
+      non-determinism on kernels that have any.
+
+    ``preserve_rng_state`` is separate from the flat argument on ``apply_ac``
+    -- full and selective each carry their own, as upstream's policy classes
+    do, because the two policies make different demands on the recompute's RNG.
+    """
+
+    force_recompute_mm_shapes_by_fqns: list[str] = field(
+        default_factory=list,
+        metadata={
+            "help": "Fully-qualified-name substrings selecting the nn.Linear "
+            "modules whose weight shapes are recomputed unconditionally. Note "
+            "this selects *shapes*, not modules: any matmul with a matching "
+            "(in, out) weight is recomputed, wherever it appears. Defaults to "
+            "empty -- see the class docstring for why upstream's "
+            "'moe.router.gate' default does not carry over."
+        },
+    )
+    preserve_rng_state: bool = field(
+        default=True,
+        metadata={
+            "help": "Stash and restore the RNG state around each checkpointed "
+            "region so the backward-time recompute redraws the same random "
+            "values, at some speed cost. Set false only if the checkpointed "
+            "region is known to hold no random state."
+        },
+    )
+    determinism_check: str = field(
+        default="default",
+        metadata={
+            "help": "Determinism function torch's checkpoint uses to compare "
+            "the recompute against the original. 'default' checks tensors that "
+            "have no data-invariant structure; 'none' disables."
+        },
+    )
+    debug: bool = field(
+        default=False,
+        metadata={
+            "help": "Capture activation-checkpointing debug information. "
+            "Slower; see torch.utils.checkpoint's documentation for details."
+        },
+    )
+
+
 @dataclass
 class TrainingConfig:
     """Training loop hyperparameters and reproducibility."""
@@ -1095,9 +1164,17 @@ class TrainingConfig:
     activation_checkpoint_mode: str = field(
         default="none",
         metadata={
-            "help": "Activation checkpointing: 'none' (off) or 'full' "
-            "(recompute each decoder layer during backward). Wraps layers after "
-            "TP/EP/CP and before compile/FSDP."
+            "help": "Activation checkpointing: 'none' (off), 'full' (recompute "
+            "each decoder layer during backward), or 'selective' (per-op: save "
+            "the expensive ops, recompute the rest -- tune it with "
+            "selective_ac). Wraps layers after TP/EP/CP and before compile/FSDP."
+        },
+    )
+    selective_ac: SelectiveACConfig = field(
+        default_factory=SelectiveACConfig,
+        metadata={
+            "help": "Selective activation checkpointing. Read only under "
+            "activation_checkpoint_mode='selective'."
         },
     )
     deterministic: bool = field(
@@ -1211,10 +1288,10 @@ class TrainingConfig:
                 "chunked_loss_num_chunks must be >= 1 (1 disables chunking), "
                 f"got {self.chunked_loss_num_chunks}"
             )
-        if self.activation_checkpoint_mode not in ("none", "full"):
+        if self.activation_checkpoint_mode not in ("none", "full", "selective"):
             raise ValueError(
                 "training.activation_checkpoint_mode must be one of: 'none', "
-                f"'full' (got {self.activation_checkpoint_mode!r})"
+                f"'full', 'selective' (got {self.activation_checkpoint_mode!r})"
             )
 
 

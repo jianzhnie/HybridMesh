@@ -294,6 +294,15 @@ def _resolve_plan(model: nn.Module, plan) -> dict[str, ShardingConfig | None]:
     does not shard MoE experts over the TP axis -- it has no fused-expert
     realizer -- so honouring them silently would be worse than refusing.
 
+    That refusal is also why hpmesh has no counterpart to upstream's
+    ``models/common/moe_sharding.py``: those declarations describe exactly this
+    combination -- routed experts as dense params on the TP axis (``Shard(1)``
+    colwise / ``Shard(2)`` rowwise) with the router held Replicate -- and there
+    is nothing here for them to drive. MoE parallelism in hpmesh is EP-only
+    (``parallel/expert_parallel/``), where the experts are sliced per rank at
+    swap time and FSDP shards them afterwards. See
+    docs/hpmesh_upstream_map.md (D: ``models/common/moe_sharding.py``).
+
     When ``plan`` is omitted the model's own declaration is used, preferring the
     ``tp_plan`` property over the raw ``_tp_plan`` attribute: a wrapper that
     re-parents the HF model has to rewrite the patterns to its own module paths
