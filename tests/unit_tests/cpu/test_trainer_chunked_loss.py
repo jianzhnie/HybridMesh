@@ -88,3 +88,33 @@ def test_chunked_trainer_matches_plain_trainer(tmp_path) -> None:
 def test_chunked_loss_config_validates() -> None:
     with pytest.raises(ValueError, match="chunked_loss_num_chunks"):
         TrainingConfig(chunked_loss_num_chunks=0)
+
+
+def test_the_reported_token_count_describes_the_data_not_the_split(tmp_path) -> None:
+    """``n_tokens_seen`` must count the corpus read, not the rank's slice.
+
+    It is the counterpart to the loss denominator: the loss is normalized by
+    the tokens this step *trained on*, so the cumulative count logged beside it
+    has to describe the same data -- if the two disagreed, the loss would not be
+    reproducible from the token count. The counter is maintained from the
+    unsharded batch (``_microbatch``), so on one process it must therefore be
+    exactly the batch size times the sequence length times the steps taken,
+    whatever the loss body did with those tokens.
+
+    Non-vacuity: the expected value is computed from the config rather than read
+    off the trainer, so a counter that reported ``0`` -- which is what it would
+    have to be to be absent from the payload -- fails rather than passes.
+    """
+    cfg = _cfg(1, str(tmp_path / "tokens"))
+    expected_per_step = cfg.training.global_batch_size * cfg.training.max_seq_len
+
+    trainer = Trainer(cfg)
+    try:
+        data_iterator = trainer._data_iterator()
+        for step in range(STEPS):
+            trainer.step += 1
+            metrics = trainer.train_step(data_iterator)
+            assert metrics is not None
+            assert metrics["n_tokens_seen"] == expected_per_step * (step + 1)
+    finally:
+        trainer.close()
