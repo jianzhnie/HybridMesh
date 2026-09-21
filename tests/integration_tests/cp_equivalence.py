@@ -2,7 +2,7 @@
 
 Run under torchrun with 2 ranks:
 
-    torchrun --nproc_per_node=2 tests/cp_equivalence.py
+    torchrun --nproc_per_node=2 tests/integration_tests/cp_equivalence.py
 
 The sequence is split across the CP ranks, so each rank holds a contiguous block
 of tokens and the matching block of keys and values. Neither CP strategy is
@@ -10,7 +10,11 @@ correct on its own -- a rank that attends its own block against its own block
 computes attention over a sequence that does not exist -- so this compares
 against a single-rank reference that attends every token against every other.
 
-What each path is checked for:
+This drives ``cp_kernel._cp_all_to_all`` -- the all-to-all the live Ulysses
+kernel runs -- rather than a second copy of the redistribution. The kernel's
+other inputs (a real HF attention call, query/key/value in HF's
+``(batch, heads, seq, dim)`` layout) are the equivalence harnesses' job; what is
+checked here is the *exchange itself*:
 
 * KV all-gather: after one all-gather of K and V, every rank holds the full
   sequence and its own query block must come out identical to the reference.
@@ -20,31 +24,27 @@ What each path is checked for:
   since a lossy inverse would corrupt the residual stream without failing the
   forward.
 
-Stands alone from hpmesh's mesh plumbing on purpose, like ``ep_equivalence.py``:
-it builds its own mesh so it exercises the redistributions without depending on
-how the trainer assembles one.
+The gather half stands alone from hpmesh's mesh plumbing on purpose, like
+``ep_equivalence.py``: it builds its own mesh so it exercises the redistribution
+without depending on how the trainer assembles one.
 """
 
 from __future__ import annotations
 
-import spmd_types as spmd
 import torch
 import torch.distributed as dist
 from torch.distributed.device_mesh import init_device_mesh
 
-from hpmesh.parallel.context_parallel.primitives import (
-    HEAD_DIM,
-    TOKEN_DIM,
-    KVAllGatherContextParallel,
-    UlyssesContextParallel,
-    cp_redistribute,
-)
-from hpmesh.utils.spmd_context import set_current_spmd_mesh
+from hpmesh.parallel.context_parallel.cp_kernel import _cp_all_to_all
 
 SEQ = 16
 NUM_HEADS = 4
 HEAD_SIZE = 8
 DIM = NUM_HEADS * HEAD_SIZE
+
+# The kernel's layout constants: q/k/v arrive HF-shaped (batch, heads, seq, dim).
+SEQ_DIM = 2
+HEAD_DIM = 1
 
 
 def _tensors(rank: int, cp_size: int, seed: int = 0):
@@ -65,6 +65,33 @@ def _attention(q_THK, k_THK, v_THV) -> torch.Tensor:
     return (scores.softmax(-1) @ v).transpose(0, 1)  # T H V
 
 
+def _gather_kv(local, group):
+    """The KV strategy's all-gather: ``(T/cp, *) -> (T, *)`` along the token axis."""
+    rows = [torch.empty_like(local) for _ in range(group.size())]
+    dist.all_gather(rows, local.contiguous(), group=group)
+    return torch.cat(rows, dim=0)
+
+
+def _seq_to_head(x_THK, group):
+    """The kernel's token->head exchange, adapted to this test's ``(T, H, K)``.
+
+    The kernel works on HF's ``(batch, heads, seq, dim)``; this test's tensors are
+    ``(T, H, K)``. Widening to a batch of one and putting the token count on the
+    seq axis gives exactly that layout, so the assertion lands on the kernel's own
+    function rather than on a reimplementation of it.
+    """
+    x_BHTK = x_THK.permute(1, 0, 2).unsqueeze(0)  # (1, H, T, K)
+    moved = _cp_all_to_all(x_BHTK, group, scatter_dim=HEAD_DIM, gather_dim=SEQ_DIM)
+    return moved[0].permute(1, 0, 2)  # (T, H/cp, K)
+
+
+def _head_to_seq(x_THK, group):
+    """The inverse exchange, ``(T, H/cp, K) -> (T/cp, H, K)``."""
+    x_BHTK = x_THK.permute(1, 0, 2).unsqueeze(0)
+    moved = _cp_all_to_all(x_BHTK, group, scatter_dim=SEQ_DIM, gather_dim=HEAD_DIM)
+    return moved[0].permute(1, 0, 2)
+
+
 def main() -> None:
     dist.init_process_group("gloo")
     rank = dist.get_rank()
@@ -73,86 +100,65 @@ def main() -> None:
     assert SEQ % world == 0
 
     mesh = init_device_mesh("cpu", (world,), mesh_dim_names=("cp",))
+    group = mesh.get_group()
     failures = []
 
-    with set_current_spmd_mesh(mesh):
-        full, local = _tensors(rank, world)
+    full, local = _tensors(rank, world)
 
-        # -- KV all-gather ---------------------------------------------------
-        # Reference: every token attends against the whole sequence.
-        with torch.no_grad():
-            expected = _attention(full, full, full)
+    # -- KV all-gather -------------------------------------------------------
+    # Reference: every token attends against the whole sequence.
+    with torch.no_grad():
+        expected = _attention(full, full, full)
+        k_full = _gather_kv(local, group)
+        got = _attention(local, k_full, k_full)
 
-        kv = KVAllGatherContextParallel()
-        with torch.no_grad():
-            q, k, v = kv(local, local, local)
-            got = _attention(q, k, v)
+    lo = rank * (SEQ // world)
+    want = expected[lo : lo + SEQ // world]
+    kv_diff = (got - want).abs().max().item()
+    if kv_diff > 1e-5:
+        failures.append(f"KV all-gather: {kv_diff:.3e}")
 
-        lo = rank * (SEQ // world)
-        want = expected[lo : lo + SEQ // world]
-        kv_diff = (got - want).abs().max().item()
-        if kv_diff > 1e-5:
-            failures.append(f"KV all-gather: {kv_diff:.3e}")
+    # Non-vacuity: attending the local shard against itself -- what a no-op
+    # redistribution would compute -- must differ materially. Without this the
+    # check above would also pass on a redistribution that did nothing and a
+    # reference that happened to match.
+    if torch.allclose(_attention(local, local, local), want, atol=1e-3):
+        failures.append("KV all-gather: unsharded attention matches, test is vacuous")
 
-        # Non-vacuity: attending the local shard against itself -- what a no-op
-        # redistribution would compute -- must differ materially. Without this
-        # the check above would also pass on a redistribution that did nothing
-        # and a reference that happened to match.
-        if torch.allclose(_attention(local, local, local), want, atol=1e-3):
-            failures.append(
-                "KV all-gather: unsharded attention matches, test is vacuous"
-            )
+    # The gather must be full-length on every rank, not just correct at
+    # rank-local shapes.
+    if k_full.shape[0] != SEQ:
+        failures.append(f"KV all-gather produced {k_full.shape[0]} rows, want {SEQ}")
 
-        # The gather must be full-length on every rank, not just correct at
-        # rank-local shapes.
-        if k.shape[0] != SEQ or v.shape[0] != SEQ:
-            failures.append(f"KV all-gather produced {k.shape[0]} rows, want {SEQ}")
+    # -- Ulysses round trip --------------------------------------------------
+    # A lossy inverse would corrupt the residual stream silently, so the
+    # unshard(shard(x)) == x property is asserted on its own. Every rank holds
+    # every head after the swap, so this checks a full tensor, not a slice.
+    with torch.no_grad():
+        scattered = _seq_to_head(local, group)
+        restored = _head_to_seq(scattered, group)
 
-        # -- Ulysses round trip ----------------------------------------------
-        # A lossy inverse would corrupt the residual stream silently, so the
-        # unshard(shard(x)) == x property is asserted on its own.
-        with torch.no_grad():
-            scattered = cp_redistribute(
-                local, src=spmd.S(TOKEN_DIM), dst=spmd.S(HEAD_DIM)
-            )
-            restored = cp_redistribute(
-                scattered, src=spmd.S(HEAD_DIM), dst=spmd.S(TOKEN_DIM)
-            )
+    round_trip = (restored - local).abs().max().item()
+    if round_trip > 1e-5:
+        failures.append(f"Ulysses round trip: {round_trip:.3e}")
 
-        round_trip = (restored - local).abs().max().item()
-        if round_trip > 1e-5:
-            failures.append(f"Ulysses round trip: {round_trip:.3e}")
+    # -- Ulysses head split ---------------------------------------------------
+    # Each rank ends up with the full sequence and every other head. The heads
+    # it holds are the ones the reference computes, so the local run must
+    # reproduce exactly those slices.
+    heads_per_rank = NUM_HEADS // world
+    got_ulysses = _attention(scattered, scattered, scattered)
 
-        # -- Ulysses head split ----------------------------------------------
-        # Each rank ends up with the full sequence and every other head. The
-        # heads it holds are the ones the reference computes, so the local run
-        # must reproduce exactly those slices.
-        ulysses = UlyssesContextParallel()
-        with torch.no_grad():
-            q, k, v = ulysses.shard(local, local, local)
-            got_ulysses = _attention(q, k, v)
+    head_slice = expected[:, rank * heads_per_rank : (rank + 1) * heads_per_rank]
+    ulysses_diff = (got_ulysses - head_slice).abs().max().item()
+    if ulysses_diff > 1e-5:
+        failures.append(f"Ulysses attention: {ulysses_diff:.3e}")
 
-        heads_per_rank = NUM_HEADS // world
-        head_slice = expected[:, rank * heads_per_rank : (rank + 1) * heads_per_rank]
-        ulysses_diff = (got_ulysses - head_slice).abs().max().item()
-        if ulysses_diff > 1e-5:
-            failures.append(f"Ulysses attention: {ulysses_diff:.3e}")
-
-        if q.shape[0] != SEQ or q.shape[1] != heads_per_rank:
-            failures.append(
-                f"Ulysses shard shape {tuple(q.shape)}, "
-                f"want ({SEQ}, {heads_per_rank}, {HEAD_SIZE})"
-            )
-
-        # -- missing CP mesh --------------------------------------------------
-        # A no-op fallback here would produce a confidently wrong answer, so the
-        # redistribution must refuse rather than silently pass tensors through.
-        with set_current_spmd_mesh(None):
-            try:
-                cp_redistribute(local, src=spmd.S(TOKEN_DIM), dst=spmd.R)
-                failures.append("missing CP mesh: no error raised")
-            except RuntimeError:
-                pass
+    if scattered.shape != (SEQ, heads_per_rank, HEAD_SIZE):
+        failures.append(
+            f"Ulysses shard shape {tuple(scattered.shape)}, "
+            f"want ({SEQ}, {heads_per_rank}, {HEAD_SIZE})"
+        )
 
     # Every rank must agree that every check passed, not just report its own.
     local_ok = torch.tensor([0.0 if not failures else 1.0])

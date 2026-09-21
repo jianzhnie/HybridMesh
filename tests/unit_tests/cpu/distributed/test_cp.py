@@ -1,84 +1,30 @@
-"""Context-parallel attention: the single-rank guards.
+"""Context-parallel attention: the single-rank guards and the kernel's setup.
 
 The redistributions themselves need two ranks and live in
-``tests/cp_equivalence.py``. What can be checked without a mesh is the refusal
-path -- and that path carries the whole safety argument for this module. Every
-other hpmesh component degrades gracefully when a parallelism axis is off; a CP
+``tests/cp_equivalence.py`` and ``cp_wiring_equivalence.py``. What can be checked
+without a mesh is where the module is *explicit*: the strategy dispatch, the
+refusals that carry the whole safety argument, and the ulysses head-divisibility
+check. The refusal matters more here than anywhere else in hpmesh -- every other
+component degrades gracefully when a parallelism axis is off, but a CP
 redistribution cannot, because skipping it does not skip work, it changes the
-answer. A rank that never gathers K/V attends its query shard against itself.
+answer.
 
-So the contract these tests pin is narrow and deliberate: with CP off, refuse.
+``apply_cp``'s argument validation runs before any collective, so most of the
+kernel-facing checks below stand a size-1 "fake" process group up instead of a
+real two-rank one; a genuinely multi-rank redistribution is the equivalence
+harnesses' job.
 """
 
 from __future__ import annotations
 
 import pytest
-import spmd_types as spmd
 import torch
 
 from hpmesh.parallel.context_parallel import (
-    HEAD_DIM,
-    TOKEN_DIM,
-    KVAllGatherContextParallel,
-    UlyssesContextParallel,
+    CPFlexKernel,
     apply_cp,
-    cp_group,
-    cp_redistribute,
 )
 from hpmesh.trainer import ParallelConfig
-from hpmesh.utils.spmd_context import set_current_spmd_mesh
-
-
-def _x() -> torch.Tensor:
-    return torch.randn(4, 2, 8)
-
-
-def test_no_cp_mesh_means_no_group() -> None:
-    with set_current_spmd_mesh(None):
-        assert cp_group() is None
-
-
-def test_redistribute_refuses_without_a_cp_mesh() -> None:
-    """Silently returning ``x`` here would train on wrong attention."""
-    with set_current_spmd_mesh(None):
-        with pytest.raises(RuntimeError, match="multi-rank CP mesh"):
-            cp_redistribute(_x(), src=spmd.S(TOKEN_DIM), dst=spmd.R)
-
-
-def test_redistribute_refuses_for_the_head_conversion_too() -> None:
-    """Both directions of the all-to-all are guarded, not just the first."""
-    with set_current_spmd_mesh(None):
-        with pytest.raises(RuntimeError, match="multi-rank CP mesh"):
-            cp_redistribute(_x(), src=spmd.S(HEAD_DIM), dst=spmd.S(TOKEN_DIM))
-
-
-def test_kv_all_gather_refuses_without_a_cp_mesh() -> None:
-    kv = KVAllGatherContextParallel()
-    with set_current_spmd_mesh(None):
-        with pytest.raises(RuntimeError):
-            kv(_x(), _x(), _x())
-
-
-def test_ulysses_shard_refuses_without_a_cp_mesh() -> None:
-    ulysses = UlyssesContextParallel()
-    with set_current_spmd_mesh(None):
-        with pytest.raises(RuntimeError):
-            ulysses.shard(_x(), _x(), _x())
-
-
-def test_ulysses_unshard_refuses_without_a_cp_mesh() -> None:
-    ulysses = UlyssesContextParallel()
-    with set_current_spmd_mesh(None):
-        with pytest.raises(RuntimeError):
-            ulysses.unshard(_x())
-
-
-def test_default_reduce_dtype_is_float32() -> None:
-    """Upstream's default; bf16 is available but must be opted into."""
-    assert KVAllGatherContextParallel().reduce_dtype == torch.float32
-    assert KVAllGatherContextParallel(reduce_dtype=torch.bfloat16).reduce_dtype == (
-        torch.bfloat16
-    )
 
 
 def test_apply_cp_is_a_no_op_when_cp_is_off() -> None:
@@ -101,6 +47,59 @@ def test_apply_cp_requires_the_flex_backend() -> None:
 
     with pytest.raises(RuntimeError, match="attention backend"):
         apply_cp(torch.nn.Linear(4, 4), None, cfg)
+
+
+# -- the kernel's strategy dispatch -------------------------------------------
+
+
+@pytest.fixture
+def fake_cp_mesh():
+    """A size-1 CP axis over the 'fake' backend -- enough to construct a kernel.
+
+    ``CPFlexKernel.__init__`` captures the process group and the set of allowed
+    strategies before any collective runs, so building one needs a mesh but not
+    a second rank.
+    """
+    import torch.distributed as dist
+    from torch.distributed.device_mesh import init_device_mesh
+    from torch.testing._internal.distributed.fake_pg import FakeStore
+
+    store = FakeStore()
+    dist.init_process_group("fake", store=store, rank=0, world_size=1)
+    try:
+        yield init_device_mesh("cpu", (1,), mesh_dim_names=("cp",))["cp"]
+    finally:
+        dist.destroy_process_group()
+
+
+@pytest.mark.parametrize("strategy", ["kv_allgather", "ulysses"])
+def test_the_known_strategies_are_accepted(fake_cp_mesh, strategy: str) -> None:
+    """Both strategies the package advertises must actually construct.
+
+    Non-vacuity: this is the accepting half of the pair below, so a kernel that
+    rejected everything cannot pass both.
+    """
+    kernel = CPFlexKernel(cp_mesh=fake_cp_mesh, strategy=strategy)
+
+    assert kernel.strategy == strategy
+
+
+def test_an_unknown_strategy_is_refused(fake_cp_mesh) -> None:
+    """A typo'd strategy must fail at attach time, not silently pick one path.
+
+    ``forward`` branches on the name, so an unrecognized value would fall
+    through to the KV all-gather branch and train a *different* CP formulation
+    than the one asked for, with the forward still producing plausible numbers.
+    """
+    with pytest.raises(NotImplementedError, match="not wired"):
+        CPFlexKernel(cp_mesh=fake_cp_mesh, strategy="ring")
+
+
+def test_the_default_strategy_is_kv_allgather(fake_cp_mesh) -> None:
+    """The default has to match ``ParallelConfig``'s, or a caller that relies on
+    both defaults gets whichever the other object happened to pick."""
+    assert ParallelConfig().context_parallel_strategy == "kv_allgather"
+    assert CPFlexKernel(cp_mesh=fake_cp_mesh).strategy == "kv_allgather"
 
 
 # -- ulysses head divisibility -------------------------------------------------

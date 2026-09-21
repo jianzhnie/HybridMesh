@@ -258,6 +258,61 @@ def test_the_mask_type_follows_the_corpus_rather_than_being_configured() -> None
     assert packed.attn_mask_type == "block_causal"
 
 
+def test_a_composite_config_carries_the_mask_type_down_to_the_text_stack() -> None:
+    """A VL config's ``attn_mask_type`` must land where the model can read it.
+
+    ``build_model_config_for`` derives the flag and sets it on the config it
+    returns -- but for a composite (vision-language) config the model class is
+    built from ``text_config``, and every reader of the flag (the packed guard,
+    the mask builder, ``apply_cp``'s ulysses check) reads ``model.model.config``.
+    Left on the top config the flag is invisible, and a packed corpus silently
+    trains with a causal-only mask: attention straight across document
+    boundaries. So the sub-config is what this pins.
+
+    Both a composite config that resolves to a class here (``llava``) and one
+    that does not are exercised: the carry-down is a property of the config
+    shape, and must not depend on the class lookup having succeeded.
+    """
+    from transformers import AutoConfig
+
+    from hpmesh.models.hf_wrapper import _unwrap_text_config
+
+    for name in ("llava", "gemma3"):
+        top = AutoConfig.for_model(name)
+        top.attn_mask_type = "block_causal"
+        assert not hasattr(top.text_config, "attn_mask_type"), (
+            f"{name}: the sub-config already carries the flag, so this test "
+            "would pass without the carry-down and prove nothing"
+        )
+
+        seen = _unwrap_text_config(top)
+
+        assert seen is top.text_config
+        assert getattr(seen, "attn_mask_type", "causal") == "block_causal", (
+            f"{name}: the model would read 'causal' and attend across documents"
+        )
+
+
+def test_a_composite_without_the_flag_stays_unset() -> None:
+    """The carry-down must not invent a flag the caller never derived.
+
+    ``_unwrap_text_config`` is also reached by callers that build a config by
+    hand (the equivalence tests), and ``getattr(..., 'causal')`` is the
+    documented default at the mask site. Synthesizing ``"causal"`` here would
+    turn every unset flag into an explicit one and quietly retire that default.
+    """
+    from transformers import AutoConfig
+
+    from hpmesh.models.hf_wrapper import _unwrap_text_config
+
+    top = AutoConfig.for_model("llava")
+    assert not hasattr(top, "attn_mask_type")
+
+    seen = _unwrap_text_config(top)
+
+    assert not hasattr(seen, "attn_mask_type")
+
+
 def test_arch_overrides_reach_an_architecture_without_its_own_config_field() -> None:
     """The six explicit sizes cannot describe an MoE or an MLA attention.
 

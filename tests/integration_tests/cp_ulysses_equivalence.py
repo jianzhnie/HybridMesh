@@ -7,8 +7,9 @@ Run under torchrun with 2 ranks:
 Where ``cp_wiring_equivalence.py`` pins the kv_allgather strategy, this pins
 the ulysses one end to end: a tiny offline qwen3 goes through ``apply_cp``
 with ``context_parallel_strategy="ulysses"``, gets fed contiguously CP-sharded
-inputs (ulysses forbids the load balancer -- the all-to-all reassembles the
-sequence by concatenating rank shards in rank order), and every rank's forward
+inputs (ulysses forbids the load balancer -- it attends the full sequence in
+whatever order the all-to-all delivers, and the causal mask it rebuilds is
+only the right mask for one unpermuted order), and every rank's forward
 must reproduce the single-rank full-sequence forward exactly.
 
 Three layers of checks:
@@ -24,7 +25,12 @@ Three layers of checks:
   secretly skipped the all-to-all could not pass;
 * the refusals: heads not divisible by cp, ulysses + load balancer, and
   ulysses + packed sequences must all raise rather than compute a confidently
-  wrong answer.
+  wrong answer;
+* the asymmetry behind that second refusal: kv_allgather with a load balancer
+  is *correct* (the rearrangement lands in the mask too, so it cancels), while
+  ulysses with one reproduces the model run over the rearranged corpus. That
+  difference is the entire reason the refusal is written for ulysses and not
+  for the strategy that is actually allowed to take a balancer.
 
 Forward-only, like ``cp_wiring_equivalence.py``: torch's flex attention has no
 CPU backward. Everything runs in float64 so the comparison is arithmetic, not
@@ -37,9 +43,15 @@ import torch
 import torch.distributed as dist
 import torch.nn.functional as F
 from torch.distributed.device_mesh import init_device_mesh
+from torch.nn.attention.flex_attention import create_block_mask
 
+from hpmesh.models.common.masks import get_causal_mask_mod
 from hpmesh.models.hf_wrapper import HFTransformerModel, build_model_config_for
-from hpmesh.parallel.context_parallel import apply_cp, shard_batch_for_cp
+from hpmesh.parallel.context_parallel import (
+    apply_cp,
+    shard_attention_mask_for_cp,
+    shard_batch_for_cp,
+)
 from hpmesh.parallel.context_parallel.cp_kernel import (
     CPFlexKernel,
     _HeadToSeq,
@@ -51,6 +63,7 @@ from hpmesh.trainer import (
     ParallelConfig,
     TrainingConfig,
 )
+from hpmesh.utils.batch_invariant import is_in_batch_invariant_mode
 
 SEQ = 256  # torch's CP BlockMask path requires Q_LEN % (cp * 128) == 0
 VOCAB = 128
@@ -122,6 +135,19 @@ def _gather_cp(x_local: torch.Tensor, cp_mesh) -> torch.Tensor:
     xs = [torch.empty_like(x_local) for _ in range(cp_mesh.size())]
     dist.all_gather(xs, x_local.detach().contiguous(), group=cp_mesh.get_group())
     return torch.cat(xs, dim=0)
+
+
+def _headtail_indices(seq: int, cp: int) -> torch.Tensor:
+    """The permutation a headtail balancer applies, matching torch's own.
+
+    Reimplemented rather than imported so the expected rearrangement is stated
+    here; ``_HeadTailLoadBalancer._generate_indices`` is the definition it
+    follows (chunk r pairs with chunk 2*cp-1-r).
+    """
+    chunk = seq // (cp * 2)
+    chunks = torch.arange(seq).view(cp * 2, chunk)
+    head = torch.arange(cp)
+    return torch.stack([chunks[head], chunks[2 * cp - 1 - head]], dim=1).reshape(-1)
 
 
 def _run_ulysses(
@@ -283,6 +309,83 @@ def _check_refusals(mesh, failures: list[str]) -> None:
     )
 
 
+def _check_ulysses_under_a_load_balancer(mesh, failures: list[str]) -> dict[str, float]:
+    """Why the load-balancer refusal is written for ulysses and not for the other.
+
+    The pairing is refused *only* for ulysses, and that asymmetry is easy to
+    misread as arbitrary -- particularly because both strategies concatenate
+    rank shards in rank order, which sounds like the same constraint for each.
+    It is not the same, and the difference is what this pins:
+
+    * kv_allgather is fine with a load balancer, and ``cp_wiring_equivalence.py``
+      asserts that end to end. The all-gather inverts the rearrangement, so the
+      full sequence it assembles is the one the mask was built and Q-sharded in,
+      and the rearrangement cancels between the queries and the mask;
+    * ulysses has no such inversion. Every rank attends the full sequence in
+      whatever order the shards arrived, against a causal mask rebuilt from the
+      length alone. That mask describes the unpermuted order, so the attention
+      runs over the rearranged corpus -- and nothing raises. No shape, no
+      finiteness check, no loss spike: the model that comes out is the model
+      trained on ``ids[perm]``.
+
+    Driven directly, because this is precisely the configuration ``apply_cp``
+    refuses to build, and asserted against the *permuted* corpus rather than
+    against the truth: agreeing with the wrong run is what identifies the
+    mechanism, where merely drifting from the right one would not.
+    """
+    cp = mesh["cp"].size()
+    rank = mesh["cp"].get_local_rank()
+    ref = _build_model(_cfg(), flex=False)
+    ids, labels, positions = _data()
+    perm = _headtail_indices(SEQ, cp)
+
+    with torch.no_grad():
+        truth = _ref_forward(ref, ids, positions)
+        permuted = _ref_forward(ref, ids[perm], positions[perm])
+
+    lo, hi = rank * (SEQ // cp), (rank + 1) * (SEQ // cp)
+    # What attending the rearrangement gives, at the rows this rank holds.
+    wrong = permuted[lo:hi]
+    gap = (truth[perm[lo:hi]] - wrong).abs().max().item()
+    if gap < 1e-3:
+        failures.append(f"ulysses + headtail: permutation is a no-op ({gap:.3e})")
+
+    ids_ht, _, pos_ht = shard_batch_for_cp(
+        ids, labels, positions, mesh["cp"], load_balancer="headtail"
+    )
+    # The Q-sharded mask the wrapper would hand the kernel: full-length, then
+    # rearranged to match the tokens this rank holds.
+    full_mask = create_block_mask(
+        get_causal_mask_mod(),
+        1,
+        None,
+        SEQ,
+        SEQ,
+        device=torch.device("cpu"),
+        BLOCK_SIZE=128,
+        separate_full_blocks=not is_in_batch_invariant_mode(),
+    )
+    sharded_mask = shard_attention_mask_for_cp(full_mask, mesh["cp"], "headtail")
+
+    model = _build_model(_cfg(), flex=True)
+    model.set_cp_mesh(mesh["cp"], load_balancer="headtail")
+    for layer in model.layers:
+        layer.self_attn._titan_flex_kernel = CPFlexKernel(
+            cp_mesh=mesh["cp"], strategy="ulysses"
+        )
+    with torch.no_grad():
+        out = model(ids_ht, positions=pos_ht, attention_masks=sharded_mask)
+
+    diff = (out - wrong).abs().max().item()
+    if diff > TOL:
+        failures.append(
+            f"ulysses + headtail: {diff:.3e} from the permuted-corpus run, "
+            "expected the two to agree exactly"
+        )
+
+    return {"vs_permuted": diff, "permutation_gap": gap}
+
+
 def main() -> None:
     dist.init_process_group("gloo")
     rank = dist.get_rank()
@@ -296,6 +399,9 @@ def main() -> None:
     stats["all_to_all"] = _check_all_to_all(mesh["cp"], failures)
     stats["ulysses/mha"] = _run_ulysses("ulysses/mha", 4, mesh, failures)
     stats["ulysses/gqa"] = _run_ulysses("ulysses/gqa", 2, mesh, failures)
+    stats["ulysses_load_balancer"] = _check_ulysses_under_a_load_balancer(
+        mesh, failures
+    )
     _check_refusals(mesh, failures)
 
     # Every rank must agree that every check passed, not just report its own.
@@ -312,6 +418,11 @@ def main() -> None:
         for name in ("ulysses/mha", "ulysses/gqa"):
             s = stats[name]
             print(f"{name:20s} logits={s['logits']:.3e} loss={s['loss']:.3e}")
+        lb = stats["ulysses_load_balancer"]
+        print(
+            f"ulysses + headtail: vs permuted={lb['vs_permuted']:.3e} "
+            f"(permutation gap={lb['permutation_gap']:.3e})"
+        )
         print(f"failed ranks   = {int(local_ok.item())}")
         if failures:
             for f in failures:
