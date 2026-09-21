@@ -1,9 +1,3 @@
-# Copyright (c) Meta Platforms, Inc. and affiliates.
-# All rights reserved.
-#
-# This source code is licensed under the BSD-style license found in the
-# LICENSE file in the root directory of this source tree.
-
 """The profiler's directory layout, frequency policy, and OOM handling.
 
 The traces and snapshots themselves need a GPU to be interesting, but almost

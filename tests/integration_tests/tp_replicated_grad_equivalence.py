@@ -104,7 +104,7 @@ def main() -> None:
     sharded_ids = {
         id(mod.weight)
         for mod in model.modules()
-        if isinstance(mod, (ColwiseLinear, ColwiseLinearNoGather, RowwiseLinear))
+        if isinstance(mod, ColwiseLinear | ColwiseLinearNoGather | RowwiseLinear)
     }
     assert sharded_ids, "apply_tp swapped no projections -- test is vacuous"
     replicated = {

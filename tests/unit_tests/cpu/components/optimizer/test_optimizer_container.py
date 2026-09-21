@@ -100,6 +100,23 @@ def test_a_trainable_parameter_left_out_of_every_group_is_rejected() -> None:
         OptimizersContainer(_cfg(only_norm), model_parts=[model])
 
 
+def test_the_unassigned_error_names_the_parameters() -> None:
+    """The counts alone cannot say which way the id sets differ, so name them.
+
+    A parameter left out and a parameter double-assigned are both mismatches,
+    but only the first is reachable through the public path, and the fix (add a
+    catch-all, or a pattern for the named parameters) needs the names.
+    """
+    model = _model()
+    only_norm = ParamGroupConfig(
+        pattern=r"1\.weight$",
+        optimizer_name="AdamW",
+        optimizer_kwargs={"lr": 0.1},
+    )
+    with pytest.raises(ValueError, match=r"0\.weight \(\(8, 8\)\)"):
+        OptimizersContainer(_cfg(only_norm), model_parts=[model])
+
+
 def test_frozen_parameters_are_not_required_in_a_group() -> None:
     """``requires_grad=False`` parameters are skipped, not counted as missing."""
     model = _model()

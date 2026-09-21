@@ -452,6 +452,61 @@ def test_document_aware_packing_caps_segments_per_row(tokenizer, corpus):
     assert int((row["positions"] == 0).sum()) <= 1 + int(row["padding_mask"].sum())
 
 
+def test_document_aware_packing_keeps_each_row_to_one_document(tokenizer, corpus):
+    """``max_num_documents=1`` stops a row from carrying a second document.
+
+    This is what separates the document-aware node from the plain
+    ``grain.experimental.ConcatThenSplitIterDataset`` path, and the row *shape*
+    cannot tell them apart -- both fill the batch. The plain path concatenates
+    everything and cuts at the token count, so a row runs off the end of one
+    document and into the head of the next. This node pads instead.
+
+    Sizing matters. At ``num_tokens_per_batch=32`` the fixture documents all fit
+    in one row, so the two paths agree and the existing tests pass on either.
+    At 8 the documents are 4-12 tokens and the distinction actually shows.
+
+    A document longer than a row is still split -- that is unavoidable, and the
+    assertion is deliberately "one *source document* per row", not "one segment",
+    so the unavoidable split does not read as a failure. Asserted against the
+    unpacked source rather than against a shape, so a dropped or duplicated
+    document cannot hide behind matching row lengths.
+    """
+    context = make_context(tokenizer, num_tokens_per_batch=8, max_num_documents=1)
+    policy = make_policy()
+    source = [
+        [int(token) for token in sequence.input_ids]
+        for sequence in text_dataset(corpus).build(
+            context=context, dataset_iteration_policy=policy
+        )
+    ]
+    # Which source document each token came from, flattened.
+    owner = [index for index, doc in enumerate(source) for _ in doc]
+    flat_source = [token for doc in source for token in doc]
+
+    graph = ConcatThenSplitPackingConfig(dataset=text_dataset(corpus)).build(
+        context=context, dataset_iteration_policy=policy
+    )
+
+    flat_packed: list[int] = []
+    for row in graph:
+        assert row.input_ids.shape == (8,)
+        # Positions restart at 0 within a row, so the leading run where
+        # ``positions[i] == i`` is this row's real tokens; the rest is padding.
+        real = 0
+        while real < 8 and int(row.positions[real]) == real:
+            real += 1
+        tokens = [int(token) for token in row.input_ids[:real]]
+        owners = owner[len(flat_packed) : len(flat_packed) + real]
+        assert len(set(owners)) == 1, (
+            f"row starting at token {len(flat_packed)} draws from "
+            f"{len(set(owners))} documents, but max_num_documents=1"
+        )
+        flat_packed.extend(tokens)
+
+    # Nothing dropped, nothing duplicated, order preserved.
+    assert flat_packed == flat_source
+
+
 # --------------------------------------------------------------------------
 # Mix
 # --------------------------------------------------------------------------

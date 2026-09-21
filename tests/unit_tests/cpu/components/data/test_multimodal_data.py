@@ -1,9 +1,3 @@
-# Copyright (c) Meta Platforms, Inc. and affiliates.
-# All rights reserved.
-#
-# This source code is licensed under the BSD-style license found in the
-# LICENSE file in the root directory of this source tree.
-
 """The multimodal data path: image preprocessing, placeholder alignment,
 collation, and packing.
 
@@ -551,9 +545,7 @@ def test_collator_concatenates_whole_samples_before_padding(mm_tokenizer, token_
     assert batch["padding_mask"][15:].tolist() == [True] * 113
 
 
-def test_multimodal_collator_rejects_rows_over_the_token_batch(
-    mm_tokenizer, token_ids
-):
+def test_multimodal_collator_rejects_rows_over_the_token_batch(mm_tokenizer, token_ids):
     with pytest.raises(ValueError, match="exceed the configured token batch"):
         _collator(mm_tokenizer)([_mm_sample(129, token_ids)])
 
