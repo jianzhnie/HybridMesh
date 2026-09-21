@@ -95,6 +95,19 @@ class ModelConfig:
     num_key_value_heads: int = field(
         default=4, metadata={"help": "Number of KV heads (GQA)"}
     )
+    arch_overrides: dict[str, Any] = field(
+        default_factory=dict,
+        metadata={
+            "help": "Extra architecture settings, by name, for fields this "
+            "config does not name. The six fields above cover every dense "
+            "decoder; anything else a model needs -- an MoE's "
+            "n_routed_experts / num_experts_per_tok, MLA's q_lora_rank -- has "
+            "no field here. Offline only: they are applied on top of the six "
+            "above when building the HF config, and ignored for a hub id or a "
+            "local checkpoint directory, where the saved config wins. Supplied "
+            "programmatically (a dict does not survive the CLI parser)."
+        },
+    )
 
 
 @dataclass(kw_only=True, slots=True)
@@ -1008,7 +1021,17 @@ class TrainingConfig:
     """Training loop hyperparameters and reproducibility."""
 
     global_batch_size: int = field(
-        default=8, metadata={"help": "Sequences per step across ALL DP ranks"}
+        default=8,
+        metadata={
+            "help": "Sequences per step across ALL DP ranks. Under pipeline "
+            "parallelism this is the step total, not the per-iteration read: "
+            "each rank reads global_batch_size / dp_world_size rows once, and "
+            "those rows are then sliced into num_pp_microbatches pipeline "
+            "micro-batches rather than repeated reads. torchtitan instead reads "
+            "num_pp_microbatches separate batches per accumulation group, so "
+            "the same global_batch_size there consumes num_pp_microbatches "
+            "times more tokens per step; multiply here to match it."
+        },
     )
     max_seq_len: int = field(default=64, metadata={"help": "Sequence length"})
     steps: int = field(default=20, metadata={"help": "Number of optimizer steps"})
@@ -1193,6 +1216,10 @@ class HybridMeshConfig:
     @property
     def num_key_value_heads(self) -> int:
         return self.model.num_key_value_heads
+
+    @property
+    def arch_overrides(self) -> dict[str, Any]:
+        return self.model.arch_overrides
 
     @property
     def lr(self) -> float:

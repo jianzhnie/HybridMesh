@@ -47,8 +47,8 @@ torchrun --nproc_per_node=2 -m hpmesh --data_parallel_shard_size 2
 | `hpmesh/models/hf_wrapper.py` | HF 模型包装成统一的 decoder forward（返回 logits，loss 在 trainer 里算） | 可运行 |
 | `hpmesh/trainer/trainer.py` | 训练循环：`train` -> `train_step` -> `forward_backward_step`，token 归一化 loss + 梯度裁剪 + 非有限值检测 | 可运行 |
 | `hpmesh/datasets/random_data.py` | `Batch` + 无限微批次迭代器（源耗尽即中止整步，不训练半个 batch） | 可运行 |
-| `hpmesh/datasets/{loader,sources,packing,hf/text}.py` | Grain 数据层：语料 -> 打包 -> 每 DP rank 分片；`DATALOADER` 状态进 checkpoint | 可运行 |
-| `hpmesh/datasets/hf/multimodal/` | 多模态语料（图/视频/文本处理器 + collator）——**尚未接线**：只有单测在调 | 已实现 |
+| `hpmesh/datasets/{loader,sources,packing,text}.py` | Grain 数据层：语料 -> 打包 -> 每 DP rank 分片；`DATALOADER` 状态进 checkpoint | 可运行 |
+| `hpmesh/datasets/multimodal/mm_*.py` | 多模态语料（图/视频/文本处理器 + collator）——**已接线**：`datasets/build.py` 惰性导入，`DataloaderConfig.dataset` 点名即用（需 torchvision） | 可运行 |
 | `hpmesh/components/checkpointer/{base,dcp,torch_checkpointing}.py` | 每 rank 一份检查点，`step` / `ntokens_seen` / 模型 / 优化器，可续训；`base.py` 是共用骨架，两种后端各一个 manager | 可运行 |
 | `hpmesh/components/loss.py` | 交叉熵（含 vocab-parallel 形式）+ next-token 目标构造 | 已实现 |
 | `hpmesh/components/{metrics,profiler}.py` | 训练指标 + profiler | 可运行 |
@@ -78,6 +78,22 @@ torchrun --nproc_per_node=2 -m hpmesh --data_parallel_shard_size 2
 第 3 步  +PP 流水线并行    已实现   parallel/pipeline_parallel/ (1F1B 闭环, pp_equivalence 对拍)
 第 4 步  +CP 或 EP         已实现   parallel/context_parallel/ + expert_parallel/ (KV all-gather / all-to-all)
 ```
+
+## 示例（`examples/`）
+
+两个自包含脚本，都用 `AutoConfig.for_model` 离线构造小模型，不需要联网、不需要 GPU。
+**必须带 `-m` 从仓库根目录跑**（`python examples/x.py` 会把 `examples/` 放进
+`sys.path` 而不是仓库根，`import hpmesh` 会失败）：
+
+```bash
+python -m examples.train_qwen3           # qwen3 + GQA（num_key_value_heads=2）
+python -m examples.train_deepseek_v3     # DeepSeek-V3：路由 MoE + MLA
+```
+
+DeepSeek-V3 那个值得单看：它的 `n_routed_experts` / `q_lora_rank` 这类字段
+`ModelConfig` 没有，走 `ModelConfig.arch_overrides` 传。**不传会拿到
+`for_model("deepseek_v3")` 的默认值 —— 256 个专家**，也就是真的 671B 形状的模型，
+不是玩具。这是 `arch_overrides` 存在的唯一理由。
 
 ## 验证方法
 

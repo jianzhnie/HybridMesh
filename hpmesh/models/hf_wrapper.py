@@ -145,6 +145,15 @@ def build_model_config_for(cfg) -> PretrainedConfig:
     authoritative, so they become the overrides; otherwise the Hub's own config
     wins and the overrides are empty.
 
+    ``cfg.arch_overrides`` rides along on top of the explicit sizes, and exists
+    because those sizes are only the dense-decoder six: an MoE or an MLA
+    attention has fields -- ``n_routed_experts``, ``q_lora_rank`` -- that
+    ``ModelConfig`` names nowhere, and a model built without them silently gets
+    the architecture's own defaults (DeepSeek V3 asks for 256 experts). Same
+    offline-only rule as the sizes: a hub id or a local checkpoint directory
+    carries its own config, and overriding its architecture by hand is the one
+    thing that would make the built model disagree with the weights it loads.
+
     It also sets ``attn_mask_type``, which is derived rather than configured. Any
     real corpus is packed -- ``datasets/build.py`` always runs the samples
     through ``ConcatThenSplitPackingConfig`` -- so a row holds several documents
@@ -169,6 +178,11 @@ def build_model_config_for(cfg) -> PretrainedConfig:
             "num_hidden_layers": cfg.num_hidden_layers,
             "num_attention_heads": cfg.num_attention_heads,
             "num_key_value_heads": cfg.num_key_value_heads,
+            # Last, so an architecture setting may correct one of the six --
+            # an MoE's hidden width and its per-expert width are independent,
+            # but a model that redefines ``intermediate_size`` can say so
+            # rather than have the override silently lose.
+            **cfg.arch_overrides,
         }
         if offline
         else None
@@ -510,7 +524,6 @@ class HFTransformerModel(nn.Module):
         *,
         parallel_dims: ParallelDims | None,
         parallelism=None,
-        max_num_documents: int | None = None,
         max_context_length: int | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor, dict[str, Any]]:
         """Turn a dataloader batch into ``(inputs, labels, extra_kwargs)``.
@@ -553,16 +566,23 @@ class HFTransformerModel(nn.Module):
 
         ``positions`` is optional: the synthetic source has none and the forward
         falls back to its own ``arange``, which is right for a single document
-        but must not be relied on for a packed one. ``parallelism`` and
-        ``max_num_documents`` are accepted for signature parity with the
-        reference but unused: hpmesh's CP load-balancer string is latched onto
-        this wrapper by ``apply_cp`` (see ``set_cp_mesh``), and document
-        splitting is the collator's job.
+        but must not be relied on for a packed one. ``parallelism`` is accepted
+        for signature parity with the reference but unused: hpmesh's CP
+        load-balancer string is latched onto this wrapper by ``apply_cp`` (see
+        ``set_cp_mesh``).
+
+        The reference also takes ``max_num_documents``, to size a fixed-shape
+        varlen mask for CUDA graph capture. It is not accepted here because
+        there is no path for it to take: hpmesh's CP path goes through
+        ``create_attention_mask`` (a flex ``BlockMask``), which rebuilds from
+        the positions shard and takes no capacity bound, and the packing
+        collator already caps segments at one row. Accepting it would mean a
+        parameter the trainer passes and this method silently discards.
 
         Tensors arrive on the trainer's device; the trainer moves them before
         calling, so this is pure structure and stays device-free.
         """
-        del parallelism, max_num_documents
+        del parallelism
         extra_kwargs: dict[str, Any] = {}
         positions = None
 
