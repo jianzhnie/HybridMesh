@@ -24,7 +24,8 @@ What replaces them is per-forward work the HF model does not do on its own:
 Forward shape: this wrapper is a *decoder wrapper*, not a CausalLM. It runs the
 decoder and applies ``lm_head`` itself, so ``self.model.model`` is the bare text
 stack. Callers pass flat ``(T,)`` token and position tensors; the batch dim is
-added and removed internally.
+added and removed internally. ``forward(..., skip_lm_head=True)`` returns the
+hidden states instead, for the trainer's chunked-loss path.
 """
 
 from __future__ import annotations
@@ -727,6 +728,7 @@ class HFTransformerModel(nn.Module):
         *,
         positions: torch.Tensor | None = None,
         attention_masks=None,
+        skip_lm_head: bool = False,
     ) -> torch.Tensor:
         """Run the decoder over one packed sequence and return logits.
 
@@ -744,6 +746,11 @@ class HFTransformerModel(nn.Module):
                 it (see ``_apply_attention``); with sdpa the decoder is left to
                 its own causal default. Under CP, a full-length mask already
                 Q-sharded by ``shard_attention_mask_for_cp``.
+            skip_lm_head: return the ``(T, H)`` hidden states instead of logits.
+                The chunked-loss path uses this so the trainer can run lm_head +
+                cross-entropy per sequence chunk (see
+                ``components.loss.chunked_lm_head_cross_entropy``) rather than
+                materialize the full ``T * V`` logits.
         """
         if isinstance(self.tok_embeddings, nn.Identity):
             # Non-first pipeline stage: the input IS the previous stage's
@@ -768,9 +775,21 @@ class HFTransformerModel(nn.Module):
             **kwargs,
         ).last_hidden_state.squeeze(0)
 
-        logits = (
-            self.lm_head(hidden_states) if self.lm_head is not None else hidden_states
-        )
+        if (
+            self.lm_head is not None
+            and not isinstance(self.lm_head, nn.Identity)
+            and not skip_lm_head
+        ):
+            logits = self.lm_head(hidden_states)
+        else:
+            # Non-final pipeline stage, or a chunked-loss forward: the output
+            # must own its storage rather than be a view of the decoder's
+            # ``last_hidden_state`` (squeeze above), because split-backward
+            # schedules (ZBVZeroBubble) call ``detach_()`` on stage outputs,
+            # which views do not support. The chunked-loss caller does not
+            # detach in place, but shares the branch so both skip reasons stay
+            # one code path -- the clone is one T*H copy per forward.
+            logits = hidden_states.clone()
 
         _dump_dir = os.environ.get("HF_BACKEND_LOGIT_DUMP")
         if _dump_dir is not None:

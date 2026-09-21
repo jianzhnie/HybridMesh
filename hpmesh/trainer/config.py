@@ -991,6 +991,14 @@ class TrainingConfig:
     steps: int = field(default=20, metadata={"help": "Number of optimizer steps"})
     seed: int = field(default=42, metadata={"help": "Base RNG seed"})
     compile: bool = field(default=False, metadata={"help": "torch.compile the model"})
+    activation_checkpoint_mode: str = field(
+        default="none",
+        metadata={
+            "help": "Activation checkpointing: 'none' (off) or 'full' "
+            "(recompute each decoder layer during backward). Wraps layers after "
+            "TP/EP/CP and before compile/FSDP."
+        },
+    )
     deterministic: bool = field(
         default=True,
         metadata={
@@ -1021,6 +1029,16 @@ class TrainingConfig:
             "valid-token count, so the number stays comparable across settings. "
             "Contrast num_pp_microbatches, which splits one batch's pipeline "
             "schedule rather than training on more data."
+        },
+    )
+    chunked_loss_num_chunks: int = field(
+        default=1,
+        metadata={
+            "help": "Split the lm_head + cross-entropy computation into this "
+            "many sequence chunks, cutting peak logits memory from O(T*V) to "
+            "O(T*V/chunks) -- the key memory lever for large-vocabulary models. "
+            "1 (the default) disables chunking. Not supported with pipeline "
+            "parallelism."
         },
     )
     dump_folder: str = field(
@@ -1086,6 +1104,16 @@ class TrainingConfig:
             raise ValueError(
                 "gradient_accumulation_steps must be >= 1, got "
                 f"{self.gradient_accumulation_steps}"
+            )
+        if self.chunked_loss_num_chunks < 1:
+            raise ValueError(
+                "chunked_loss_num_chunks must be >= 1 (1 disables chunking), "
+                f"got {self.chunked_loss_num_chunks}"
+            )
+        if self.activation_checkpoint_mode not in ("none", "full"):
+            raise ValueError(
+                "training.activation_checkpoint_mode must be one of: 'none', "
+                f"'full' (got {self.activation_checkpoint_mode!r})"
             )
 
 

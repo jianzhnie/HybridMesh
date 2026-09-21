@@ -150,9 +150,13 @@ class ParallelDims:
                      which part of the data each rank should read. This dimension
                      includes both ``dp_replicate`` and ``dp_shard``.
             loss:    Used by all-reduce when computing the loss. Includes
-                     ``dp_replicate``, ``dp_shard``, and ``cp`` degrees, as all of
-                     them parallelize the data, essentially require the weight
-                     gradients reduction.
+                     ``dp_replicate``, ``dp_shard``, ``cp``, and ``tp``
+                     degrees, as all of them shard the batch whose loss is
+                     summed: dp over rows, cp and tp over the sequence. (tp is
+                     in this view, unlike upstream torchtitan, because hpmesh's
+                     TP is sequence-parallel end to end: each rank's loss sum
+                     covers only its ``T / tp`` token shard, where upstream's
+                     TP replicas all compute the full-sequence loss.)
             dp_replicate: For DDP or HSDP replicate dimension.
             cp:      Context Parallelism (CP).
             tp:      Tensor Parallelism (TP).
@@ -160,7 +164,7 @@ class ParallelDims:
             efsdp:   FSDP in the EP region.
 
         Note: Most dimensions above are created by unflattening the world mesh,
-        except for loss, which is created by flattening the batch and cp
+        except for loss, which is created by flattening the batch, cp, and tp
         dimensions.
         This API performs the following unflatten operations from the world mesh:
 
@@ -217,7 +221,7 @@ class ParallelDims:
             ("pp", "batch", "cp", "tp"),
             (self.pp, batch, self.cp, self.tp),
         )
-        loss_mesh = dataloading_mesh["batch", "cp"]._flatten("loss_mesh")
+        loss_mesh = dataloading_mesh["batch", "cp", "tp"]._flatten("loss_mesh")
         # Two mesh views over the same devices:
         #
         # full_dense_mesh_for_fsdp (dp_replicate, dp_shard, cp, tp) is passed to
@@ -280,7 +284,7 @@ class ParallelDims:
         expected_sizes = {
             "pp": self.pp,
             "batch": self.dp_replicate * self.dp_shard,
-            "loss": self.dp_replicate * self.dp_shard * self.cp,
+            "loss": self.dp_replicate * self.dp_shard * self.cp * self.tp,
             "dp_replicate": self.dp_replicate,
             "cp": self.cp,
             "tp": self.tp,

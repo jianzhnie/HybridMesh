@@ -84,7 +84,11 @@ from torch.distributed.tensor import DTensor
 
 from .. import parallel
 from ..components.checkpointer import DATALOADER, TRAIN_STATE, CheckpointManager
-from ..components.loss import IGNORE_INDEX, next_token_targets
+from ..components.loss import (
+    IGNORE_INDEX,
+    chunked_lm_head_cross_entropy,
+    next_token_targets,
+)
 from ..components.metrics import MetricsProcessor
 from ..components.optimizer import (
     LRSchedulersContainer,
@@ -147,6 +151,7 @@ class Trainer:
     pp_has_first_stage: bool
     pp_has_last_stage: bool
     _pp_loss_sentinel: torch.Tensor | None
+    _chunked_loss_num_chunks: int
     optimizer: torch.optim.Optimizer
     # Defaulted, not just annotated: ``_data_iterator`` reads it, and that is
     # the one helper the tests drive off a ``Trainer`` built with ``__new__``.
@@ -211,6 +216,25 @@ class Trainer:
                 "torchtitan's _clip_grad_norm_with_ep asserts). Set max_norm "
                 "<= 0 to train without clipping."
             )
+        # Chunked loss + PP is rejected up front: under PP the last stage's
+        # loss is computed inside the schedule
+        # (``pipeline_parallel/pp.py:_scalar_loss_fn``), which receives logits
+        # from the stage forward. Rewiring that seam for hidden states plus a
+        # per-chunk backward is a PP-side change, so the combination loud-raises
+        # here rather than training on a silently un-chunked (or wrong) loss.
+        self._chunked_loss_num_chunks = cfg.training.chunked_loss_num_chunks
+        if (
+            self._chunked_loss_num_chunks > 1
+            and self.parallel_dims is not None
+            and self.parallel_dims.pp_enabled
+        ):
+            raise NotImplementedError(
+                f"chunked_loss_num_chunks={self._chunked_loss_num_chunks} with "
+                f"pipeline_parallel_size={self.parallel_dims.pp} is not "
+                "supported: the pipeline last stage's loss runs inside the "
+                "schedule on materialized logits. Run chunked loss without "
+                "pipeline parallelism."
+            )
         model = HFTransformerModel(build_model_config_for(cfg)).to(self.device)
 
         # 3. parallelism, in Titan's order: tp/pp/cp/ep declared first, fsdp last
@@ -224,6 +248,7 @@ class Trainer:
             parallel_dims=self.parallel_dims,
             device=self.device,
             compile=cfg.training.compile,
+            activation_checkpoint=cfg.training.activation_checkpoint_mode,
             global_batch_size=cfg.training.global_batch_size,
             dataset=cfg.training.dataloader.dataset,
         )
@@ -419,14 +444,9 @@ class Trainer:
         dp_rank, dp_world_size = self._dp_rank_world_size()
         batch_size_per_rank = self._batch_size_per_rank(dp_world_size)
         loader = build_dataloader(
-            self.cfg.dataloader,
-            seed=self.cfg.seed,
-            vocab_size=self.cfg.vocab_size,
-            batch_size=self.cfg.global_batch_size,
-            seq_len=self.cfg.max_seq_len,
+            self.cfg,
             dp_rank=dp_rank,
             dp_world_size=dp_world_size,
-            max_context_length=self.cfg.max_seq_len,
             # Per rank, not global: the Grain loader splits every dataset's
             # rows across ``dp_world_size`` ranks itself, so this many tokens
             # per rank is this many tokens per rank of the global batch.
@@ -654,6 +674,22 @@ class Trainer:
         # the checkpointers take their groups as arguments. On a single process
         # it is a no-op, so the same code runs from one device to a full mesh.
         with self._param_context(), spmd_context(self.parallel_dims):
+            if self._chunked_loss_num_chunks > 1:
+                # Chunked loss: the forward skips lm_head and returns hidden
+                # states; lm_head + cross-entropy then run per sequence chunk,
+                # so the peak logits memory is 1/num_chunks of the full T*V
+                # tensor. The call runs the backward itself (per chunk, scaled
+                # by 1/global_valid_tokens -- the same normalization the
+                # non-chunked path applies inside the graph) and returns the
+                # detached sum.
+                hidden_states = self.model(inputs, **extra_kwargs, skip_lm_head=True)
+                return chunked_lm_head_cross_entropy(
+                    self.model.lm_head,
+                    hidden_states,
+                    labels,
+                    num_chunks=self._chunked_loss_num_chunks,
+                    grad_scale=1.0 / global_valid_tokens,
+                )
             logits = self.model(inputs, **extra_kwargs)
             loss_sum = self._loss_sum(logits, labels)
             del logits
@@ -834,7 +870,7 @@ class Trainer:
             id(module.weight)
             for part in self.model_parts
             for module in part.modules()
-            if isinstance(module, (ColwiseLinear, RowwiseLinear, ColwiseLinearNoGather))
+            if isinstance(module, ColwiseLinear | RowwiseLinear | ColwiseLinearNoGather)
         }
         group = tp_mesh.get_group()
         for part in self.model_parts:
@@ -846,7 +882,7 @@ class Trainer:
                 # shard in place is the reduction, since every rank of a TP
                 # group holds the same shard of the same parameter.
                 if isinstance(grad, DTensor):
-                    dist.all_reduce(grad.local_tensor, group=group)
+                    dist.all_reduce(grad.to_local(), group=group)
                 else:
                     dist.all_reduce(grad, group=group)
 
@@ -898,29 +934,31 @@ class Trainer:
         # The meshes are resolved once here rather than inline at each
         # collective, and each reduction gets the group *its* quantity spans.
         #
-        # The token count is taken from the unsharded batch, so every CP rank
-        # of a DP group holds the same number: summing over dp (replicate *
+        # The token count is taken from the unsharded batch, so every rank of a
+        # TP or CP group holds the same number: summing over dp (replicate *
         # shard) is the whole batch's count, once. The groups that would be
-        # wrong are the pure-cp axis (multiplying the count by cp) and the
-        # ``loss`` axis (by dp * cp) -- both over-count a batch no rank ever
-        # held in full.
+        # wrong are the pure-cp axis (multiplying the count by cp), the tp axis
+        # (TP ranks read the same batch), and the ``loss`` axis (by dp * cp *
+        # tp) -- all over-count a batch no rank ever held in full.
         #
-        # The loss is summed over each rank's own *slice* of the sequence, so
-        # it needs the dp * cp group -- that sum reaches every token exactly
-        # once, whereas a dp-only sum would miss the shards held by the other
-        # CP ranks and report an average cp times too large. The two coincide
-        # when CP is off, which is why one mesh serves both averages. Under PP
-        # each stage's subgroup reduces independently and only the last stage's
-        # (the metrics rank's) is ever logged, so a size-1 loss axis is nothing
-        # to reduce over rather than an error -- hence ``get_optional_mesh``
-        # rather than ``get_mesh``.
+        # The loss is summed over each rank's own *slice* of the batch -- rows
+        # under dp, sequence shards under cp and tp -- so it needs the
+        # dp * cp * tp group (the ``loss`` view): that sum reaches every token
+        # exactly once, whereas a dp-only sum would miss the sequence shards
+        # held by the other CP/TP ranks and report an average cp * tp times too
+        # small. The two coincide when CP and TP are off, which is why one mesh
+        # serves both averages. Under PP each stage's subgroup reduces
+        # independently and only the last stage's (the metrics rank's) is ever
+        # logged, so a size-1 loss axis is nothing to reduce over rather than
+        # an error -- hence ``get_optional_mesh`` rather than ``get_mesh``.
         #
-        # When the loss mesh *is* used is not "is CP on" but "is the loss split
-        # across ranks at all": with cp on and dp = 1 the sequence is sharded
-        # and dp alone is a size-1 group, so skipping the reduction would
-        # report one rank's shard as the whole batch's loss. Gate on
-        # ``dp_cp_enabled`` (dp or cp), which is the property torchtitan gates
-        # on, not on the density of the mesh.
+        # When the loss mesh *is* used is not "is any one parallelism on" but
+        # "is the loss split across ranks at all": with cp or tp on and dp = 1
+        # the sequence is sharded and dp alone is a size-1 group, so skipping
+        # the reduction would report one rank's shard as the whole batch's
+        # loss. Gate on the disjunction of all three, the property torchtitan
+        # gates on (``dp_cp_enabled``) extended by tp for the sequence-parallel
+        # loss shard upstream does not have.
         parallel_dims = self.parallel_dims
         dp_mesh = (
             None if parallel_dims is None else parallel_dims.get_optional_mesh("dp")
@@ -928,10 +966,12 @@ class Trainer:
         pp_mesh = (
             None if parallel_dims is None else parallel_dims.get_optional_mesh("pp")
         )
-        dp_cp_enabled = parallel_dims is not None and parallel_dims.dp_cp_enabled
+        loss_sharded = parallel_dims is not None and (
+            parallel_dims.dp_cp_enabled or parallel_dims.tp_enabled
+        )
         loss_mesh = (
             dp_mesh
-            if pp_mesh is None and not dp_cp_enabled
+            if pp_mesh is None and not loss_sharded
             else parallel_dims.get_optional_mesh("loss")
         )
 

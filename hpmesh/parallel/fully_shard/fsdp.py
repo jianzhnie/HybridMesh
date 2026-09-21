@@ -317,7 +317,15 @@ def apply_fsdp_to_decoder(
             # pyrefly: ignore [missing-attribute]
             experts = transformer_block.moe.routed_experts.inner_experts
             expert_params = set(experts.parameters())
-            num_experts = experts.num_experts
+            # The comparison needs the TOTAL expert count, which the grouped
+            # weights do not have: the EP swap builds them per rank, so
+            # ``experts.num_experts`` is this rank's shard (total / ep). The
+            # router holds the total. Comparing against the shard instead
+            # reads as ``efsdp * ep > total / ep``, i.e. ``efsdp * ep**2 >
+            # total`` -- an ep-times stricter threshold than upstream's, which
+            # picks Shard(1) for configurations that should shard the expert
+            # axis.
+            num_experts = transformer_block.moe.router.num_experts
 
             if ep_size > 1:
                 assert edp_mesh is not None
