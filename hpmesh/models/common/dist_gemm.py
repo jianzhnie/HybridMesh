@@ -30,6 +30,7 @@ a misconfiguration looks like success -- hence the warning rather than silence.
 from __future__ import annotations
 
 import logging
+import math
 
 import torch
 import torch.distributed as dist
@@ -166,6 +167,20 @@ class RowParallelLinear(nn.Module):
         self.out_features = out_features
         self.weight = nn.Parameter(torch.empty(out_features, in_features))
         self.bias = nn.Parameter(torch.empty(out_features)) if bias else None
+        self.reset_parameters()
+
+    def reset_parameters(self) -> None:
+        """Initialize exactly as ``nn.Linear`` does.
+
+        Upstream subclasses ``Linear`` and gets this from its constructor; with
+        the parameters held directly, ``torch.empty`` would otherwise leave
+        them as uninitialized memory.
+        """
+        nn.init.kaiming_uniform_(self.weight, a=math.sqrt(5))
+        if self.bias is not None:
+            fan_in, _ = nn.init._calculate_fan_in_and_fan_out(self.weight)
+            bound = 1 / math.sqrt(fan_in) if fan_in > 0 else 0
+            nn.init.uniform_(self.bias, -bound, bound)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         tp_group = _tp_group_from_context()

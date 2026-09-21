@@ -7,9 +7,12 @@ Vendored from torchtitan ``distributed/utils.py``. What changed:
   cases); hpmesh's meshes cover every rank, so the mesh argument is the whole
   addressing story.
 * ``_clip_grad_norm_with_ep`` (the EP-aware norm path) is not ported: it asserts
-  every parameter is a DTensor on a sparse mesh, which hpmesh's HF models are
-  not. The norm here is the dense one -- correct for the FSDP / DP / TP
-  configurations hpmesh can actually run today. Composing it with EP is a TODO.
+  every parameter is a DTensor on a sparse mesh with an ``"ep"`` axis, which
+  hpmesh's EP parameters are not (``apply_ep`` physically partitions experts
+  across the ep ranks instead). Because the dense norm would then miss the
+  cross-EP sum of expert-gradient norms, the Trainer loud-raises for
+  ``ep > 1`` with clipping enabled rather than clip to a wrong norm. Port the
+  EP-aware reduction before lifting that rejection.
 * ``dist_mean``, ``all_gather_entries`` and friends are not ported: they exist
   upstream for bucketed per-module metrics, none of which hpmesh reports. Port
   them when there is a caller, not before.

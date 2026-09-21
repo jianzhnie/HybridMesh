@@ -23,6 +23,12 @@ Issuing two of them concurrently on separate streams would alias those bytes.
 Sequential module forwards and autograd backward are single-stream and therefore
 safe; deliberate overlap would need distinct workspace offsets, not a barrier
 here.
+
+The symmetric-memory ops are CUDA-only, so this module also carries a fallback
+realization of the same math -- ``all_gather_linear`` / ``linear_reduce_scatter``
+-- built on torch's functional collectives, whose registered autograd rules are
+exactly the duals the Functions below implement by hand. It exists so TP runs
+(and is testable) off CUDA; the fused path stays the CUDA default.
 """
 
 from __future__ import annotations
@@ -42,6 +48,71 @@ def ensure_symm_mem_ops():
     import torch.distributed._symmetric_memory as symm_mem
 
     return symm_mem
+
+
+def _functional_collectives():
+    """Import torch's functional collectives, lazily and version-tolerantly.
+
+    The autograd-covered variants were renamed across torch releases
+    (``all_gather_into_tensor`` -> ``all_gather_single``); accept either rather
+    than pinning a torch version for what is a CPU fallback path.
+    """
+    from torch.distributed import _functional_collectives as funcol
+
+    try:
+        return funcol.all_gather_single, funcol.reduce_scatter_single
+    except AttributeError:
+        # Older torch spelling of the same autograd-covered collectives.
+        return funcol.all_gather_into_tensor, funcol.reduce_scatter_tensor
+
+
+def all_gather_linear(
+    x_shard_m: torch.Tensor, w_shard_n: torch.Tensor, group: dist.ProcessGroup
+) -> torch.Tensor:
+    """``AllGatherLinear``'s math without symmetric memory (CPU/gloo fallback).
+
+    Same contract: ``x_shard_m`` is this rank's ``[M / R, K]`` sequence shard,
+    ``w_shard_n`` the ``[N / R, K]`` output-feature weight shard; returns the
+    full-sequence, feature-sharded ``[M, N / R]``.
+
+    No hand-written backward is needed: ``all_gather_single``'s registered
+    backward is a reduce-scatter (the dgrad dual), and the weight gradient falls
+    out of the local matmul against the gathered input.
+    """
+    all_gather, _ = _functional_collectives()
+    x_full = all_gather(x_shard_m.contiguous(), 0, group)
+    return torch.nn.functional.linear(x_full, w_shard_n)
+
+
+def linear_reduce_scatter(
+    x_shard_k: torch.Tensor, w_shard_k: torch.Tensor, group: dist.ProcessGroup
+) -> torch.Tensor:
+    """``LinearReduceScatter``'s math without symmetric memory (CPU/gloo fallback).
+
+    Same contract: ``x_shard_k`` is the full-sequence, feature-sharded
+    ``[M, K / R]`` activation, ``w_shard_k`` the ``[N, K / R]`` input-feature
+    weight shard; returns the sequence-sharded ``[M / R, N]``.
+
+    ``reduce_scatter_single``'s registered backward is an all-gather (the dgrad
+    dual); the weight gradient is the local matmul against the re-gathered
+    output gradient, which autograd produces on its own.
+    """
+    _, reduce_scatter = _functional_collectives()
+    y_partial = torch.nn.functional.linear(x_shard_k, w_shard_k)
+    return reduce_scatter(y_partial.contiguous(), "sum", 0, group)
+
+
+def all_gather_along(
+    x: torch.Tensor, dim: int, group: dist.ProcessGroup
+) -> torch.Tensor:
+    """Autograd-covered all-gather along ``dim``; backward is the reduce-scatter dual.
+
+    Used for the attention boundary gather (see ``tp.py``): any number of
+    leading dims, any gather dim -- unlike the fused symm-mem ops, which are
+    strictly 2D.
+    """
+    all_gather, _ = _functional_collectives()
+    return all_gather(x.contiguous(), dim, group)
 
 
 class AllGatherLinear(torch.autograd.Function):

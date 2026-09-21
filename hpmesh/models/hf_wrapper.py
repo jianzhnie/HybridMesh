@@ -47,6 +47,7 @@ from ..datasets.random_data import Batch
 from ..parallel.context_parallel import (
     shard_attention_mask_for_cp,
     shard_batch_for_cp,
+    shard_batch_for_tp,
 )
 from ..parallel.parallel_dims import ParallelDims
 from ..utils.batch_invariant import is_in_batch_invariant_mode
@@ -155,7 +156,10 @@ def build_model_config_for(cfg) -> PretrainedConfig:
     mod attends across document boundaries without complaint. Deriving it here
     means the flag cannot disagree with the corpus the trainer loaded.
     """
-    offline = cfg.hf_model.count("/") != 1
+    # A local checkpoint directory (e.g. "/abs/path" or "./ckpt") holds its own
+    # config.json and must go through ``from_pretrained``; the "/" count test
+    # alone would misread any absolute path as a hub id.
+    offline = not os.path.exists(cfg.hf_model) and cfg.hf_model.count("/") != 1
     overrides = (
         {
             "vocab_size": cfg.vocab_size,
@@ -483,9 +487,13 @@ class HFTransformerModel(nn.Module):
         """Present the decoder's parts as direct children.
 
         ``nn.Module.named_children`` would yield exactly one child (``self.model``),
-        so ``state_dict`` keys would all carry a ``model.`` prefix -- and the
-        parallelism layer, which walks children, would see a single opaque blob.
-        Yielding the parts flattens both.
+        so the parallelism layer, which walks children, would see a single opaque
+        blob. Yielding the parts here is what lets it address the decoder's pieces
+        (``layers.*`` and friends) directly.
+
+        This does NOT flatten ``state_dict`` keys: the state dict is built from
+        ``_modules``, which still holds everything under ``self.model``, so keys
+        keep their ``model.`` prefix. Only the child *iteration* is reshaped.
         """
         yield "tok_embeddings", self.tok_embeddings
         yield "layers", self.layers
@@ -525,6 +533,19 @@ class HFTransformerModel(nn.Module):
            sequence and only then Q-sharded.
         4. **Shard for context parallelism**, positions included, so RoPE
            follows each token to its rank.
+        4b. **Shard for tensor parallelism** (sequence parallelism): the fused
+           TP GEMMs all-gather the sequence inside each projection, so the
+           forward must be entered holding only this rank's ``T / tp`` slice --
+           otherwise the gather concatenates ``tp`` copies of the full sequence
+           and every sharded weight gradient comes out ``tp`` times too large.
+           Only the token-carrying tensors (``inputs``, ``labels``) are cut:
+           after the in-projection gather, attention and RoPE see the assembled
+           sequence (the CP shard, or the full sequence with CP off), so
+           ``positions`` and the mask keep their CP/full length. This matches
+           torchtitan's joint ``(CP, TP)`` sequence sharding
+           (``hf_sharding.py``'s ``PartitionSpec(DP, (CP, TP), None)``): the CP
+           shard composed with a contiguous TP slice of it is exactly the joint
+           (CP outer, TP inner) split.
         5. **Return the leftover dict as ``extra_kwargs``.** Those are splatted
            into ``forward``, so anything left here must be one of its keyword
            parameters -- ``positions`` and ``attention_masks``, and nothing else.
@@ -560,10 +581,21 @@ class HFTransformerModel(nn.Module):
         if positions is not None:
             positions = positions.reshape(-1)
 
-        # A packed batch restarts its position counter at every document, which
-        # is the only thing that distinguishes "many documents in one sequence"
-        # from "one long document" once the rows are collapsed.
-        packed = positions is not None and bool((positions[1:] < positions[:-1]).any())
+        # Whether the mask must be prebuilt full-length: a packed corpus
+        # (``block_causal``) carries a document structure that is not
+        # recoverable from a CP positions shard, so the mask must exist before
+        # the shard below. This is decided by ``attn_mask_type``, NOT by
+        # scanning ``positions`` for restarts: a restart scan misses the two
+        # shapes a real packed corpus produces -- a document that fills the
+        # whole row (the packing collator splits overlong documents into
+        # single-document rows, whose positions are a plain arange) and a
+        # boundary after a length-1 document (positions ``[0, 0, ...]`` have no
+        # descending edge). The first would crash the CP forward for lack of a
+        # prebuilt mask; the second would disarm the sdpa packed-guard and let
+        # attention cross the boundary silently.
+        packed = positions is not None and (
+            getattr(self.model.config, "attn_mask_type", "causal") == "block_causal"
+        )
 
         # Built before the CP shard, always from the FULL-length positions --
         # which is exactly why this lives here and not in the loop: after the
@@ -607,6 +639,21 @@ class HFTransformerModel(nn.Module):
                 cp_mesh,
                 load_balancer=self._cp_load_balancer,
             )
+
+        tp_mesh = (
+            None if parallel_dims is None else parallel_dims.get_optional_mesh("tp")
+        )
+        if tp_mesh is not None:
+            # Sequence parallelism premise (step 4b above): cut the token-
+            # carrying tensors along the TP axis. Positions are NOT cut --
+            # after the in-projection all-gather, RoPE and attention see the
+            # assembled sequence, so they keep the CP-shard (or, with CP off,
+            # full) length. Synthesize them full-length when the batch did not
+            # carry any: the forward's own ``arange`` default would be sized to
+            # the TP-sharded input and restart at 0 on every rank.
+            if positions is None:
+                positions = torch.arange(inputs.numel(), device=inputs.device)
+            inputs, labels = shard_batch_for_tp(inputs, labels, tp_mesh)
 
         if positions is not None:
             extra_kwargs["positions"] = positions
@@ -765,17 +812,20 @@ class HFTransformerModel(nn.Module):
         # cannot express anyway. Fail loudly rather than run with the mask
         # silently dropped -- that would turn the packed path into full attention.
         #
-        # Packing is detected from ``positions``, not from the sequence length: a
-        # document boundary is exactly where the position counter restarts, which
-        # is the same convention ``get_attention_masks`` masks on. Length would be
-        # the wrong test -- a long-context model may legitimately run a short
-        # single-document sequence.
-        if bool((positions[1:] < positions[:-1]).any()):
+        # Packing is detected from ``attn_mask_type``, not from scanning
+        # ``positions`` for restarts: a restart scan misses a boundary after a
+        # length-1 document (positions ``[0, 0, ...]`` never descend), which
+        # would let sdpa run plain causal attention across the boundary with no
+        # complaint. The flag is derived from the corpus at config build time
+        # (``build_model_config_for``), so it cannot disagree with the batch.
+        if getattr(self.model.config, "attn_mask_type", "causal") == "block_causal":
             raise ValueError(
                 f"Attention backend {self.model.config._attn_implementation!r} "
-                "cannot express the mask for a packed sequence: positions restart "
-                "mid-sequence, so the batch holds more than one document. "
-                "Sequence packing requires CUDA and the flex attention kernel."
+                "cannot express the mask for a packed sequence: this run's "
+                "corpus is packed (attn_mask_type='block_causal'), and a "
+                "tensor-mask backend has no way to keep attention from "
+                "crossing a document boundary. Sequence packing requires CUDA "
+                "and the flex attention kernel."
             )
 
         # A single causal document. Hand the decoder NOTHING and let HF follow its

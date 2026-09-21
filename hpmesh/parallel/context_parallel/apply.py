@@ -88,14 +88,20 @@ def apply_cp(
                 "sequence and cannot recover the unsharded document mask. "
                 "Use strategy='kv_allgather' for packed runs."
             )
+        # TP shards heads first, so what ulysses must divide evenly is each
+        # rank's local head count -- equivalently, the global count must divide
+        # tp * cp (upstream's head_shard_degree in config/validation.py).
+        head_shard_degree = cfg.tp * cp_mesh.size()
         for field_name in ("num_attention_heads", "num_key_value_heads"):
             heads = getattr(model_config, field_name, None) or getattr(
                 model_config, "num_attention_heads", None
             )
-            if heads is None or heads % cp_mesh.size() != 0:
+            if heads is None or heads % head_shard_degree != 0:
                 raise ValueError(
                     f"Ulysses CP shards heads across the group: {field_name} "
-                    f"({heads}) must be divisible by cp={cp_mesh.size()}."
+                    f"({heads}) must be divisible by tp*cp "
+                    f"({cfg.tp}*{cp_mesh.size()}={head_shard_degree}), so the "
+                    f"local heads per rank divide evenly across cp."
                 )
 
     layers = getattr(model, "layers", None)

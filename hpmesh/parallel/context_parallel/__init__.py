@@ -8,7 +8,11 @@ the kernel onto a model. Together they make a CP step runnable end to end.
 
 from .apply import apply_cp
 from .cp_kernel import CPFlexKernel
-from .input_shard import shard_attention_mask_for_cp, shard_batch_for_cp
+from .input_shard import (
+    shard_attention_mask_for_cp,
+    shard_batch_for_cp,
+    shard_batch_for_tp,
+)
 from .primitives import (
     HEAD_DIM,
     TOKEN_DIM,
@@ -29,4 +33,5 @@ __all__ = [
     "cp_redistribute",
     "shard_attention_mask_for_cp",
     "shard_batch_for_cp",
+    "shard_batch_for_tp",
 ]

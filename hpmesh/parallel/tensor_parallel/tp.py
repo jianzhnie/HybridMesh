@@ -14,9 +14,10 @@ HOW its activations move around the cut. This file keeps those apart.
 Weight layout, in the ``nn.Linear`` convention ``weight: [out_features,
 in_features]``:
 
-* ``colwise`` -- output features are split. HF's stored ``[out, in]`` weight is
-  transposed once and sharded over its now-last dim, because
-  ``AllGatherLinear`` consumes ``[in_features, out_features]``.
+* ``colwise`` -- output features are split, i.e. the stored weight is cut on
+  dim 0 into ``[out / tp, in]``. That is the ``w_shard_n = [N / R, K]`` contract
+  ``AllGatherLinear`` documents: the op consumes the native layout and
+  self-transposes inside the GEMM.
 * ``rowwise`` -- input features are split, i.e. the stored weight is cut on dim 1,
   which is the layout ``LinearReduceScatter`` consumes as-is.
 
@@ -26,6 +27,15 @@ projection consumes; the collectives are the sequence-parallel pair (all-gather
 in, reduce-scatter out) fused into the GEMMs. This is the async-TP formulation,
 not the older replicated-activation one -- the arithmetic is identical, but the
 collective never materializes a full-sized activation and can overlap the matmul.
+
+One site cannot host the fused gather: HF attention derives its q/k/v view
+shapes from ``hidden_states.shape``, which a projection that physically
+lengthens the sequence would silently mis-shape. Attention therefore takes the
+same all-gather at the module boundary instead (``_GatherSequenceFirst`` --
+numerically identical, just unfused), its q/k/v projections become plain
+feature-sharded GEMMs (``ColwiseLinearNoGather``), and its o_proj keeps the
+fused reduce-scatter, which returns the activation to the sequence shard. The
+MLP has no such shape derivation, so gate/up/down keep the fused realizers.
 
 Scope: this is the mechanism. No meta-init (weights come from the HF model as
 usual), no fused QKV (HF keeps q/k/v as separate projections), no FP8.
@@ -43,7 +53,13 @@ from torch.distributed.device_mesh import DeviceMesh
 
 from hpmesh.trainer.config import ParallelConfig
 
-from .linear import AllGatherLinear, LinearReduceScatter
+from .linear import (
+    AllGatherLinear,
+    LinearReduceScatter,
+    all_gather_along,
+    all_gather_linear,
+    linear_reduce_scatter,
+)
 
 ShardKind = Literal["colwise", "rowwise"]
 
@@ -70,9 +86,9 @@ def _shard_weight(
 class ColwiseLinear(nn.Module):
     """Column-parallel projection: output features split across TP ranks.
 
-    Stores the weight as ``[in_features, out_features / tp]`` -- the layout
-    ``AllGatherLinear`` expects -- so HF's ``[out, in]`` weight is transposed
-    once at parallelize time, then cut on its last dim.
+    Stores the weight as ``[out_features / tp, in_features]`` -- HF's own
+    ``[out, in]`` layout cut on dim 0, which is the ``w_shard_n = [N / R, K]``
+    layout ``AllGatherLinear`` contracts for (the op self-transposes).
 
     forward all-gathers the sequence shard and leaves the activation feature-
     sharded; backward is the dual (reduce-scatter of the input gradient, local
@@ -80,21 +96,38 @@ class ColwiseLinear(nn.Module):
     """
 
     def __init__(
-        self, weight: torch.Tensor, *, tp_size: int, tp_rank: int, group
+        self,
+        weight: torch.Tensor,
+        *,
+        tp_size: int,
+        tp_rank: int,
+        group,
+        use_symm_mem: bool = True,
     ) -> None:
         super().__init__()
         self.in_features = weight.shape[1]
         self.out_features = weight.shape[0]
-        w_in_out = weight.detach().t().contiguous()
         self.weight = nn.Parameter(
-            _shard_weight(w_in_out, 1, tp_size=tp_size, tp_rank=tp_rank)
+            _shard_weight(weight, 0, tp_size=tp_size, tp_rank=tp_rank)
         )
         self.group = group
+        self.tp_size = tp_size
+        self.use_symm_mem = use_symm_mem
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        return AllGatherLinear.apply(
-            x, self.weight, None, self.group, self.group.group_name
-        )
+        # The collective primitives are strictly 2D (sequence-major rows), but
+        # the HF decoder feeds [B, T, K] hidden states: fold the leading dims
+        # and restore them after, with the row count multiplied by tp_size --
+        # that is the all-gathered sequence length.
+        lead = x.shape[:-1]
+        x_2d = x.reshape(-1, x.shape[-1])
+        if self.use_symm_mem:
+            y_2d = AllGatherLinear.apply(
+                x_2d, self.weight, None, self.group, self.group.group_name
+            )
+        else:
+            y_2d = all_gather_linear(x_2d, self.weight, self.group)
+        return y_2d.reshape(*lead[:-1], lead[-1] * self.tp_size, -1)
 
 
 class RowwiseLinear(nn.Module):
@@ -109,7 +142,13 @@ class RowwiseLinear(nn.Module):
     """
 
     def __init__(
-        self, weight: torch.Tensor, *, tp_size: int, tp_rank: int, group
+        self,
+        weight: torch.Tensor,
+        *,
+        tp_size: int,
+        tp_rank: int,
+        group,
+        use_symm_mem: bool = True,
     ) -> None:
         super().__init__()
         self.in_features = weight.shape[1]
@@ -118,11 +157,91 @@ class RowwiseLinear(nn.Module):
             _shard_weight(weight, 1, tp_size=tp_size, tp_rank=tp_rank)
         )
         self.group = group
+        self.tp_size = tp_size
+        self.use_symm_mem = use_symm_mem
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        return LinearReduceScatter.apply(
-            x, self.weight, None, self.group, self.group.group_name
+        # Mirror of ColwiseLinear.forward: fold to 2D for the collective, then
+        # restore the leading dims with the row count divided by tp_size --
+        # that is the reduce-scattered sequence shard.
+        lead = x.shape[:-1]
+        x_2d = x.reshape(-1, x.shape[-1])
+        if self.use_symm_mem:
+            y_2d = LinearReduceScatter.apply(
+                x_2d, self.weight, None, self.group, self.group.group_name
+            )
+        else:
+            y_2d = linear_reduce_scatter(x_2d, self.weight, self.group)
+        return y_2d.reshape(*lead[:-1], lead[-1] // self.tp_size, -1)
+
+
+class ColwiseLinearNoGather(nn.Module):
+    """Column-parallel projection without the fused sequence all-gather.
+
+    Same weight shard as :class:`ColwiseLinear` (``[out / tp, in]``) but a plain
+    local GEMM, for sites whose input is already full-sequence: the attention
+    boundary gather (``_GatherSequenceFirst``) runs upstream, because HF
+    attention derives q/k/v shapes from ``hidden_states`` and cannot absorb a
+    projection whose output is physically longer than its input.
+
+    The backward is exact without any collective here: the rowwise o_proj's
+    backward all-gather reassembles the full-sequence, total-loss output
+    gradient before attention's backward runs, so the local ``dy.T @ x`` is the
+    complete weight gradient for this rank's feature shard.
+    """
+
+    def __init__(
+        self,
+        weight: torch.Tensor,
+        *,
+        tp_size: int,
+        tp_rank: int,
+        group,
+        use_symm_mem: bool = True,
+    ) -> None:
+        super().__init__()
+        del group, use_symm_mem  # no collective of its own; kept for the engine
+        self.in_features = weight.shape[1]
+        self.out_features = weight.shape[0]
+        self.weight = nn.Parameter(
+            _shard_weight(weight, 0, tp_size=tp_size, tp_rank=tp_rank)
         )
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return torch.nn.functional.linear(x, self.weight)
+
+
+class _GatherSequenceFirst:
+    """Mixin that all-gathers the TP sequence shard before HF attention runs.
+
+    Installed by ``apply_tp`` via a ``__class__`` swap (not a module wrapper),
+    so module paths, ``state_dict`` keys and later attach points (``apply_cp``'s
+    ``_titan_flex_kernel``) are all untouched. ``hidden_states`` arrives as this
+    rank's ``[B, T / tp, K]`` sequence shard and is gathered along the sequence
+    dim to the length the inner forward expects -- the full sequence, or the CP
+    shard when CP is on (the gather spans the TP group only, and a TP group
+    collectively holds exactly one CP shard).
+
+    The gather's autograd dual is a reduce-scatter, which sums each rank's
+    input-gradient contribution back to its own token shard -- the exact dual
+    the sequence-parallel layout needs.
+    """
+
+    def forward(self, hidden_states: torch.Tensor, *args, **kwargs):
+        gathered = all_gather_along(hidden_states, -2, self._tp_seq_group)
+        return super().forward(gathered, *args, **kwargs)
+
+
+def _looks_like_attention(module: nn.Module) -> bool:
+    """HF attention modules hold q/k/v projections as direct attributes.
+
+    This is the site test for the boundary gather: such a module reshapes its
+    projections' outputs by the input's shape, so the gather must happen before
+    it, not inside the projections. Probed structurally rather than by class
+    name because HF spells the class differently per family (``LlamaAttention``,
+    ``Qwen3Attention``, ...).
+    """
+    return all(hasattr(module, name) for name in ("q_proj", "k_proj", "v_proj"))
 
 
 @dataclass(frozen=True)
@@ -193,13 +312,30 @@ def _match(plan: dict[str, ShardingConfig], module_path: str) -> ShardingConfig 
     return None
 
 
+def _supports_symm_mem(tp_mesh: DeviceMesh) -> bool:
+    """Whether the fused symmetric-memory TP collectives can run on this mesh.
+
+    They are CUDA-only; anywhere else the modules fall back to the functional-
+    collective realization of the same math (``all_gather_linear`` /
+    ``linear_reduce_scatter``), which is what makes TP runnable -- and testable
+    -- on CPU/gloo.
+    """
+    if tp_mesh.device_type != "cuda":
+        return False
+    try:
+        import torch.distributed._symmetric_memory  # noqa: F401
+    except ImportError:
+        return False
+    return True
+
+
 def _enable_symm_mem(group) -> None:
     """Register ``group`` for symmetric-memory collectives.
 
     ``torch.ops.symm_mem.fused_all_gather_matmul`` (and its reduce-scatter dual)
     only work on a group registered here; PyTorch does not yet do this
-    automatically for the TP group. CUDA-only, so -- like the fused ops
-    themselves -- this only runs on a machine where TP can run at all.
+    automatically for the TP group. CUDA-only -- call only when
+    ``_supports_symm_mem`` held for the mesh.
     """
     import warnings
 
@@ -225,11 +361,18 @@ def apply_tp(
     if mesh is None or cfg.tp <= 1:
         return model
 
-    group = mesh["tp"].get_group()
-    tp_size = mesh["tp"].size()
-    tp_rank = mesh["tp"].get_local_rank()
+    # Validate the plan before touching the mesh: a plan that resolves to
+    # nothing, or that matches no module, used to leave the model fully
+    # replicated while the run reported a healthy TP setup. Both are loud
+    # errors now, and both fire before any process-group access.
     sharding_plan = _resolve_plan(model, plan)
-    _enable_symm_mem(group)
+    if not sharding_plan:
+        raise ValueError(
+            f"apply_tp with tp={cfg.tp}: {type(model).__name__} provides no TP "
+            "plan (neither a `tp_plan`/`_tp_plan` declaration nor an explicit "
+            "`plan` argument). Refusing to run TP as a silently replicated "
+            "model; shard the projections declaratively or set tp=1."
+        )
 
     targets: list[tuple[str, nn.Linear, ShardingConfig]] = []
     for module_path, module in model.named_modules():
@@ -237,19 +380,63 @@ def apply_tp(
             spec = _match(sharding_plan, module_path)
             if spec is not None:
                 targets.append((module_path, module, spec))
+    if not targets:
+        raise ValueError(
+            f"apply_tp with tp={cfg.tp}: the plan patterns "
+            f"{sorted(sharding_plan)} matched no nn.Linear on "
+            f"{type(model).__name__}. The patterns are spelled relative to the "
+            "module tree being parallelized; check the prefix (e.g. a wrapper's "
+            "`model.` prefix) rather than training a replicated model by "
+            "mistake."
+        )
+
+    group = mesh["tp"].get_group()
+    tp_size = mesh["tp"].size()
+    tp_rank = mesh["tp"].get_local_rank()
+    use_symm_mem = _supports_symm_mem(mesh["tp"])
+    if use_symm_mem:
+        _enable_symm_mem(group)
 
     # Deepest paths first, so replacing a module never hides an inner target.
+    attention_parents: dict[str, nn.Module] = {}
     for module_path, inner, spec in sorted(targets, key=lambda t: -t[0].count(".")):
         if inner.bias is not None:
             raise ValueError(
                 f"TP over {module_path} has a bias, which this minimal engine does "
                 "not shard; HF decoder projections are bias-free."
             )
-        wrapped = spec.implementation(
-            inner.weight, tp_size=tp_size, tp_rank=tp_rank, group=group
-        )
         parent_path, _, attr = module_path.rpartition(".")
         parent = model.get_submodule(parent_path) if parent_path else model
+
+        implementation = spec.implementation
+        if spec.kind == "colwise" and _looks_like_attention(parent):
+            # HF attention reshapes q/k/v by the input's shape, so the fused
+            # in-GEMM sequence gather would silently mis-shape them. Take the
+            # same gather at the module boundary instead (below) and give the
+            # projection a plain feature-sharded GEMM. Only the default
+            # realizer is swapped out; an explicitly provided one is the
+            # caller's responsibility.
+            if implementation is ColwiseLinear:
+                implementation = ColwiseLinearNoGather
+            attention_parents[parent_path] = parent
+
+        wrapped = implementation(
+            inner.weight,
+            tp_size=tp_size,
+            tp_rank=tp_rank,
+            group=group,
+            use_symm_mem=use_symm_mem,
+        )
         setattr(parent, attr, wrapped)
+
+    for parent in attention_parents.values():
+        if getattr(parent, "_tp_seq_group", None) is not None:
+            continue  # already gathered (apply_tp is idempotent per module)
+        parent._tp_seq_group = group
+        parent.__class__ = type(
+            f"TPGather{type(parent).__name__}",
+            (_GatherSequenceFirst, type(parent)),
+            {},
+        )
 
     return model

@@ -52,6 +52,8 @@ Profiling (off unless enabled; both write under --dump_folder):
 
 from __future__ import annotations
 
+import os
+
 from transformers import HfArgumentParser
 
 from .config import (
@@ -113,7 +115,29 @@ def parse_config() -> HybridMeshConfig:
 
 
 def main() -> None:
-    Trainer(parse_config()).train()
+    cfg = parse_config()
+    trainer = Trainer(cfg)
+    if cfg.checkpoint.create_seed_checkpoint:
+        # Mirrors torchtitan ``train.py``: a seed checkpoint is the unsharded
+        # step-0 model, so it must be written from a single process (any
+        # sharding would bake one rank's shard layout into the artifact), and
+        # loading treats step-0 as model-only (see ``checkpointer/base.py``).
+        if int(os.environ.get("WORLD_SIZE", "1")) != 1:
+            raise RuntimeError(
+                "Must create a seed checkpoint using a single device, to "
+                "disable sharding."
+            )
+        if not cfg.checkpoint.enable:
+            raise RuntimeError(
+                "Must enable checkpointing when creating a seed checkpoint."
+            )
+        try:
+            if trainer.checkpointer.save(curr_step=0, last_step=True):
+                print("Created seed checkpoint at step 0")
+        finally:
+            trainer.close()
+        return
+    trainer.train()
 
 
 if __name__ == "__main__":

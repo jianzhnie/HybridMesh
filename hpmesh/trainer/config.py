@@ -272,6 +272,19 @@ class ParallelConfig:
     pp and dp_replicate are outer dimensions unaffected by this constraint.
     """
 
+    router_aux_loss_coef: float | None = None
+    """
+    Coefficient of the per-forward MoE load-balance loss, for HF models whose
+    config does not carry one.
+
+    The swap reads ``router_aux_loss_coef`` off the HF config when it is there
+    (Qwen3Moe has it). DeepSeek-V3 does not -- its config has no aux-loss field
+    at all -- so without this the balance loss its design calls for
+    (DeepSeek-V3 Sec 2.1.2, the sequence-wise complementary loss) would never be
+    instantiated. ``None`` keeps the HF config's value, or no loss when it has
+    none; setting it overrides for every MoE layer.
+    """
+
     def non_dp_sizes(self) -> int:
         """Product of the fixed (non-derivable) degrees: dp_replicate*tp*pp*cp*ep."""
         return (

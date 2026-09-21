@@ -25,9 +25,6 @@ from ..parallel_dims import ParallelDims
 
 logger = logging.getLogger(__name__)
 
-_DENSE_STORAGE_AXES = ["dp_replicate", "dp_shard", "cp", "tp"]
-_SPARSE_STORAGE_AXES = ["dp_replicate", "efsdp", "ep"]
-
 
 def iter_transformer_layers(layers: nn.Module) -> Iterator[tuple[Any, nn.Module]]:
     """Yield ``(index, block)`` for the transformer block container.
@@ -41,51 +38,78 @@ def iter_transformer_layers(layers: nn.Module) -> Iterator[tuple[Any, nn.Module]
     return iter(enumerate(layers))
 
 
-def resolve_fsdp_mesh(
-    parallel_dims: ParallelDims,
-) -> tuple[DeviceMesh, DataParallelMeshDims | None]:
-    """Select the dense storage mesh and DataParallelMeshDims.
+def resolve_fsdp_mesh(parallel_dims: ParallelDims) -> DeviceMesh:
+    """Build the dense FSDP-only submesh.
 
-    ``dp_shard`` is always included (force-kept-alive in the dense storage mesh
-    even at size 1) so FSDP can pick the DP submesh out of the multi-axis
-    storage mesh inside ``DeviceMesh._concatenate([dp_mesh, tp_mesh])``.
+    hpmesh's HF models hold plain tensors, so ``fully_shard`` cannot take an
+    explicit ``DataParallelMeshDims``: torch requires every parameter to be a
+    DTensor on the full SPMD mesh in that mode ("When dp_mesh_dims is
+    provided, all parameters must be DTensors ... via distribute_module").
+    Without mesh dims, torch reads the mesh by shape alone: 1-D means plain
+    FSDP, 2-D means HSDP (dim 0 replicates, dim 1 shards), and anything
+    higher-dimensional raises. Handing FSDP the raw multi-axis storage mesh
+    therefore mis-assigns the axes whenever that mesh also carries ``tp`` or
+    more than two active axes.
+
+    Instead, rebuild a dedicated submesh over exactly the axes torchtitan
+    declares in its ``DataParallelMeshDims``:
+
+    * shard: ``dp_shard`` (force-kept-alive in the dense storage mesh even at
+      size 1, so pure DDP gets a well-defined HSDP shard axis) plus ``cp``
+      when CP is enabled, flattened into a single axis when both are active
+      (torchtitan's flattened shard semantics);
+    * replicate: ``dp_replicate`` when replication is enabled.
+
+    The result is at most 2-D with the replicate axis first, so torch's
+    default reading coincides with the intended one. A size-1 result means no
+    DP/CP axis is active and FSDP is a no-op; the caller checks for that.
     """
-    storage_mesh = parallel_dims.get_activated_mesh(_DENSE_STORAGE_AXES)
-    assert storage_mesh is not None
-
-    if storage_mesh.size() == 1:
-        # ``assert_type`` filters out inactive size-1 axes, so params get no
-        # annotations under a size-1 full mesh. That leaves ``fully_shard()``
-        # with no SPMD annotations to translate to DTensor params, so do not
-        # pass a DataParallelMeshDims object to FSDP.
-        return storage_mesh, None
-
     shard_axes = ["dp_shard"]
     if parallel_dims.cp_enabled:
         shard_axes.append("cp")
-    shard: str | tuple[str, ...] = (
-        tuple(shard_axes) if len(shard_axes) > 1 else shard_axes[0]
+    replicate_axis = "dp_replicate" if parallel_dims.dp_replicate_enabled else None
+
+    axes = ([replicate_axis] if replicate_axis else []) + shard_axes
+    submesh = parallel_dims.get_optional_mesh(axes)
+    assert submesh is not None  # dp_shard is always kept alive
+
+    if replicate_axis is None and len(shard_axes) == 1:
+        # 1-D: plain FSDP over the shard axis.
+        return submesh
+    if replicate_axis is None:
+        # 2-D (dp_shard, cp): flatten into torchtitan's single shard axis.
+        return submesh._flatten("dp_shard_cp")
+    if len(shard_axes) == 1:
+        # 2-D (dp_replicate, dp_shard): HSDP as torch reads it by default.
+        return submesh
+    # 3-D (dp_replicate, dp_shard, cp): DeviceMesh has no partial flatten, so
+    # rebuild from the rank tensor. Row-major reshape keeps dp_replicate on
+    # dim 0 and folds (dp_shard, cp) into a single shard dim 1.
+    flat_ranks = submesh.mesh.reshape(submesh.mesh.size(0), -1)
+    return DeviceMesh(
+        submesh.device_type,
+        flat_ranks,
+        mesh_dim_names=(replicate_axis, "dp_shard_cp"),
     )
-    replicate = "dp_replicate" if parallel_dims.dp_replicate_enabled else None
-
-    return storage_mesh, DataParallelMeshDims(shard=shard, replicate=replicate)
 
 
-def resolve_sparse_fsdp_mesh(
-    parallel_dims: ParallelDims,
-) -> tuple[DeviceMesh | None, DataParallelMeshDims | None]:
+def resolve_sparse_fsdp_mesh(parallel_dims: ParallelDims) -> DeviceMesh | None:
     """Sparse counterpart of ``resolve_fsdp_mesh`` for routed experts.
 
-    Returns ``(None, None)`` when EP is disabled; otherwise the sparse
-    storage mesh + sparse DP axes. The FSDP axis is ``efsdp`` and
-    ``dp_replicate`` is shared with the dense path.
+    Returns ``None`` when EP is disabled. Otherwise rebuilds the FSDP-only
+    submesh over ``efsdp`` (shard) and, when enabled, ``dp_replicate``
+    (replicate) -- the axes torchtitan declares as
+    ``DataParallelMeshDims(shard="efsdp", replicate="dp_replicate")``. The
+    raw sparse storage mesh also carries the ``ep`` axis, which torch's
+    default 2-D reading would mistake for the shard axis, so it is excluded
+    here the same way ``tp`` is excluded from the dense mesh.
     """
     if not parallel_dims.ep_enabled:
-        return None, None
-    sparse_mesh = parallel_dims.get_activated_mesh(_SPARSE_STORAGE_AXES)
-    assert sparse_mesh is not None
-    replicate = "dp_replicate" if parallel_dims.dp_replicate_enabled else None
-    return sparse_mesh, DataParallelMeshDims(shard="efsdp", replicate=replicate)
+        return None
+    axes = (["dp_replicate"] if parallel_dims.dp_replicate_enabled else []) + ["efsdp"]
+    submesh = parallel_dims.get_optional_mesh(axes)
+    assert submesh is not None  # efsdp is kept alive whenever ep > 1
+    return submesh
 
 
 def disable_fsdp_gradient_division(model: nn.Module) -> None:

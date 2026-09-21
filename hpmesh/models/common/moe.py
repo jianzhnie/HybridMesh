@@ -14,12 +14,24 @@ changed:
   rested with an explicit-cast forward that matched it only in precision, not in
   dtype). The router imports it from there, as upstream does.
 * the ``spmd_types`` blocks are gone (no runtime effect), and
-  ``MicrobatchWiseLoadBalanceLoss``'s Partial -> Invariant reduction is a plain
-  autograd-aware ``all_reduce`` (see its ``_reduce_token_partials``) instead of
-  ``spmd.redistribute``. The arithmetic is the same: an all-reduce forward with
-  an all-reduce backward.
+  ``MicrobatchWiseLoadBalanceLoss``'s Partial -> Invariant reduction is the
+  ``_PartialToInvariantAllReduce`` autograd Function (all-reduce forward,
+  identity backward) instead of ``spmd.redistribute`` -- the same semantics,
+  which ``torch.distributed.nn.all_reduce`` would NOT give: its backward is a
+  second all-reduce, multiplying the injected gradient by the group size.
 * ``MicrobatchWiseLoadBalanceLoss`` is ported and wired: the router runs it
   on each training forward through its ``aux_loss`` slot, matching upstream.
+* the auxiliary-loss-free bias is updated by ``MoE.update_expert_bias``, which
+  the *trainer* calls once per optimizer step (torchtitan reaches the same state
+  through an optimizer hook; hpmesh has no hook registry, and the trainer
+  already owns the step boundary). The rule is the same sign-based, mean-centred
+  nudge, and the counter is drained there.
+* node-limited routing (DeepSeek-V3's ``n_group``/``topk_group``) lives in
+  ``_select_experts_within_groups``, reached by passing
+  ``num_expert_groups``/``num_limited_groups``. One deliberate difference from
+  torchtitan and HF: the out-of-group experts are masked to ``-inf`` rather than
+  to ``0.0``, because those two only agree while the additive ``expert_bias_E``
+  leaves every score positive. See ``_select_experts_within_groups``.
 
 Shape legend, scoped to this file: ``T`` = tokens, ``D`` = model dimension,
 ``E`` = experts, ``K`` = experts per token (top-k), ``e`` = local experts under
@@ -29,13 +41,16 @@ dimension.
 
 from __future__ import annotations
 
-from typing import Literal
+from collections.abc import Sequence
+from typing import TYPE_CHECKING, Literal
 
 import torch
 import torch.distributed as dist
-import torch.distributed.nn.functional as dist_nn
 import torch.nn as nn
 import torch.nn.functional as F
+
+if TYPE_CHECKING:
+    from ...parallel.parallel_dims import ParallelDims
 
 from hpmesh.utils.spmd_context import spmd_mesh_group, spmd_sparse_mesh
 
@@ -45,11 +60,21 @@ from .linear import RouterGateLinear
 from .token_dispatcher import LocalTokenDispatcher
 
 __all__ = [
+    "MOE_LAYER_ATTRS",
     "MoE",
     "MicrobatchWiseLoadBalanceLoss",
     "RoutedExperts",
     "TokenChoiceTopKRouter",
+    "register_moe_load_balancing_hook",
 ]
+
+# The decoder-layer attributes that may hold a MoE block. Every model family
+# transformers 5.x supports keeps it on ``mlp``, dense layers included -- a
+# dense ``mlp`` is simply not a MoE and is skipped. The swap for an HF model
+# replaces the block in the attribute it was found under, so this list is shared
+# with it rather than duplicated: the two must agree or the expert-bias hook
+# silently finds no layers on a real swapped model.
+MOE_LAYER_ATTRS = ("mlp",)
 
 
 class TokenChoiceTopKRouter(nn.Module):
@@ -64,6 +89,13 @@ class TokenChoiceTopKRouter(nn.Module):
         route_norm: renormalize the selected K scores to sum to 1.
         route_scale: multiply the final scores, e.g. DeepSeek-V3's
             ``routed_scaling_factor``.
+        num_expert_groups: split the ``E`` experts into this many contiguous
+            groups and restrict each token's top-K to ``num_limited_groups`` of
+            them -- DeepSeek-V3's node-limited routing, where a group is a node
+            and the restriction caps inter-node all-to-all. ``None`` disables
+            grouping and leaves plain top-K over all ``E``.
+        num_limited_groups: how many groups a token may draw from. Required
+            when ``num_expert_groups`` is set.
         aux_loss: an optional ``AuxLoss`` (e.g.
             ``MicrobatchWiseLoadBalanceLoss``) run on the scores each training
             forward; its gradient is injected on the top-k scores' backward
@@ -79,15 +111,41 @@ class TokenChoiceTopKRouter(nn.Module):
         score_func: Literal["softmax", "sigmoid", "sqrtsoftplus"] = "sigmoid",
         route_norm: bool = False,
         route_scale: float = 1.0,
+        num_expert_groups: int | None = None,
+        num_limited_groups: int | None = None,
         aux_loss: AuxLoss | None = None,
     ) -> None:
         super().__init__()
+        if num_expert_groups is not None:
+            if num_limited_groups is None:
+                raise ValueError(
+                    "num_limited_groups must be set when num_expert_groups is set"
+                )
+            if num_limited_groups > num_expert_groups:
+                raise ValueError(
+                    f"num_limited_groups ({num_limited_groups}) cannot exceed "
+                    f"num_expert_groups ({num_expert_groups})"
+                )
+            if num_experts % num_expert_groups != 0:
+                raise ValueError(
+                    f"num_experts ({num_experts}) must be divisible by "
+                    f"num_expert_groups ({num_expert_groups})"
+                )
+            # The group score is the sum of each group's top-2 expert scores,
+            # so a one-expert group has no second score to add.
+            if num_experts // num_expert_groups < 2:
+                raise ValueError(
+                    f"num_experts_per_group ({num_experts // num_expert_groups}) "
+                    "must be >= 2 to form a group score"
+                )
         self.gate = RouterGateLinear(dim, num_experts)
         self.num_experts = num_experts
         self.top_k = top_k
         self.score_func = score_func
         self.route_norm = route_norm
         self.route_scale = route_scale
+        self.num_expert_groups = num_expert_groups
+        self.num_limited_groups = num_limited_groups
         self.aux_loss = aux_loss
 
     def _select_experts(
@@ -103,6 +161,52 @@ class TokenChoiceTopKRouter(nn.Module):
         scores_for_choice_TE = (
             scores_TE if expert_bias_E is None else scores_TE + expert_bias_E
         )
+        if self.num_expert_groups is None:
+            return torch.topk(
+                scores_for_choice_TE, k=self.top_k, dim=-1, sorted=False
+            ).indices
+        return self._select_experts_within_groups(scores_for_choice_TE)
+
+    def _select_experts_within_groups(
+        self, scores_for_choice_TE: torch.Tensor
+    ) -> torch.Tensor:
+        """Node-limited top-K: pick the top groups first, then the top experts.
+
+        A group's score is the sum of its two highest expert scores (DeepSeek-V3
+        Sec 2.1.1), so the groups that win are the ones with a strong pair of
+        experts in them rather than a single lucky one.
+
+        Everything runs on ``scores_for_choice`` -- the sigmoid scores with the
+        load-balancing bias already added -- because the bias is what steers
+        which experts win. The caller still gathers the routing *weight* from
+        the unbiased scores, so the bias shifts the choice and never the value.
+
+        ``E`` is laid out as ``num_expert_groups`` contiguous runs of equal size,
+        which is what makes the restriction a statement about where the experts
+        physically live.
+        """
+        assert self.num_expert_groups is not None
+        assert self.num_limited_groups is not None
+        num_experts_per_group = self.num_experts // self.num_expert_groups
+
+        scores_TGP = scores_for_choice_TE.unflatten(
+            -1, (self.num_expert_groups, num_experts_per_group)
+        )
+        group_scores_TG = scores_TGP.topk(2, dim=-1).values.sum(dim=-1)
+        selected_group_ids_TL = torch.topk(
+            group_scores_TG, k=self.num_limited_groups, dim=-1, sorted=False
+        ).indices
+
+        unselected_groups_TG = torch.ones_like(group_scores_TG, dtype=torch.bool)
+        unselected_groups_TG.scatter_(-1, selected_group_ids_TL, False)
+        # -inf rather than the 0.0 HF uses: the bias can push
+        # ``scores_for_choice`` negative, and a masked 0.0 would then outrank a
+        # real expert inside a selected group. The two agree whenever every
+        # ``scores_for_choice`` is positive, which is the case until the bias
+        # grows past the smallest score.
+        scores_for_choice_TE = scores_TGP.masked_fill(
+            unselected_groups_TG.unsqueeze(-1), float("-inf")
+        ).flatten(-2)
         return torch.topk(
             scores_for_choice_TE, k=self.top_k, dim=-1, sorted=False
         ).indices
@@ -250,8 +354,9 @@ class MoE(nn.Module):
         self.load_balance_coeff = load_balance_coeff
 
         # Auxiliary-loss-free load balancing (https://arxiv.org/abs/2408.15664):
-        # a per-expert bias nudged by observed load, updated by an optimizer hook
-        # so it sees a whole step rather than one microbatch.
+        # a per-expert bias nudged by observed load, updated once per optimizer
+        # step (``update_expert_bias``) so it sees a whole accumulation cycle
+        # rather than one microbatch.
         if load_balance_coeff is not None:
             if load_balance_coeff <= 0.0:
                 raise ValueError(
@@ -271,6 +376,34 @@ class MoE(nn.Module):
             torch.zeros(num_experts, dtype=torch.float32),
             persistent=False,
         )
+
+    @torch.no_grad()
+    def update_expert_bias(self) -> None:
+        """Nudge ``expert_bias_E`` toward balance from the accumulated counts.
+
+        Called once per optimizer step, after ``tokens_per_expert_E`` has been
+        turned into this layer's expert counts (the caller is responsible for
+        summing the counter over the axes that shard a token stream). The step
+        is sign-based and then mean-centred:
+
+        * the sign makes the step size independent of how lopsided the load is,
+          so a single runaway expert cannot dominate the update -- and it is
+          also what makes the doubled count from activation checkpointing
+          harmless, since ``sign`` of a scaled value is the same sign;
+        * centring keeps ``sum(expert_bias_E) == 0``, so the bias shifts which
+          experts win without shifting the routed output as a whole.
+
+        This mirrors torchtitan's ``_update_expert_bias``. It differs from
+        Eq. 14 of the paper, which moves only the most- and least-loaded
+        experts; this moves every expert by one step whose sign depends on
+        whether it is above or below the mean.
+        """
+        if self.expert_bias_E is None or self.load_balance_coeff is None:
+            return
+        counts_E = self.tokens_per_expert_E
+        delta_E = self.load_balance_coeff * torch.sign(counts_E.mean() - counts_E)
+        self.expert_bias_E.add_(delta_E - delta_E.mean())
+        self.tokens_per_expert_E.zero_()
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """Route, run the experts, and sum the routed and shared outputs.
@@ -313,6 +446,134 @@ class MoE(nn.Module):
         if self.shared_experts is not None:
             out_TD = out_TD + self.shared_experts(x_TD)
         return out_TD
+
+
+def _iter_moe_layers(model_part: nn.Module) -> list[MoE]:
+    """The MoE blocks of one model part, in a stable order.
+
+    Every model part is a ``HFTransformerModel``, whose ``layers`` is a
+    ``ModuleList``. A dense layer carries no MoE -- and the swap leaves the block
+    *in the attribute it already held* (``mlp``, for every family) rather than
+    parking it under a new name. So the lookup has to walk the same names the
+    swap writes to (``MOE_LAYER_ATTRS``); anything else finds nothing on a real
+    model, which is the worst failure mode available here -- the register
+    function below then no-ops and the bias is never updated at all.
+    """
+    layers = getattr(model_part, "layers", None)
+    if not isinstance(layers, nn.ModuleList):
+        return []
+    found: list[MoE] = []
+    for layer in layers:
+        for attr in MOE_LAYER_ATTRS:
+            block = getattr(layer, attr, None)
+            if isinstance(block, MoE):
+                found.append(block)
+                break
+    return found
+
+
+def _update_expert_bias(
+    mappers: list[tuple[nn.Module, list[MoE]]],
+    parallel_dims: ParallelDims | None,
+) -> None:
+    """Turn every MoE's accumulated token counts into one bias update.
+
+    ``tokens_per_expert_E`` counted only the tokens *this* rank saw, so it is
+    summed over every axis that shards one token stream before it means
+    anything. Three collectives, for three different reasons:
+
+    * ``dp`` -- each data-parallel rank processes a different slice of the
+      batch, so the counts are partial over it. This is the one that matters
+      for a plain FSDP run: without it every rank would balance its own shard
+      and the biases would drift apart.
+    * ``cp`` -- the sequence is split across the context-parallel ranks, so the
+      tokens are partial there too.
+    * ``tp`` -- only when EP is on: EP borrows ranks from TP, so the token
+      stream is sharded over TP as well. Without EP every TP rank already sees
+      the same full stream, so summing would multiply the counts by ``tp``
+      (harmless for a sign-based step, but wrong for anything else reading it).
+
+    Pipeline parallelism needs no collective here: it is a layer split, not a
+    token split, so each stage's blocks see their own whole token stream.
+
+    The expert dimension is deliberately *not* reduced. ``tokens_per_expert_E``
+    is the global per-expert count -- the routing map spans all ``E`` experts on
+    every EP rank, before the dispatcher narrows anything to a local shard -- so
+    an EP all-reduce would double-count.
+
+    Because every rank ends up with identical counts, the identical update is
+    applied identically and ``expert_bias_E`` stays replicated, which is what
+    the forward assumes.
+    """
+    layers_by_part = [layers for _, layers in mappers if layers]
+    if not layers_by_part:
+        return
+
+    counts_LE = torch.vstack(
+        [
+            torch.stack([moe.tokens_per_expert_E for moe in layers])
+            for layers in layers_by_part
+        ]
+    )
+
+    axes = ["dp", "cp"] + (["tp"] if parallel_dims and parallel_dims.ep_enabled else [])
+    for axis in axes:
+        mesh = None if parallel_dims is None else parallel_dims.get_optional_mesh(axis)
+        if mesh is None:
+            continue
+        dist.all_reduce(counts_LE, op=dist.ReduceOp.SUM, group=mesh.get_group())
+
+    row = 0
+    for _, layers in mappers:
+        for moe in layers:
+            moe.tokens_per_expert_E.copy_(counts_LE[row])
+            row += 1
+            moe.update_expert_bias()
+
+
+def register_moe_load_balancing_hook(
+    optimizer: torch.optim.Optimizer,
+    model_parts: Sequence[nn.Module],
+    parallel_dims: ParallelDims | None,
+) -> None:
+    """Register the step pre-hook that updates every MoE's expert bias.
+
+    A *pre*-hook, so the counts it reads are a whole accumulation window's and
+    the bias the next forward reads is the one the step just earned. That is
+    also torchtitan's placement; hpmesh reaches the same point through PyTorch's
+    own hook machinery rather than a hook registry.
+
+    A no-op when no model part carries a MoE layer, so a dense run pays neither
+    the traversal nor an empty collective.
+    """
+    mappers = [(part, _iter_moe_layers(part)) for part in model_parts]
+    if not any(layers for _, layers in mappers):
+        return
+    optimizer.register_step_pre_hook(
+        lambda *args, **kwargs: _update_expert_bias(mappers, parallel_dims)
+    )
+
+
+class _PartialToInvariantAllReduce(torch.autograd.Function):
+    """All-reduce in forward, identity in backward (Partial -> Invariant).
+
+    The reduced sum is identical on every rank of the group, and every rank
+    computes the same downstream loss from it, so the gradient of that loss
+    w.r.t. one rank's partial equals the gradient w.r.t. the sum itself
+    (``d sum / d partial = 1``). ``torch.distributed.nn.all_reduce`` instead
+    all-reduces on the backward too, summing every rank's identical gradient
+    and multiplying what reaches the router by the group size.
+    """
+
+    @staticmethod
+    def forward(ctx, partial_E, group):  # pyrefly: ignore[bad-override]
+        reduced_E = partial_E.clone()
+        dist.all_reduce(reduced_E, op=dist.ReduceOp.SUM, group=group)
+        return reduced_E
+
+    @staticmethod
+    def backward(ctx, grad_out):  # pyrefly: ignore[bad-override]
+        return grad_out, None
 
 
 class MicrobatchWiseLoadBalanceLoss(AuxLoss):
@@ -363,24 +624,23 @@ class MicrobatchWiseLoadBalanceLoss(AuxLoss):
     ) -> torch.Tensor:
         """Partial -> Invariant all-reduce over the token-partition axes.
 
-        An all-reduce in forward with an all-reduce backward: the reduced sums,
+        An all-reduce in forward with an identity backward: the reduced sums,
         and hence the loss and its gradient, are identical on every rank of the
-        group, so each rank's backward contributes the same gradient and the
-        sum of those contributions is what the router needs.
+        group, and each rank's local partial is one summand of them, so the
+        gradient w.r.t. the partial is the gradient w.r.t. the sum.
 
         Axes are resolved by name through ``spmd_mesh_group``, so no DeviceMesh
         escapes into model code and an inactive axis is skipped rather than run
         as a size-1 no-op collective. A ``None`` group means the axis is not
-        active -- either the axis is size 1, or no SPMD mesh has been registered
-        for this process. The latter is the case for hpmesh today: the trainer
-        does not call ``set_spmd_meshes``, so this degrades to no reduction,
-        which is correct while nothing shards the token dim.
+        active -- either the axis is size 1, or no SPMD mesh is registered for
+        this process (the trainer registers one via ``spmd_context``; a bare
+        single-process run has none, and no reduction is correct there).
         """
         for axis in axes:
             group = spmd_mesh_group(axis)
             if group is None:
                 continue
-            partial_E = dist_nn.all_reduce(partial_E, op=dist.ReduceOp.SUM, group=group)
+            partial_E = _PartialToInvariantAllReduce.apply(partial_E, group)
         return partial_E
 
     def forward(
@@ -404,6 +664,13 @@ class MicrobatchWiseLoadBalanceLoss(AuxLoss):
         """
         # DP is deliberately not reduced: each DP rank owns an independent
         # token stream, so only the axes that shard one stream are summed over.
+        # ``tp`` belongs under EP for the same reason as upstream: hpmesh's TP
+        # is the sequence-parallel formulation (``tensor_parallel/tp.py``
+        # reduce-scatters the residual stream back to a sequence shard), so a
+        # TP'd MoE would see a tp-partial token stream. Today the combination
+        # is unreachable -- ``apply_tp`` refuses every supported MoE family's
+        # HF tp_plan (unsupported spec strings) -- so the tp term is dormant
+        # rather than wrong: dropping it would under-reduce if TP+EP ever ran.
         axes = ("cp", "tp") if spmd_sparse_mesh() is not None else ("cp",)
 
         # Eq. 18: per-expert routing counts, then f_i = E * counts_i /
