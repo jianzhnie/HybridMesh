@@ -863,3 +863,47 @@ def test_num_flops_per_token_defaults_kv_heads_to_the_head_count(
     explicit = hf_wrapper.num_flops_per_token(cfg)
 
     assert unset == explicit
+
+
+def test_the_processor_method_forwards_the_visibility_check(monkeypatch) -> None:
+    """``MetricsProcessor.ensure_pp_loss_visible`` must reach the function.
+
+    The standalone function was tested and correct, and nothing called it: a PP
+    run whose ``LOG_RANK`` missed the loss rank trained fine and printed nothing,
+    which reads exactly like a hang. This pins the wiring -- and, just as
+    importantly, that the call site does not have to build its own ``Color``:
+    the processor forwards its own, so the warning cannot print in a different
+    color scheme than the metrics beside it.
+    """
+    monkeypatch.setenv("LOG_RANK", "0")
+    processor = MetricsProcessor(
+        Config(),
+        parallel_dims=_FakeParallelDims(pp=4, world_size=16),
+        pp_schedule="1F1B",
+    )
+
+    with _capturing() as capture:
+        processor.ensure_pp_loss_visible()
+
+    assert any("loss is not visible" in m for m in capture.messages())
+
+
+def test_the_processor_method_is_silent_when_there_is_nothing_to_say(
+    monkeypatch,
+) -> None:
+    """No parallel dims (single process) and a watched rank are both no-ops."""
+    monkeypatch.setenv("LOG_RANK", "0")
+
+    with _capturing() as capture:
+        MetricsProcessor(Config(), parallel_dims=None).ensure_pp_loss_visible()
+    assert capture.messages() == []
+
+    watched = MetricsProcessor(
+        Config(),
+        parallel_dims=_FakeParallelDims(pp=4, world_size=16),
+        pp_schedule="1F1B",
+    )
+    monkeypatch.setenv("LOG_RANK", "0,12")
+    with _capturing() as capture:
+        watched.ensure_pp_loss_visible()
+    assert not any("loss is not visible" in m for m in capture.messages())

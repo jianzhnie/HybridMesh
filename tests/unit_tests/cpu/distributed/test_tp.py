@@ -146,6 +146,62 @@ def test_a_wrapper_tp_plan_matches_the_modules_it_exposes() -> None:
     assert not any(path.endswith("lm_head") for path in matched)
 
 
+def test_qwen3_plan_resolves_rather_than_raising_on_its_qk_norms() -> None:
+    """The plan an hpmesh-supported family actually ships must resolve.
+
+    Qwen3 -- the architecture the repo's own example trains -- marks
+    ``q_norm`` / ``k_norm`` with HF's ``replicated_with_grad_allreduce``, a spec
+    ``_resolve_plan`` had no branch for. Every Qwen3 TP run therefore died in
+    ``apply_tp`` before touching a weight, and no test caught it because the
+    only plan under test was a hand-written ``{colwise, rowwise}`` map.
+
+    The two branches mean different things and both matter here: a norm entry
+    resolves to ``None`` (left whole on every rank, its gradient summed by
+    ``Trainer._allreduce_replicated_tp_grads``), while the projections still
+    resolve to real realizers.
+    """
+    from hpmesh.models.hf_wrapper import HFTransformerModel, build_model_config
+
+    config = build_model_config(
+        "qwen3",
+        seq_len=32,
+        arch_overrides={
+            "vocab_size": 32,
+            "hidden_size": 8,
+            "intermediate_size": 16,
+            "num_hidden_layers": 2,
+            "num_attention_heads": 2,
+            "num_key_value_heads": 2,
+        },
+    )
+    model = HFTransformerModel(config)
+
+    # The plan is the real one, so the entry that used to raise is present.
+    assert "replicated_with_grad_allreduce" in model.tp_plan.values()
+
+    plan = _resolve_plan(model, None)  # must not raise
+
+    norms = [p for p in plan if p.endswith(("q_norm", "k_norm"))]
+    assert norms, "q_norm/k_norm are not in the plan -- this test is vacuous"
+    assert all(plan[p] is None for p in norms), "a norm must not be sharded"
+
+    matched = [
+        path
+        for path, mod in model.named_modules()
+        if isinstance(mod, nn.Linear) and _match(plan, path) is not None
+    ]
+    # 7 projections per layer x 2; the norms are neither nn.Linear nor sharded.
+    assert len(matched) == 14
+    # And the norms really are parameters of this model, so leaving them
+    # unsharded is a decision about a module that exists.
+    norm_params = [
+        n
+        for n, _ in model.named_parameters()
+        if n.endswith(("q_norm.weight", "k_norm.weight"))
+    ]
+    assert norm_params
+
+
 def test_apply_tp_is_a_noop_when_tp_is_one() -> None:
     model = nn.Linear(4, 4)
     cfg = ParallelConfig()  # tp defaults to 1

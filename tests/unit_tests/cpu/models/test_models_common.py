@@ -19,6 +19,7 @@ from hpmesh.models.common.feed_forward import (
     SigmoidGatedFeedForward,
     compute_ffn_hidden_dim,
 )
+from hpmesh.models.common.grouped_experts import GroupedExperts
 from hpmesh.models.common.linear import PartialBiasRowwiseLinear, RouterGateLinear
 from hpmesh.models.common.moe import TokenChoiceTopKRouter
 
@@ -389,3 +390,150 @@ def test_a_malformed_group_config_is_rejected(kwargs: dict, message: str) -> Non
     """Every one of these would otherwise fail deep inside a topk with a shape error."""
     with pytest.raises(ValueError, match=message):
         TokenChoiceTopKRouter(_E, _D, _K, **kwargs)
+
+
+# -- GroupedExperts: the two expert-GEMM paths -------------------------------
+
+
+def _grouped(*, use_grouped_mm: bool | None, dtype=torch.float32, seed: int = 0):
+    """A real (not ``torch.empty``) GroupedExperts, so comparisons mean something."""
+    torch.manual_seed(seed)
+    module = GroupedExperts(
+        dim=16, hidden_dim=32, num_experts=4, use_grouped_mm=use_grouped_mm
+    ).to(dtype)
+    with torch.no_grad():
+        for p in module.parameters():
+            p.normal_(0, 0.03)
+    return module
+
+
+_COUNTS = torch.tensor([5, 6, 4, 7])
+
+
+def test_grouped_experts_runs_every_expert_over_its_own_tokens() -> None:
+    """The loop path segments the tokens, one expert each, no bleeding.
+
+    Nothing else here would catch a segmentation bug: every expert gets tokens,
+    the output shape is right either way, and a wrong segment boundary just
+    makes the numbers quietly wrong. So the reference is built by hand, one
+    expert at a time.
+    """
+    module = _grouped(use_grouped_mm=False)
+    x = torch.randn(22, 16)
+
+    # Each expert's slice of the tokens, as (start, end) pairs.
+    bounds = [0, 5, 11, 15, 22]
+    segments = list(zip(bounds[:-1], bounds[1:], strict=True))
+
+    gate = torch.cat([x[s:o] @ module.w1_EFD[e].T for e, (s, o) in enumerate(segments)])
+    up = torch.cat([x[s:o] @ module.w3_EFD[e].T for e, (s, o) in enumerate(segments)])
+    expected = torch.cat(
+        [
+            module.activation_fn(gate[s:o], up[s:o]) @ module.w2_EDF[e].T
+            for e, (s, o) in enumerate(segments)
+        ]
+    )
+    assert torch.allclose(module(x, _COUNTS), expected, rtol=1e-5, atol=1e-6)
+
+
+def test_the_grouped_mm_probe_follows_the_op(monkeypatch) -> None:
+    """The probe decides the default, so it has to track the op's real behavior.
+
+    Driven by monkeypatching rather than by asking this machine: a test that
+    only compares the probe against the local op passes on any host where the
+    op works even if the probe is hard-wired to ``True`` -- which is precisely
+    the bug that would send every model down a branch that raises elsewhere.
+    """
+    from hpmesh.models.common import grouped_experts as ge
+
+    def _works(*args, **kwargs):
+        return torch.zeros(8, 8, dtype=torch.bfloat16)
+
+    def _raises(*args, **kwargs):
+        raise RuntimeError("strides should be multiple of 16 bytes")
+
+    monkeypatch.setattr(torch, "_grouped_mm", _works, raising=False)
+    assert ge._grouped_mm_available() is True
+
+    monkeypatch.setattr(torch, "_grouped_mm", _raises, raising=False)
+    assert ge._grouped_mm_available() is False
+
+    # An op that is simply absent counts as unavailable, not as an error.
+    monkeypatch.delattr(torch, "_grouped_mm", raising=False)
+    assert ge._grouped_mm_available() is False
+
+
+def test_the_grouped_mm_probe_agrees_with_the_real_op_here() -> None:
+    """On whatever host this runs, the probe must match the actual call."""
+    from hpmesh.models.common.grouped_experts import _grouped_mm_available
+
+    reported = _grouped_mm_available()
+    try:
+        torch._grouped_mm(
+            torch.zeros(8, 8, dtype=torch.bfloat16),
+            torch.zeros(2, 8, 8, dtype=torch.bfloat16),
+            offs=torch.tensor([4, 8], dtype=torch.int32),
+        )
+        actually_works = True
+    except Exception:
+        actually_works = False
+
+    assert reported == actually_works
+    # And the decision holds up end to end: a model built with no explicit flag
+    # must survive the forward whichever branch the probe chose.
+    module = _grouped(use_grouped_mm=None, dtype=torch.bfloat16)
+    module(torch.randn(22, 16, dtype=torch.bfloat16), _COUNTS)
+
+
+def test_the_fused_path_matches_the_loop_bit_for_bit_in_bf16() -> None:
+    """Where the op is available, the two paths must agree exactly.
+
+    They are the same arithmetic in the same dtype (bf16 in, bf16 out, no
+    intermediate widening on either side), so "close" would be the wrong
+    assertion and would hide a mis-segmented expert. Skipped where the op is
+    unavailable.
+    """
+    from hpmesh.models.common.grouped_experts import _grouped_mm_available
+
+    if not _grouped_mm_available():
+        pytest.skip("torch._grouped_mm is unavailable on this build")
+
+    loop = _grouped(use_grouped_mm=False, dtype=torch.bfloat16)
+    fused = _grouped(use_grouped_mm=True, dtype=torch.bfloat16)
+    fused.load_state_dict(loop.state_dict())
+    x = torch.randn(22, 16, dtype=torch.bfloat16)
+
+    assert torch.equal(loop(x, _COUNTS), fused(x, _COUNTS))
+
+
+def test_the_fused_path_is_refused_for_a_wider_dtype() -> None:
+    """The bf16-only kernel must not be handed fp32 or fp64 activations.
+
+    ``torch._grouped_mm`` casts both operands to bf16. On an fp32 model that is
+    a silent 8-mantissa-bit round trip -- measured at 1.4e-1 relative error --
+    which is exactly what a loss-comparison gate cannot see.
+
+    The comparison is explicitly loop-against-fused, both with the flag forced:
+    on a build where the op is available, ``use_grouped_mm=None`` resolves to
+    *fused*, so comparing a default against a forced fused model would compare
+    the same path with itself and pass no matter what the gate did.
+    """
+    for dtype in (torch.float32, torch.float64):
+        loop = _grouped(use_grouped_mm=False, dtype=dtype)
+        forced = _grouped(use_grouped_mm=True, dtype=dtype)
+        forced.load_state_dict(loop.state_dict())
+        x = torch.randn(22, 16, dtype=dtype)
+
+        # Same weights, same dtype: the loop is the reference and the fused
+        # request must not reach the kernel, so these are bitwise equal.
+        assert torch.equal(loop(x, _COUNTS), forced(x, _COUNTS))
+
+
+def test_the_default_follows_the_probe() -> None:
+    """``None`` means "decide here", and the decision is the probe's."""
+    from hpmesh.models.common.grouped_experts import _grouped_mm_available
+
+    assert _grouped(use_grouped_mm=None).use_grouped_mm == _grouped_mm_available()
+    # An explicit value still wins, which is what lets a test pin a path.
+    assert _grouped(use_grouped_mm=False).use_grouped_mm is False
+    assert _grouped(use_grouped_mm=True).use_grouped_mm is True
