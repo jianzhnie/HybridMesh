@@ -17,6 +17,11 @@ cold Adam has no ``exp_avg`` tensors for DCP to write into.
 
 from __future__ import annotations
 
+import weakref
+from contextlib import nullcontext
+from types import SimpleNamespace
+from typing import cast
+
 import pytest
 import torch
 import torch.nn as nn
@@ -59,6 +64,64 @@ from hpmesh.trainer.config import (
     TrainingConfig,
 )
 from hpmesh.trainer.trainer import Trainer
+
+
+def test_pp_forward_backward_releases_consumed_loss_graphs() -> None:
+    """The PP schedule's reporting losses must not retain completed graphs."""
+    activation_refs: list[weakref.ReferenceType[torch.Tensor]] = []
+    loss_refs: list[weakref.ReferenceType[torch.Tensor]] = []
+    loss_containers: list[list[torch.Tensor]] = []
+    gradients: list[torch.Tensor] = []
+
+    def schedule_step(**kwargs) -> None:
+        losses = kwargs["losses"]
+        loss_containers.append(losses)
+        for value in (1.0, 2.0):
+            activation = torch.tensor(value, requires_grad=True)
+            # PP losses are normalized before the schedule runs backward. The
+            # trainer multiplies their detached sum by the global denominator
+            # to recover the raw reporting sum.
+            loss = activation.square().view(()) / kwargs["loss_kwargs"][
+                "global_valid_tokens"
+            ]
+            loss.backward()
+            assert activation.grad is not None
+            gradients.append(activation.grad.detach().clone())
+            activation_refs.append(weakref.ref(activation))
+            loss_refs.append(weakref.ref(loss))
+            losses.append(loss)
+
+    trainer = cast(
+        Trainer,
+        SimpleNamespace(
+            pp_has_first_stage=True,
+            pp_has_last_stage=True,
+            pp_schedule=SimpleNamespace(step=schedule_step),
+            parallel_dims=None,
+            _param_context=nullcontext,
+            _pp_microbatches=lambda batch: [batch, batch],
+            _preprocess=lambda microbatch: (
+                torch.ones(1),
+                torch.ones(1, dtype=torch.long),
+                {},
+            ),
+        ),
+    )
+
+    reporting_loss = Trainer._pp_forward_backward_body(
+        trainer,
+        Batch(input_ids=torch.ones(1, 1), labels=torch.ones(1, 1)),
+        global_valid_tokens=torch.tensor(2),
+    )
+
+    torch.testing.assert_close(reporting_loss, torch.tensor(5.0))
+    torch.testing.assert_close(torch.stack(gradients), torch.tensor([1.0, 2.0]))
+    assert not reporting_loss.requires_grad
+    assert reporting_loss.grad_fn is None
+    assert loss_containers == [[]]
+    assert all(reference() is None for reference in loss_refs)
+    assert all(reference() is None for reference in activation_refs)
+
 
 # -- losses -------------------------------------------------------------------
 

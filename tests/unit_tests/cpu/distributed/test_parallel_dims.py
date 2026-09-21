@@ -60,7 +60,7 @@ def _dims(world_size: int = 8, **overrides) -> ParallelDims:
 
 def test_a_product_that_misses_the_world_size_is_rejected() -> None:
     """The one arithmetic mistake every parallelism config makes at some point."""
-    with pytest.raises(AssertionError, match="Invalid parallel dims"):
+    with pytest.raises(ValueError, match="Invalid parallel dims"):
         _dims(world_size=8, dp_replicate=2, dp_shard=2, tp=2)  # 2*2*2 = 8, ok
         _dims(world_size=7, dp_replicate=2, dp_shard=2, tp=2)  # ...but the world is 7
 
@@ -82,8 +82,27 @@ def test_ep_that_divides_is_accepted() -> None:
 
 def test_a_non_positive_size_is_rejected() -> None:
     """A zero size would divide by zero deep in the mesh builder."""
-    with pytest.raises(AssertionError):
+    with pytest.raises(ValueError, match="dp_shard must be -1 or >= 1"):
         _dims(world_size=8, dp_shard=0)
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [("dp_replicate", 0), ("cp", 0), ("tp", 0), ("pp", 0), ("ep", 0)],
+)
+def test_every_fixed_degree_must_be_positive(field: str, value: int) -> None:
+    with pytest.raises(ValueError, match=rf"{field} must be >= 1"):
+        _dims(**{field: value})
+
+
+def test_derived_dp_requires_an_exact_world_size_factorization() -> None:
+    with pytest.raises(ValueError, match=r"must be divisible"):
+        _dims(world_size=7, dp_shard=-1, tp=2)
+
+
+def test_world_size_must_be_positive() -> None:
+    with pytest.raises(ValueError, match=r"world_size must be >= 1"):
+        _dims(world_size=0, dp_shard=-1)
 
 
 # -- mesh resolution ---------------------------------------------------------

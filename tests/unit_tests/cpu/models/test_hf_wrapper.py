@@ -191,6 +191,30 @@ def test_build_model_config_for_offline_arch() -> None:
     assert config.max_position_embeddings >= cfg.max_seq_len
 
 
+def test_wrapper_rejects_an_invalid_gqa_head_ratio() -> None:
+    """HF accepts this config but fails later when it repeats KV heads.
+
+    The query-head count must be an integer multiple of the KV-head count;
+    checking at the wrapper boundary gives fused and unfused HF attention the
+    same fail-fast contract as TorchTitan's shared GQA implementation.
+    """
+    config = build_model_config(
+        "llama",
+        seq_len=8,
+        arch_overrides={
+            "vocab_size": 16,
+            "hidden_size": 12,
+            "intermediate_size": 16,
+            "num_hidden_layers": 1,
+            "num_attention_heads": 3,
+            "num_key_value_heads": 2,
+        },
+    )
+
+    with pytest.raises(ValueError, match=r"num_attention_heads.*divisible"):
+        HFTransformerModel(config)
+
+
 def test_build_model_config_for_accepts_a_local_checkpoint_path(tmp_path) -> None:
     """An absolute checkpoint path is a local config, not a malformed hub id.
 

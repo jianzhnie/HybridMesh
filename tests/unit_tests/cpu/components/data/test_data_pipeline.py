@@ -208,6 +208,49 @@ def test_text_sequence_accepts_an_absent_positions_field():
     assert sequence.positions is None
 
 
+@pytest.mark.parametrize(
+    ("kwargs", "message"),
+    [
+        ({"max_context_length": 0}, "max_context_length"),
+        ({"num_tokens_per_batch": 0}, "num_tokens_per_batch"),
+        ({"max_num_documents": 0}, "max_num_documents"),
+    ],
+)
+def test_dataset_build_context_rejects_non_positive_sizes(tokenizer, kwargs, message):
+    with pytest.raises(ValueError, match=message):
+        make_context(tokenizer, **kwargs)
+
+
+@pytest.mark.parametrize(
+    "kwargs",
+    [
+        {"dp_world_size": 0},
+        {"dp_rank": -1},
+        {"dp_rank": 2, "dp_world_size": 2},
+        {"streaming_shuffle_buffer_size": 0},
+    ],
+)
+def test_dataset_iteration_policy_rejects_invalid_parallelism(kwargs):
+    with pytest.raises(ValueError):
+        make_policy(**kwargs)
+
+
+@pytest.mark.parametrize(
+    ("dp_rank", "dp_world_size"),
+    [(-1, 1), (1, 1), (0, 0)],
+)
+def test_random_loader_rejects_invalid_parallel_coordinates(dp_rank, dp_world_size):
+    with pytest.raises(ValueError):
+        RandomTokenDataLoader(
+            seed=0,
+            vocab_size=16,
+            batch_size=4,
+            seq_len=8,
+            dp_rank=dp_rank,
+            dp_world_size=dp_world_size,
+        )
+
+
 @pytest.fixture
 def collator(tokenizer):
     return TextCollator(context=make_context(tokenizer, num_tokens_per_batch=16))
