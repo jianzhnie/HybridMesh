@@ -286,6 +286,13 @@ class CPFlexKernel(nn.Module):
         internally before Q-sharding it for kv_allgather. ``separate_full_blocks``
         tracks the wrapper's batch-invariant-mode choice, so the ulysses
         decomposition matches every other path's numerics.
+
+        Built from the length alone, which is why this only holds for a
+        contiguous split: the causal mask depends on the *order* of the tokens,
+        and every rank here holds its shard of that one order. A
+        load-balancer-rearranged shard would need the mask permuted to match,
+        and nothing in this signature says which rearrangement that was --
+        ``apply_cp`` refuses ulysses with a load balancer for that reason.
         """
         from torch.nn.attention.flex_attention import create_block_mask
 

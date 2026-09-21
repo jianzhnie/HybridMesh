@@ -1,9 +1,9 @@
-"""Context parallelism: primitives, the CP flex kernel, and input sharding.
+"""Context parallelism: the CP flex kernel, input sharding, and wiring.
 
-``primitives.py`` holds the attention redistribution primitives (KV all-gather,
-Ulysses all-to-all); ``cp_kernel.py`` the flex kernel that drives them inside
-HF attention; ``input_shard.py`` the batch/mask sharding; ``apply.py`` wires
-the kernel onto a model. Together they make a CP step runnable end to end.
+``cp_kernel.py`` holds the attention redistribution itself -- both strategies
+(KV all-gather and Ulysses all-to-all) live in ``CPFlexKernel``, which is what
+actually runs inside HF attention. ``input_shard.py`` holds the batch and mask
+sharding; ``apply.py`` wires the kernel onto a model.
 """
 
 from .apply import apply_cp
@@ -13,24 +13,10 @@ from .input_shard import (
     shard_batch_for_cp,
     shard_batch_for_tp,
 )
-from .primitives import (
-    HEAD_DIM,
-    TOKEN_DIM,
-    KVAllGatherContextParallel,
-    UlyssesContextParallel,
-    cp_group,
-    cp_redistribute,
-)
 
 __all__ = [
-    "HEAD_DIM",
-    "TOKEN_DIM",
     "CPFlexKernel",
-    "KVAllGatherContextParallel",
-    "UlyssesContextParallel",
     "apply_cp",
-    "cp_group",
-    "cp_redistribute",
     "shard_attention_mask_for_cp",
     "shard_batch_for_cp",
     "shard_batch_for_tp",

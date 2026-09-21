@@ -264,8 +264,9 @@ class ParallelConfig:
     - "ulysses": all-to-all between the token and head shards, so attention
       runs on the full sequence with num_heads / cp heads per rank. Requires
       num_attention_heads and num_key_value_heads divisible by cp, and
-      context_parallel_load_balancer=None (the all-to-all reassembles the
-      sequence by concatenating rank shards in rank order).
+      context_parallel_load_balancer=None: every rank attends the full
+      sequence in whatever order the all-to-all delivers, and flex cannot be
+      handed a mask over a different order than the tokens it is attending.
     """
 
     context_parallel_load_balancer: str | None = "headtail"
@@ -426,9 +427,12 @@ class ParallelConfig:
         ):
             raise ValueError(
                 "parallelism.context_parallel_strategy='ulysses' requires "
-                "context_parallel_load_balancer=None: the all-to-all "
-                "reassembles the sequence by concatenating rank shards in rank "
-                "order, which only the contiguous split satisfies. "
+                "context_parallel_load_balancer=None: every rank attends the "
+                "full sequence in whatever order the all-to-all delivers, and "
+                "a load balancer's rearrangement would make that a permuted "
+                "corpus. Nothing raises: the attention is over the wrong "
+                "order of the right tokens, so the loss stays finite and the "
+                "run trains a different model. "
                 f"(got {self.context_parallel_load_balancer!r})"
             )
         if self.enable_fsdp_symm_mem and (

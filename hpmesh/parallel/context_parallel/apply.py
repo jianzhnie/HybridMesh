@@ -75,10 +75,18 @@ def apply_cp(
         if load_balancer is not None:
             raise ValueError(
                 "Ulysses CP requires context_parallel_load_balancer=None: the "
-                "all-to-all reassembles the sequence by concatenating rank "
-                "shards in rank order, which only the contiguous split "
-                "satisfies -- a load balancer's rearrangement would permute "
-                "the full sequence every rank attends over."
+                "all-to-all is an even split of an evenly-sharded tensor, and "
+                "every rank ends up attending the full sequence in whatever "
+                "order the shards arrived in. A load balancer rearranges the "
+                "sequence into head and tail chunks, so that order is no "
+                "longer the original one and -- unlike the seq_len x seq_len "
+                "causal mask, a function of tokens -- flex only takes a mask "
+                "built over the attended order. The kernel therefore attends "
+                "the rearranged corpus, a permuted model that trains and "
+                "produces plausible numbers with nothing raised. "
+                "strategy='kv_allgather' is what supports this: it gathers the "
+                "rearranged shards back into the very order the mask was "
+                "sharded in, so the rearrangement lands in the mask and cancels."
             )
         if getattr(model_config, "attn_mask_type", "causal") == "block_causal":
             raise ValueError(
