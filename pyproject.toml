@@ -22,16 +22,37 @@ dependencies = [
     # a per-expert loop, so a <2.14 install still runs correctly -- just without
     # the fused kernel.
     "torch>=2.12",
-    # Lower bound from the oldest API actually used: the
-    # `transformers.integrations.flex_attention` / `modeling_utils.AttentionInterface`
-    # attention-registration path (models/hf_wrapper.py, models/common/flex_kernel.py).
-    "transformers>=4.53",
+    # Pinned to one minor: the MoE expert layout this code probes
+    # (`gate_up_proj` / `down_proj`) is a 5.x shape, and the pin matches
+    # torchtitan's transformers_modeling_backend experiment, which this
+    # aligns with.
+    "transformers>=5.9,<5.10",
     # Direct import in utils/logger_utils.py (reached from trainer/config.py) --
     # undeclared until now, and pulled in only transitively by transformers.
     "colorama>=0.4",
-    # Used by the SPMD type-checker and by the mesh helpers in parallel/spmd_types.py.
+    # Used by the SPMD type-checker and by the mesh helpers in utils/spmd_context.py.
     # Pinned exactly the way torchtitan pins it -- the API is still moving.
     "spmd_types==0.2.5",
+    # The dataset graph in datasets/ is built on Grain. Pinned exactly, the way
+    # torchtitan pins it: packing and multimodal use six nodes out of
+    # `grain.experimental`, whose API is still moving.
+    # It is a Google library (github.com/google/grain) and pulls in their stack
+    # (absl-py, etils, protobuf, and array-record on non-Windows). It does NOT
+    # depend on JAX -- that import is behind an optional sharding/sharding path.
+    "grain==0.2.18",
+    # Imported directly by the migrated data layer (datasets/,
+    # components/tokenizer.py). `transformers` happens to pull some of these in,
+    # but that is incidental -- the data layer must not break when used without
+    # a model. `datasets` and `tokenizers` back the sources and the tokenizer,
+    # `jinja2` renders chat templates; the rest are reached only on the
+    # multimodal path (datasets/hf/multimodal/utils/{image,video}.py).
+    "datasets>=3.6.0",
+    "tokenizers>=0.15.0",
+    "jinja2",
+    "pillow",
+    "einops",
+    "torchvision",
+    "requests",
 ]
 
 [project.optional-dependencies]
@@ -50,9 +71,23 @@ Homepage = "https://github.com/jianzhnie/HybridMesh"
 [tool.setuptools.packages.find]
 include = ["hpmesh*"]
 
+# Directory layout mirrors torchtitan's: ``unit_tests/cpu`` is the pytest suite
+# (every module in it imports ``tests.data_fixtures``, so the repo root has to
+# be the pytest rootdir), and ``integration_tests`` holds the torchrun
+# equivalence scripts -- they are not pytests and are not collected here.
+[tool.pytest.ini_options]
+testpaths = ["tests/unit_tests"]
+
 [tool.ruff]
 line-length = 88
 target-version = "py310"
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B"]
+
+[tool.ruff.lint.per-file-ignores]
+# Tests name the shared fixtures in their signatures. Those `corpus` /
+# `tokenizer` parameters ARE the import from `tests.data_fixtures` -- pytest
+# resolves them by name -- which reads to ruff as redefining the import. The
+# rest of F still applies here. The glob reaches into the nested layout.
+"tests/**/*.py" = ["F811"]

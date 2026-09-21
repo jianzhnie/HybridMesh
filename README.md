@@ -15,7 +15,7 @@
 - **分组 `HybridMeshConfig`**（`hpmesh/trainer/config.py`）—— 按关注点分组
   （Model / Parallel / Optimizer / Training）再**组合**成单一配置；每组在自己的
   `__post_init__` 里校验。CLI 用 `HfArgumentParser` 暴露成扁平旗标
-  （`--steps`、`--data_parallel_shard_degree`、`--learning_rate`），也支持 YAML/JSON
+  （`--steps`、`--data_parallel_shard_size`、`--learning_rate`），也支持 YAML/JSON
   配置文件。
 - **`HFTransformerModel`**（`hpmesh/models/hf_wrapper.py`）—— 模型唯一抽象：一个 HF
   模型 + 并行化它的方式。
@@ -35,7 +35,7 @@ pip install -e .
 python -m hpmesh --steps 20
 
 # 第 1 步：数据并行 FSDP，2 进程（需 CUDA/NCCL）
-torchrun --nproc_per_node=2 -m hpmesh --data_parallel_shard_degree 2
+torchrun --nproc_per_node=2 -m hpmesh --data_parallel_shard_size 2
 ```
 
 ## 代码地图（每个文件对应一个核心概念）
@@ -73,7 +73,7 @@ torchrun --nproc_per_node=2 -m hpmesh --data_parallel_shard_degree 2
 
 ```text
 第 0 步  单设备纯训练      已实现   python -m hpmesh --steps 20
-第 1 步  +FSDP 数据并行    已实现   torchrun --nproc_per_node=2 -m hpmesh --data_parallel_shard_degree 2
+第 1 步  +FSDP 数据并行    已实现   torchrun --nproc_per_node=2 -m hpmesh --data_parallel_shard_size 2
 第 2 步  +TP 张量并行      已实现   parallel/tensor_parallel/ (声明式 -> 融合 GEMM)
 第 3 步  +PP 流水线并行    已实现   parallel/pipeline_parallel/ (1F1B 闭环, pp_equivalence 对拍)
 第 4 步  +CP 或 EP         已实现   parallel/context_parallel/ + expert_parallel/ (KV all-gather / all-to-all)
@@ -97,7 +97,7 @@ torchrun --nproc_per_node=2 -m hpmesh --data_parallel_shard_degree 2
   NCCL 设计，在 CPU+gloo 上不可用 —— 请在 GPU 机器上做第 1 步及以后。
 - **第 2 步 TP 同样是 CUDA-only**：`parallel/tensor_parallel/linear.py` 的融合算子走
   `torch.ops.symm_mem.fused_*`（对称内存），本机 `symm_mem.is_available()==False`。
-  CPU 上只能验证声明层与权重切分（见 `tests/test_tp.py`），完整的 all-gather /
+  CPU 上只能验证声明层与权重切分（见 `tests/unit_tests/cpu/distributed/test_tp.py`），完整的 all-gather /
   reduce-scatter 前反向要在 GPU 上跑。
 - **PP 只支持 `--dataset random`**：打包语料的 `positions` 没有穿过 schedule 的通道
   （`pp.py` 里显式 raise）。见 `docs/hybridmesh_design.md` §5.5。

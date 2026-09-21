@@ -18,12 +18,12 @@ from __future__ import annotations
 
 from hpmesh.trainer import (
     HybridMeshConfig,
-    MetricsConfig,
     ModelConfig,
     OptimizerConfig,
     ParallelConfig,
     TrainingConfig,
 )
+from hpmesh.trainer.config import MetricsConfig
 from hpmesh.trainer.trainer import Trainer
 
 
@@ -41,7 +41,7 @@ def qwen3_minimal_config() -> HybridMeshConfig:
         ),
         # Parallelism uses the torchtitan-spelled degree fields; -1 on the shard
         # degree means "derive from world_size" (all remaining ranks are DP).
-        parallel=ParallelConfig(data_parallel_shard_degree=-1),
+        parallel=ParallelConfig(data_parallel_shard_size=-1),
         optimizer=OptimizerConfig(learning_rate=3e-4, weight_decay=0.0),
         training=TrainingConfig(
             global_batch_size=8,
