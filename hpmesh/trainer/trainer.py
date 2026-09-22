@@ -114,7 +114,8 @@ from ..models.common.aux_loss import (
     collect_aux_loss_metrics,
     register_aux_loss_zero_hook,
 )
-from ..models.common.moe import register_moe_load_balancing_hook
+from ..models.common.moe import MoE, register_moe_load_balancing_hook
+from ..models.hf_state_dict_adapter import HFTransformerStateDictAdapter
 from ..models.hf_wrapper import (
     HFTransformerModel,
     build_model_config_for,
@@ -134,6 +135,7 @@ from ..parallel.tensor_parallel.tp import (
     ColwiseLinearNoGather,
     RowwiseLinear,
 )
+from ..utils.device import device_module, device_type
 from ..utils.gc import GarbageCollection
 from ..utils.logger_utils import get_logger
 from ..utils.spmd_context import spmd_context
@@ -191,7 +193,7 @@ class Trainer:
         self._seed_everything(cfg.seed, deterministic=cfg.deterministic)
 
         self.device = torch.device(
-            f"cuda:{self.local_rank}" if torch.cuda.is_available() else "cpu"
+            f"{device_type}:{self.local_rank}" if device_type != "cpu" else "cpu"
         )
 
         # 1. mesh (the process topology every dimension is built on). ``parallel_dims``
@@ -210,26 +212,21 @@ class Trainer:
 
         # 2. the model -- HF's own initialization, wrapped for this loop
         #
-        # EP + gradient clipping is rejected up front: hpmesh's EP physically
-        # partitions experts across the ep ranks (plain or efsdp-sharded
-        # tensors, never DTensors on an "ep" mesh axis), so neither the dense
-        # ``clip_grad_norm_`` nor torchtitan's ``_clip_grad_norm_with_ep``
-        # (which asserts exactly that DTensor premise) sums expert-gradient
-        # norms across the EP group. The clip threshold would be computed from
-        # this rank's experts alone. Loud-raise rather than clip to a wrong
-        # norm; see ``parallel/collectives.py``.
+        # EP expert tensors are rank-heterogeneous plain tensors. Until they
+        # have an EP-aware checkpoint representation, any save or load would
+        # silently collapse all ranks onto one expert slice. Reject the whole
+        # checkpoint surface before model construction rather than merely warn.
         if (
             self.parallel_dims is not None
             and self.parallel_dims.ep_enabled
-            and cfg.max_norm > 0
+            and cfg.checkpoint.enable
         ):
             raise NotImplementedError(
-                f"expert_parallel_size={self.parallel_dims.ep} with gradient "
-                f"clipping (max_norm={cfg.max_norm}) is not supported: the "
-                "EP-aware grad-norm reduction is not ported (hpmesh's expert "
-                "parameters are not DTensors on an 'ep' mesh axis, the premise "
-                "torchtitan's _clip_grad_norm_with_ep asserts). Set max_norm "
-                "<= 0 to train without clipping."
+                f"expert_parallel_size={self.parallel_dims.ep} with checkpointing "
+                "is not supported: expert weights are rank-heterogeneous plain "
+                "tensors and the current checkpoint backends treat them as "
+                "replicated. Disable checkpointing until EP-aware expert state "
+                "serialization is implemented."
             )
         # Chunked loss + PP is rejected up front: under PP the last stage's
         # loss is computed inside the schedule
@@ -250,7 +247,8 @@ class Trainer:
                 "schedule on materialized logits. Run chunked loss without "
                 "pipeline parallelism."
             )
-        model = HFTransformerModel(build_model_config_for(cfg)).to(self.device)
+        hf_model_config = build_model_config_for(cfg)
+        model = HFTransformerModel(hf_model_config).to(self.device)
 
         # 3. parallelism, in Titan's order: tp/pp/cp/ep declared first, fsdp last
         #    (outer wraps inner). Each is a no-op when its degree is 1. The
@@ -359,6 +357,9 @@ class Trainer:
             lr_scheduler=self.lr_scheduler,
             states=states,
             folder=cfg.dump_folder,
+            sd_adapter=HFTransformerStateDictAdapter(
+                hf_model_config, cfg.checkpoint.initial_load_path or cfg.hf_model
+            ),
         )
 
         # Counters the checkpoint carries. Kept as plain ints so a resumed run
@@ -394,8 +395,8 @@ class Trainer:
     @staticmethod
     def _seed_everything(seed: int, *, deterministic: bool) -> None:
         torch.manual_seed(seed)
-        if torch.cuda.is_available():
-            torch.cuda.manual_seed_all(seed)
+        if device_type != "cpu":
+            device_module.manual_seed_all(seed)
         if deterministic:
             torch.use_deterministic_algorithms(True, warn_only=False)
 
@@ -1055,11 +1056,26 @@ class Trainer:
         # TP hold token-partial gradients that nothing else reduces.
         self._allreduce_replicated_tp_grads()
 
+        parameters = [p for part in self.model_parts for p in part.parameters()]
+        expert_parameters = [
+            p
+            for part in self.model_parts
+            for module in part.modules()
+            if isinstance(module, MoE)
+            for p in module.routed_experts.inner_experts.parameters()
+        ]
+        ep_mesh = (
+            self.parallel_dims.get_optional_mesh("ep")
+            if self.parallel_dims is not None and self.parallel_dims.ep_enabled
+            else None
+        )
         grad_norm = clip_grad_norm_(
-            [p for part in self.model_parts for p in part.parameters()],
+            parameters,
             max_norm=self.cfg.max_norm,
             foreach=True,
             pp_mesh=pp_mesh,
+            ep_mesh=ep_mesh,
+            expert_parameters=expert_parameters if ep_mesh is not None else None,
         )
 
         # Finiteness is reduced to ONE flag before it is asserted, and every

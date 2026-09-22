@@ -298,9 +298,18 @@ _compiled_create_block_mask = torch.compile(create_block_mask)
 
 
 def create_attention_mask(*args, **kwargs):
-    """Build a BlockMask, with the (re)compilation cached across calls."""
+    """Build a BlockMask, caching compilation where the backend supports it.
+
+    torch-npu 2.10's Inductor backend fails while lowering
+    ``create_block_mask`` (``DeferredLine`` has no ``find``). The eager helper
+    produces the same BlockMask and is inexpensive relative to an 8B forward,
+    so NPU uses it until that backend bug is fixed.
+    """
     if not _CREATE_BLOCK_MASK_HAS_SEPARATE_FULL_BLOCKS:
         # PyTorch 2.10 (the current vLLM Ascend image) predates this tuning
         # knob. Its create_block_mask always uses the older combined layout.
         kwargs.pop("separate_full_blocks", None)
-    return _compiled_create_block_mask(*args, **kwargs)
+    device = kwargs.get("device")
+    device_type = torch.device(device).type if device is not None else None
+    builder = create_block_mask if device_type == "npu" else _compiled_create_block_mask
+    return builder(*args, **kwargs)

@@ -60,8 +60,6 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import TYPE_CHECKING, Any
 
-import torch
-
 from ..utils.logger_utils import get_distributed_rank, get_logger
 from ..utils.monitoring import (
     Color,
@@ -139,8 +137,10 @@ class DeviceMemoryMonitor:
         return 100 * memory / self.device_capacity
 
     def _device_module(self):
-        if self.device_type == "cuda":
-            return torch.cuda
+        if self.device_type != "cpu":
+            from ..utils.device import device_module
+
+            return device_module
         return None
 
     def get_peak_stats(self) -> DeviceMemStats:
@@ -187,7 +187,7 @@ def build_device_memory_monitor() -> DeviceMemoryMonitor:
     from ..utils.device import device_type
 
     monitor = DeviceMemoryMonitor(device_type)
-    if device_type == "cuda":
+    if device_type != "cpu":
         logger.info(
             "%s capacity: %s with %.2fGiB memory",
             device_type.upper(),

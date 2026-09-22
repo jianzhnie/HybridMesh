@@ -50,17 +50,4 @@ def apply_ep(
         swapped,
         cfg.ep,
     )
-    # Known boundary (docs/hybridmesh_design.md section 8): under EP the expert
-    # weights are per-rank plain tensors holding different experts, but the DCP
-    # checkpointer treats plain tensors as replicated -- a save stores one
-    # rank's slice and a resume would load that same slice onto every rank.
-    # Refusing here would block training itself, so this is a warning; the fix
-    # (expert-parameter DTensor-ification) is out of this layer's scope.
-    logger.warning(
-        "ep=%d: expert weights are rank-heterogeneous plain tensors, which the "
-        "DCP checkpointer saves/loads as replicated -- do not resume an "
-        "ep>1 run from a checkpoint (every rank would receive the same expert "
-        "slice). EP-aware checkpointing is a known unimplemented boundary.",
-        cfg.ep,
-    )
     return model
