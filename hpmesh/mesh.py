@@ -27,6 +27,12 @@ import torch.distributed as dist
 
 from .parallel.parallel_dims import ParallelDims
 from .trainer.config import HybridMeshConfig
+from .utils.device import (
+    device_type,
+    get_current_device,
+    get_distributed_backend,
+    set_device,
+)
 
 # Mesh axis names. `axis` names a specific DeviceMesh axis; `dim` is for shapes.
 # These are the axes of the dense mesh the parallel layer is handed; ``pp`` is
@@ -97,11 +103,9 @@ def init_distributed() -> tuple[int, int, int]:
         rank = int(os.environ["RANK"])
         local_rank = int(os.environ.get("LOCAL_RANK", 0))
         world_size = int(os.environ["WORLD_SIZE"])
-        import torch
-
-        backend = "nccl" if torch.cuda.is_available() else "gloo"
+        if device_type != "cpu":
+            set_device(get_current_device())
+        backend = get_distributed_backend()
         dist.init_process_group(backend=backend)
-        if torch.cuda.is_available():
-            torch.cuda.set_device(local_rank)
         return rank, local_rank, world_size
     return 0, 0, 1

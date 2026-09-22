@@ -6,13 +6,11 @@ Vendored from torchtitan ``distributed/utils.py``. What changed:
   through every reduction to reach ranks a mesh does not model (its odd-sized TP
   cases); hpmesh's meshes cover every rank, so the mesh argument is the whole
   addressing story.
-* ``_clip_grad_norm_with_ep`` (the EP-aware norm path) is not ported: it asserts
-  every parameter is a DTensor on a sparse mesh with an ``"ep"`` axis, which
-  hpmesh's EP parameters are not (``apply_ep`` physically partitions experts
-  across the ep ranks instead). Because the dense norm would then miss the
-  cross-EP sum of expert-gradient norms, the Trainer loud-raises for
-  ``ep > 1`` with clipping enabled rather than clip to a wrong norm. Port the
-  EP-aware reduction before lifting that rejection.
+* EP-aware clipping is adapted to hpmesh's physical expert partition: callers
+  pass the exact local expert parameters plus the EP mesh. Dense parameters are
+  counted once, while the p-th powers of local expert norms are reduced across
+  EP ranks. This avoids upstream's requirement that every parameter be a
+  DTensor carrying an explicit ``"ep"`` mesh axis.
 * ``dist_mean``, ``all_gather_entries`` and friends are not ported: they exist
   upstream for bucketed per-module metrics, none of which hpmesh reports. Port
   them when there is a caller, not before.
@@ -31,6 +29,8 @@ from datetime import timedelta
 import torch
 import torch.distributed as dist
 from torch.distributed.tensor import DTensor
+
+from ..utils.device import device_module
 
 logger = logging.getLogger(__name__)
 
@@ -68,11 +68,27 @@ def set_pg_timeouts(
     times out waiting for it. Synchronizing first means every rank crosses the
     reduction together.
     """
-    if device is not None and device.type == "cuda":
-        dist.barrier(device_ids=[device.index])
-        torch.cuda.synchronize(device)
+    if device is not None and device.type != "cpu":
+        # NCCL accepts device_ids; HCCL selects the current NPU and rejects the
+        # CUDA-specific argument on some torch-npu releases.
+        if device.type == "cuda":
+            dist.barrier(device_ids=[device.index])
+        else:
+            dist.barrier()
+        device_module.synchronize(device)
     else:
         dist.barrier()
+
+    # torch-npu 2.10 exposes the c10d compatibility API, but HCCL does not
+    # implement the operation (it emits one warning per group and changes
+    # nothing). The synchronization above is still useful; retain the startup
+    # timeout and make this limitation explicit once per rank.
+    if device is not None and device.type == "npu":
+        logger.warning(
+            "HCCL cannot change process-group timeouts at runtime; continuing "
+            "with the startup timeout"
+        )
+        return
 
     # ``None`` names the default (world) group, which is not part of any mesh.
     groups = [
@@ -84,9 +100,22 @@ def set_pg_timeouts(
         len(groups),
         timeout,
     )
+    set_timeout = getattr(dist, "set_timeout", None)
+    if set_timeout is None:
+        # PyTorch 2.10 exposes this operation only from distributed_c10d.
+        # Keep the compatibility detail here rather than forcing the trainer to
+        # know which torch release it is running on.
+        set_timeout = getattr(dist.distributed_c10d, "_set_pg_timeout", None)
+    if set_timeout is None:
+        logger.warning(
+            "This PyTorch build cannot change process-group timeouts at runtime; "
+            "continuing with the startup timeout"
+        )
+        return
+
     for group in groups:
-        dist.set_timeout(timeout, group)
-    dist.set_timeout(timeout)
+        set_timeout(timeout, group)
+    set_timeout(timeout)
 
 
 def _reduce(x: torch.Tensor, *, reduce_op: dist.ReduceOp, mesh) -> torch.Tensor:
@@ -137,6 +166,8 @@ def clip_grad_norm_(
     error_if_nonfinite: bool = False,
     foreach: bool | None = None,
     pp_mesh=None,
+    ep_mesh=None,
+    expert_parameters: Iterable[torch.Tensor] | None = None,
 ) -> torch.Tensor:
     """Clip the gradient norm of an iterable of parameters, over the whole model.
 
@@ -155,6 +186,10 @@ def clip_grad_norm_(
         foreach: use the faster foreach implementation (``None`` lets torch pick).
         pp_mesh: pipeline-parallel mesh; when present the norm is reduced across
             stages before clipping.
+        ep_mesh: expert-parallel mesh. When present, only the norm contribution
+            from ``expert_parameters`` is reduced over this mesh.
+        expert_parameters: parameters physically partitioned across EP ranks.
+            Required exactly when ``ep_mesh`` is provided.
 
     Returns:
         The total norm of the parameter gradients (viewed as one vector).
@@ -167,10 +202,48 @@ def clip_grad_norm_(
     else:
         parameters = list(parameters)  # do not exhaust a generator
 
-    grads = [p.grad for p in parameters if p.grad is not None]
-    total_norm = torch.nn.utils.get_total_norm(
-        grads, norm_type, error_if_nonfinite, foreach
-    )
+    if (ep_mesh is None) != (expert_parameters is None):
+        raise ValueError(
+            "ep_mesh and expert_parameters must either both be provided or both be None"
+        )
+
+    if ep_mesh is None:
+        grads = [p.grad for p in parameters if p.grad is not None]
+        total_norm = torch.nn.utils.get_total_norm(
+            grads, norm_type, error_if_nonfinite, foreach
+        )
+    else:
+        expert_ids = {id(p) for p in expert_parameters}
+        expert_grads = [
+            p.grad for p in parameters if id(p) in expert_ids and p.grad is not None
+        ]
+        dense_grads = [
+            p.grad for p in parameters if id(p) not in expert_ids and p.grad is not None
+        ]
+        expert_norm = torch.nn.utils.get_total_norm(
+            expert_grads, norm_type, error_if_nonfinite, foreach
+        )
+        dense_norm = torch.nn.utils.get_total_norm(
+            dense_grads, norm_type, error_if_nonfinite, foreach
+        )
+        if isinstance(expert_norm, DTensor):
+            expert_norm = expert_norm.full_tensor()
+        if isinstance(dense_norm, DTensor):
+            dense_norm = dense_norm.full_tensor()
+
+        if math.isinf(norm_type):
+            dist.all_reduce(
+                expert_norm, op=dist.ReduceOp.MAX, group=ep_mesh.get_group()
+            )
+            total_norm = torch.maximum(dense_norm, expert_norm)
+        else:
+            expert_norm = expert_norm.pow(norm_type)
+            dist.all_reduce(
+                expert_norm, op=dist.ReduceOp.SUM, group=ep_mesh.get_group()
+            )
+            total_norm = (dense_norm.pow(norm_type) + expert_norm).pow(
+                1.0 / norm_type
+            )
 
     # Under FSDP/TP the norm comes back as a DTensor with a partial (sum)
     # placement: it must be materialized both to be correct along those axes and

@@ -67,6 +67,10 @@ torchrun --nproc_per_node=2 -m hpmesh --data_parallel_shard_size 2
 优化器 checkpoint 的磁盘格式在 `0fd6cbe` 变更过（改为扁平 FQN keying），
 旧 checkpoint 不再能加载，见 `docs/optimizer_checkpoint_format.md`。
 
+NPU 上可用 [`examples/train_qwen3_8b_npu.sh`](examples/train_qwen3_8b_npu.sh) 运行本地
+Qwen3-8B 预训练权重的多卡 FSDP 训练。HF safetensors 通过 DCP 严格映射并直接加载到
+分片后的 live state，避免每个 rank 额外保留一份完整模型权重。
+
 ## 学习路径
 
 每一步都能跑、都能跟官方实现对拍。**先跑通，再读官方实现，再动手改/写。**
