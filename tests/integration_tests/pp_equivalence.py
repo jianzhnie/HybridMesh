@@ -130,7 +130,11 @@ def _reference_trajectory(cfg: HybridMeshConfig) -> list[float]:
     torch.manual_seed(cfg.seed)
     model = HFTransformerModel(build_model_config_for(cfg))
     optimizer = torch.optim.AdamW(
-        model.parameters(), lr=cfg.lr, weight_decay=cfg.weight_decay
+        model.parameters(),
+        lr=cfg.lr,
+        weight_decay=cfg.weight_decay,
+        fused=cfg.optimizer.implementation == "fused",
+        foreach=cfg.optimizer.implementation == "foreach",
     )
     rows_per_mb = cfg.global_batch_size // MICROBATCHES
 

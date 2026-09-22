@@ -17,6 +17,8 @@ harnesses' job.
 
 from __future__ import annotations
 
+import inspect
+
 import pytest
 import torch
 
@@ -216,8 +218,16 @@ def test_full_length_mask_tracks_batch_invariant_mode(monkeypatch) -> None:
         finally:
             set_batch_invariant_mode(False)
 
-        # Two builds (the mode is part of the cache key), each mirroring the
-        # wrapper's ``separate_full_blocks=not is_in_batch_invariant_mode()``.
-        assert [c["separate_full_blocks"] for c in calls] == [True, False]
+        # Two builds: mode remains part of the cache key on every supported
+        # torch. Newer torch releases expose ``separate_full_blocks`` and must
+        # receive the wrapper's matching choice; torch 2.10 removed the knob,
+        # so the compatibility path cannot pass it.
+        assert len(calls) == 2
+        if "separate_full_blocks" in inspect.signature(
+            real_create_block_mask
+        ).parameters:
+            assert [c["separate_full_blocks"] for c in calls] == [True, False]
+        else:
+            assert all("separate_full_blocks" not in c for c in calls)
     finally:
         dist.destroy_process_group()

@@ -91,9 +91,13 @@ def apply_fsdp(
 
     edp_mesh = resolve_sparse_fsdp_mesh(parallel_dims)
 
-    # Vectors are lenient: the model may be on CPU (this learning path runs on
-    # CPU/gloo) or bf16 (the CUDA default in torchtitan's trainer).
-    param_dtype = torch.float32
+    # Preserve the dtype selected at model construction. Hard-coding float32
+    # here silently makes FSDP all-gather BF16 parameters as FP32, doubling the
+    # transient parameter and operator footprint in mixed-precision runs.
+    try:
+        param_dtype = next(model.parameters()).dtype
+    except StopIteration:
+        param_dtype = torch.get_default_dtype()
     reduce_dtype = torch.float32
 
     apply_fsdp_to_decoder(

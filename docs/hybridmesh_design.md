@@ -3,10 +3,15 @@
 一个移除 TorchTitan `Configurable` 与 `Module` 两层抽象、直接接入 HuggingFace
 `transformers` 的大模型并行训练框架。
 
+本文解释“为什么这样设计”和运行时契约；文件来源与 A/B/C/D 分类见
+[`hpmesh_upstream_map.md`](./hpmesh_upstream_map.md)，函数/类级导航与正确性结论见
+[`hpmesh_torchtitan_symbol_guide.md`](./hpmesh_torchtitan_symbol_guide.md)。三份文档中，
+来源分类以 upstream map 为准，当前运行边界以本文和源码的 loud-raise 为准。
+
 ## 0. 结论
 
 hpmesh 拿掉了 TorchTitan 的 `Configurable` 与 `Module` 两个抽象层，换来一个明显更短
-的框架：约 91 个模块、20.6k 行，覆盖 TP / FSDP2 / CP / EP / PP 五条并行路径的装配、
+的框架：89 个 Python 模块、约 22.4k 行，覆盖 TP / FSDP2 / CP / EP / PP 五条并行路径的装配、
 训练循环、checkpoint 与等价性测试。
 
 拿掉抽象不等于拿掉复杂度，只是把复杂度换成另一种形式。hpmesh 选择的形式是：
@@ -67,34 +72,34 @@ redistribute」）、remat 区域命名。配套还有 `BaseModel`（`preprocess
 | `spmd_types` | 独立 Meta pip 包（`spmd_types==0.2.5`，~11.5k 行，零依赖） | SPMD 类型系统：`SpmdType` / `TensorSharding` / `MeshAxis` / `assert_type` / `local_map` / `redistribute`，以及 mesh 作用域 `set_current_mesh` |
 | `transformers` | HuggingFace | `AutoModelForCausalLM`、模型自带的 `_tp_plan` |
 
-hpmesh 的 SPMD glue shim **不是** TorchTitan 的抽象，而是套在
-`spmd_types` 包外面的一层 glue（`MeshAxisName` 映射、TLS mesh 栈、state-dict
-转换、redistribute 校验），现按依赖方向拆成两层：底层 `utils/spmd_context.py`
-（mesh 作用域 + 轴查询，只依赖 torch + PyPI `spmd_types`），上层
-`parallel/spmd_shims.py`（state-dict 转换与 redistribute 校验，仅 parallel 层用）。
+hpmesh 的 SPMD glue **不是** TorchTitan 的抽象。活跃路径只有
+`utils/spmd_context.py`：它在 PyPI `spmd_types` 外提供 TLS mesh 栈、轴查询和上下文
+管理，由 trainer 与 `models/common/*` 使用。原先无导入者的
+`parallel/spmd_shims.py` 与 `parallel/sharding.py` 悬空链已经整体删除。
 
 真正被移除后需要补回的接口面其实很窄，全部用普通 Python 手段补回：
 
 | TorchTitan 机制 | hpmesh 替代物 |
 |---|---|
 | `Config.build()` 构造协议 | 构造函数显式传参（`Trainer(cfg)`、`HFTransformerModel(hf_config)`） |
-| `init_states` 递归初始化 | HF 模型自己的 `_init_weights`（`model_cls(config)` 内部完成） |
+| `init_states` 递归初始化 | 随机初始化走 HF `_init_weights`；真实 HF 权重走 meta 构建 → 并行/FSDP → `to_empty` → DCP safetensors 加载 |
 | 声明式 `ShardingConfig.parallelize()` | 顶层函数 `apply_tp / apply_cp / apply_ep / apply_fsdp`，顺序写在 `parallelize_hf.py` |
-| `preprocess_inputs` | trainer 自己切 batch（`_dp_slice`），模型 forward 收 flat token |
-| `state_dict_adapter` | 暂不需要：checkpoint 每 rank 各存各的（见 §5.6） |
+| `preprocess_inputs` | `HFTransformerModel.preprocess_inputs` 统一 batch、mask 与 CP/TP 序列分片 |
+| `state_dict_adapter` | 训练 checkpoint 使用 DCP/FQN state；HF 导入导出能力由可选 adapter 决定 |
 | `ModelSpec` / registry | 不需要：TP plan 直接用 HF 模型自带的 `_tp_plan`（见 §4.2） |
 
 ## 2. 设计目标
 
 | | 目标 |
 |---|---|
-| G1 | 任意 HF `AutoModelForCausalLM` 不改模型代码即可并行 |
+| G1 | 符合 hpmesh 五部件与 attention/MoE 契约的 HF `AutoModelForCausalLM`，不改模型源码即可并行 |
 | G2 | 配置只沿一个方向流动（`CLI -> Config -> 顶层显式传参`） |
 | G3 | 每个 `apply_*` 只依赖它的契约（函数签名），不 import trainer |
-| G4 | 任何非计算改动必须逐位一致，且有等价性测试兜底 |
+| G4 | 改变装配而不改变数学语义时，必须有逐位或容差明确的等价性测试兜底 |
 
 G1 决定模型层只能依赖 HF 公共约定（`config.architectures`、常见 embed/norm 命名、
-`_tp_plan`），不能要求模型作者配合。G4 是允许大胆删抽象的前提：CP/EP/TP 都有
+`_tp_plan`），不能要求模型作者继承 hpmesh 基类；无法识别的结构必须明确报错。
+G4 是允许大胆删抽象的前提：CP/EP/TP 都有
 "多卡分片 == 单卡全量"的数值等价测试（见 §7）。
 
 ## 3. 总体架构
@@ -146,9 +151,13 @@ G1 决定模型层只能依赖 HF 公共约定（`config.architectures`、常见
 +---------------------------------------------------------------+
 ```
 
-分层方向：`trainer -> parallel -> models` 单向，反向零依赖。
+主要装配方向是 `trainer -> parallel -> models`，但不是严格的源码单向 DAG：
+`models/common/dist_gemm.py` 复用 `parallel/tensor_parallel/linear.py` 的底层 fused
+原语，parallel 的 EP/CP driver 也会引用 models/common 类型。真正禁止的是底层模块
+import trainer 或读取全局 run config；跨 models/parallel 的依赖必须停留在小型数学
+原语或显式 apply seam，不能形成隐式装配。
 
-目录结构（91 模块，约 20.6k 行）：
+目录结构（89 个 Python 模块，约 22.4k 行；数字是审计快照）：
 
 ```
 hpmesh/
@@ -156,13 +165,13 @@ hpmesh/
   mesh.py                       init_distributed / build_parallel_dims / build_mesh
   trainer/      4 模块          config.py / trainer.py / train.py
   models/      20 模块          hf_wrapper.py + common/{rope,masks,qkv,moe,...}
-  parallel/    23 模块          config.py (ParallelConfig) + tensor_parallel/
+  parallel/    22 模块          tensor_parallel/
                                 fully_shard/ pipeline_parallel/ context_parallel/
-                                expert_parallel/ spmd_shims.py (state-dict/校验)
-                                parallel_dims.py parallelize_hf.py sharding.py
+                                expert_parallel/
+                                parallel_dims.py parallelize_hf.py
   components/  14 模块          loss / checkpointer(DCP) / metrics / profiler /
                                 optimizer(lr_scheduler)
-  datasets/    18 模块          Grain 数据图 + random_data + hf/{text,multimodal}
+  datasets/    17 模块          Grain 数据图 + random_data + {text,multimodal}
   utils/        9 模块          spmd_context.py (SPMD mesh 作用域 + 轴查询, 最底层)
                                 checkpoint_keys.py (checkpoint 键常量)
 ```
@@ -198,7 +207,9 @@ CLI 用 `HfArgumentParser` 平铺解析四组 flag，组合后经
 2. **部件命名**：`named_children()` 固定 yield `tok_embeddings / layers / norm /
    lm_head / rotary_emb` 五个部件（embed 名按 `embed_tokens/wte/...` 探测一次，
    norm 同理），并行层 walk children 时看到的是部件而不是单个 `model` blob；
-   state_dict key 因此不带 `model.` 前缀，与 HF checkpoint 对齐。
+   state_dict key 仍保留 `model.` 前缀：这里只改变 child 遍历视图，不重注册模块。
+   HF checkpoint 的键转换属于 state-dict adapter/checkpoint seam，不能由
+   `named_children()` 隐式完成。
 3. **TP plan**：`tp_plan` property 把 HF 模型自带的 `_tp_plan` 统一重写为本
    wrapper 的模块路径。声明是纯数据，且数据源在 HF 侧——这就是不需要
    TorchTitan 式 model registry 的原因。
@@ -217,12 +228,13 @@ def apply_fsdp(model, mesh, cfg, parallel_dims) -> nn.Module # fully_shard/
 
 公共语义：`mesh is None` 或对应度数 `<= 1` 时 no-op 原样返回；否则返回就地改造
 后的模型。**顺序即契约**，整个框架的编排知识集中在
-`parallel/parallelize_hf.py`（81 行）一个文件里：
+`parallel/parallelize_hf.py` 一个文件里：
 
 ```
 pp>1 时转入 pipeline_parallel.apply_pp（切 stage -> 每 part 过 tp/compile/fsdp
 -> 建 schedule），返回 PipelineParallelSetup；pp=1 时保持：
-apply_tp -> apply_ep -> apply_cp -> torch.compile(可选) -> apply_fsdp   # FSDP 最后, outer wraps inner
+apply_tp -> apply_ep -> apply_cp -> apply_ac -> torch.compile(可选) -> apply_fsdp
+# AC 包住已经 TP/EP/CP 改造的层；FSDP 最后，outer wraps inner
 ```
 
 模型内部组件（`models/common/*`）不接收 cfg、不 import trainer，需要的分布式
@@ -235,24 +247,23 @@ apply_tp -> apply_ep -> apply_cp -> torch.compile(可选) -> apply_fsdp   # FSDP
 
 ### 5.1 trainer
 
-`train.py` 的 `main()` 一行说完全部：`Trainer(parse_config()).train()`。
-`Trainer.__init__` 顺序固定：`init_distributed`（无 torchrun 则单进程
-`(0,0,1)`）-> 定种子 -> `build_parallel_dims` / `build_mesh`（含
-`covered != world_size` backstop 校验）-> 建模型 -> `parallelize_hf_transformers`
--> `AdamW`。
+`train.py` 的入口是 `Trainer(parse_config()).train()`。`Trainer.__init__` 顺序固定：
+初始化进程组与种子 → 构建 `ParallelDims`/mesh → 构建 HF wrapper → 执行并行装配 →
+构建 `OptimizersContainer`、scheduler、dataloader、metrics、profiler 与 checkpointer。
 
-`train_step`：` _dp_slice` 切本地数据 -> `forward_backward_step`（在
-`spmd_context` 内执行）-> `clip_grad_norm_`（跨 PP stage 归约）->
-`_check_finite`（`torch._assert_async`）-> `optimizer.step` -> token 归一化
-loss。
+非 PP 步骤中，`HFTransformerModel.preprocess_inputs` 负责统一 batch、构造 packed
+mask，并按 CP/TP 顺序切序列；`forward_backward_step` 在 `spmd_context` 内执行。
+随后 trainer 做 replicated-TP gradient SUM、grad norm/clipping、有限性检查、
+optimizer/scheduler step，并用全局有效 token 数归一化 loss。PP 路径则由 schedule
+接管 microbatch forward/backward，只有末 stage 计算 loss。
 
 ### 5.2 mesh 与 ParallelDims
 
-`mesh.py` 刻意不自己建多维 mesh：`MESH_AXES = ("dp", "cp", "tp")`，只提供
-`init_distributed` / `build_parallel_dims` / `build_mesh` 三个函数，所有视图由
-`ParallelDims`（parallel/parallel_dims.py）统一 unflatten。PP 不在 mesh 轴上
-（PP 是 stage 切分而非张量分片），`build_mesh` 的覆盖率校验天然成为 pp>1 的
-backstop。
+`mesh.py` 只提供 `init_distributed` / `build_parallel_dims` / `build_mesh` 三个入口；
+所有具体视图由 `ParallelDims`（`parallel/parallel_dims.py`）统一构造。world mesh
+包含 PP 外轴，并派生 dataloading、dense storage、dense fwd/bwd、sparse EP、batch、
+loss 等视图。PP 下每个 stage 从同一个 `ParallelDims` 解析自己的 dense 子视图，
+不能把 PP 简化成“完全不在 mesh 中”。
 
 ### 5.3 TP（tensor_parallel/tp.py）
 
@@ -262,31 +273,35 @@ backstop。
 （`[out, in/tp]` 切 dim1，配 reduce-scatter），均为 sequence-parallel 形态。
 plan 为 None 时读 `model.tp_plan`（即 HF `_tp_plan` 的重写版），按路径深度
 倒序替换 `nn.Linear`；遇 bias 直接 raise。可选注册对称内存
-（`enable_fsdp_symm_mem`）。不做：meta-init、fused QKV、FP8。
+（`enable_fsdp_symm_mem`）。`colwise_gather_output` 当前保守地保持 lm_head 复制，
+因为 hpmesh 尚无 vocab-sharded head + gather-output realizer；MoE-under-TP 同样明确
+拒绝。不要把这些 loud-raise/复制退化写成已支持能力。
 
 ### 5.4 CP / EP（context_parallel/ + expert_parallel/）
 
 **CP 已接线**。拦截点是 `hf_wrapper._flex_attention_hf` 读取的
 `_titan_flex_kernel`：`apply_cp`（cp>1）walk 每层 attention module 并 attach
-`CPFlexKernel`（`context_parallel/cp_kernel.py`，默认 KV all-gather 策略：k/v 经
-torch 的 `flex_cp_allgather` 收成全长，q 保持 token 分片；Ulysses 留
-`strategy` 参数位，首版 raise）。输入分片在 trainer 侧：
+`CPFlexKernel`（`context_parallel/cp_kernel.py`）支持两条真实路径：默认
+KV all-gather（K/V 收成全长，Q 保持 token 分片），以及 Ulysses（token↔head
+all-to-all）。Ulysses 要求 heads 可被 TP×CP 整除，并拒绝 load balancer 与 packed
+BlockMask 组合。输入分片由 wrapper 的 preprocessing 路径调用：
 `context_parallel/input_shard.py` 的 `shard_batch_for_cp`（封装 torch 私有
 `_context_parallel_shard`，支持 headtail load balancer）把
 input_ids/labels/positions 同步切片；BlockMask 只沿 Q 维分片
 （`shard_attention_mask_for_cp`）。loss/token 归约走含 cp 轴的 `loss` mesh。
 
-**EP 已接线**。`parallel/expert_parallel/ep.py` 的 `swap_hf_moe_blocks` 把 HF MoE block（首版支持
-Qwen3Moe 形态：`gate` + `experts` ModuleList，duck-typed 探测，识别不了就带模型
-类名 raise）替换为 `models/common` 的 `MoE`：router gate 与 experts 权重逐元素
+**EP 已接线**。`parallel/expert_parallel/ep.py` 的 `swap_hf_moe_blocks` 以形状和
+属性探测 Qwen3Moe、OLMoE、Mixtral、DeepSeek-V2/V3、GLM4 等共同布局，并替换为
+`models/common` 的 `MoE`：router gate 与 experts 权重逐元素
 直拷进 `TokenChoiceTopKRouter` / `GroupedExperts`；ep>1 时每 rank 切本地
 experts 片并接 `AllToAllTokenDispatcher`（`wire_meshes(ep_group=...)`），ep==1 用
 `LocalTokenDispatcher`。负载均衡 loss 走 router 上的
 `MicrobatchWiseLoadBalanceLoss`（coeff 取 HF config 的 `router_aux_loss_coef`），
 trainer 以梯度注入 hook 接线，不改主 loss 值。
 
-已知边界：CP 要求 flex backend 与 `seq_len` 的整除约束（纯 CP 的梯度归约已
-随 `fsdp_enabled` 入口修复解决，见 §8）。
+GPT-OSS 的转置、带 bias 专家布局，以及 DeepSeek-V2 的特定 group-limited 路由会
+明确拒绝。CP 要求 flex backend 与序列整除约束；纯 CP 的梯度归约通过 FSDP mesh
+覆盖 CP 轴。
 
 ### 5.5 PP（pipeline_parallel/）
 
@@ -309,7 +324,7 @@ model_part 一个内层 optimizer；checkpoint 的 optimizer state 一律按参�
 
 已知边界：pp+cp / pp+ep 组合显式 raise；tied embeddings 拒绝（deepcopy 会拆断
 共享权重）；只支持 `dataset="random"`（packed 语料的 positions 没有穿过
-schedule 的通道）；looped schedule 代码就绪但只有 1F1B 被等价测试覆盖。
+schedule 的通道）；looped schedule 已覆盖 Interleaved1F1B，V 风格 schedule 尚未验证。
 
 ### 5.6 components / datasets
 
@@ -324,13 +339,13 @@ schedule 的通道）；looped schedule 代码就绪但只有 1F1B 被等价测�
 ## 6. 一次训练步骤的数据流
 
 ```
-RandomTokenSource --(seed,step)--> Batch(input_ids, labels)   # 全局一致
-trainer._dp_slice                -> 本 dp rank 的批切片（PP 时按 "batch" 轴）
-shard_batch_for_cp（CP 时）      -> input_ids/labels/positions 沿序列维切片
+DataLoader                       -> Batch / TrainerBatch
+HFTransformerModel.preprocess_inputs
+                                 -> 统一 batch、构造 mask、按 CP 后 TP 切 token
 spmd_context(parallel_dims)      -> TLS 压入 dense/sparse mesh
 HFTransformerModel.forward       -> tok_embeddings -> layers -> norm -> lm_head
     每层内: TP 的 Colwise/RowwiseLinear 就地做 collective
-            CP 的 K/V all-gather 在 attention 前收成全长（Ulysses 预留）
+            CP 选择 K/V all-gather 或 Ulysses token↔head all-to-all
             EP 的 all-to-all dispatcher 在 MoE 前后换位
 PP 时: schedule.step(arg_mbs / target_mbs) 驱动各 stage，末 stage 出 loss
 loss (sum 归约, loss mesh) -> backward -> clip_grad_norm_ (跨 PP 归约) -> AdamW.step
@@ -342,9 +357,9 @@ loss (sum 归约, loss mesh) -> backward -> clip_grad_norm_ (跨 PP 归约) -> A
 建目录），`tests/integration_tests/` 放 torchrun 起的等价性脚本 —— 后者不是
 pytest，`testpaths` 不收集它们。
 
-G4 的兜底是 `integration_tests/` 里那套"分片 == 全量"的等价性测试，全部
-torchrun 2 ranks gloo 起，自建 mesh、不依赖 trainer 装配（pp_equivalence 除外，
-它驱动真实 Trainer）：
+G4 的兜底是 `integration_tests/` 里那套“分片 == 全量”的等价性测试。它们按拓扑用
+2 或 4 个 gloo rank 启动，自建 mesh、不依赖 trainer 装配（`pp_equivalence.py`
+除外，它驱动真实 Trainer）：
 
 | 测试 | 验证什么 |
 |---|---|
@@ -368,7 +383,7 @@ torchrun 2 ranks gloo 起，自建 mesh、不依赖 trainer 装配（pp_equivale
 
 已落地：TP（SP 前提接线：输入沿 TP 组切序列；CPU/gloo 回退路径；复制参数梯度
 跨 TP 组归约）、FSDP2（mesh 按 torchtitan 轴语义重建；纯 dp_replicate 的 DDP
-兜底）、CP（KV all-gather + Ulysses 接线）、EP（Qwen3Moe 形态替换 +
+兜底）、CP（KV all-gather + Ulysses 接线）、EP（多种可表示 HF MoE 布局替换 +
 all-to-all dispatcher + FSDP moe_enabled 接线）、PP（1F1B/Interleaved1F1B
 闭环 + DCP 续训）、训练循环、上述等价性测试。
 
@@ -381,27 +396,35 @@ loss 上报 collective 的局部门槛挂死风险。
 
 剩余边界（均为 loud-raise，不静默错）：
 
-1. pp+cp / pp+ep 组合未接线；tied embeddings 的 PP 拒绝。
+1. pp+cp / pp+ep 组合未接线；PP+activation checkpoint、PP+chunked loss 与 tied
+   embeddings 的 PP 均明确拒绝。
 2. ptrr load balancer 未实现；Ulysses 不支持 packed（BlockMask Q 分片与全长
    attention 冲突，attach 时拒绝）且不与 load balancer 组合。
 3. looped PP schedule 已覆盖 Interleaved1F1B；V 风格（DualPipeV/ZBV）未测，
    `pipeline_parallel_schedule_csv` 拒绝。
-4. EP 支持 Qwen3Moe 形态为主（transformers 5.x fused experts 布局）；带
-   per-expert bias 的 GPT-OSS 等显式拒绝。
-5. ep>1 且 `max_norm > 0` 拒绝训练：EP 感知的 grad norm 分组归约未移植
-   （专家参数是 plain tensor，torchtitan 的 DTensor 分组路径前提不成立）；
-   `max_norm <= 0` 可跑但上报的 grad_norm 缺 EP 组归约（仅指标偏差）。
-6. EP>1 的 checkpoint 不对称：专家权重是各 rank 内容不同的 plain tensor，
-   DCP checkpointer 按 replicated 存取——save 只留单 rank 切片，resume 会把
-   同一切片广播到所有 rank（塌缩）。修复依赖专家参数 DTensor 化，未做；
-   `apply_ep` 在 ep>1 时打 warning 提示不要 resume。
-7. TP+FSDP（dp_shard>1）组合与 4-rank 以上混合拓扑只有 mesh 形状 smoke，
-   无完整训练等价测试；CUDA symm-mem fused 路径本机（macOS）未实测。
-8. loss 上报的归约 mesh 未含 tp 轴：TP 开启时上报 loss 偏小的显示问题
-   （不影响梯度）；`efsdp*ep > num_experts` 的 placement 选择比上游严格
-   ep 倍（数值正确、placement 次优）。
+4. EP 支持 Qwen3Moe、OLMoE、Mixtral、DeepSeek-V2/V3、GLM4 的共同可表示布局；
+   GPT-OSS 的转置、带 per-expert bias 布局以及无法等价表达的路由规则显式拒绝。
+5. EP-aware grad norm 已按 dense/expert 参数分组：dense contribution 只计一次，
+   本地 expert contribution 在 EP group 上归约；`max_norm > 0` 使用同一个全局系数裁剪。
+6. EP>1 的 checkpoint 仍无正确专家表示，因此 Trainer 在模型构建前明确拒绝启用
+   checkpoint；不会再以 warning 放行可能塌缩专家切片的 save/resume。
+7. 最新 `vllm-ascend` 镜像的 Torch 2.10 缺少新版 FSDP per-parameter mesh result，
+   Transformers 5.14 也超出项目声明范围，因此 EP×FSDP placement 不能在该镜像完整
+   验证；环境详情见
+   [`hpmesh_torchtitan_alignment_audit_2026-09-21.md`](./hpmesh_torchtitan_alignment_audit_2026-09-21.md)。
+8. 8 卡 HCCL 已实测 Qwen3-8B、4096 序列、真实权重和真实 SFT 数据的
+   FSDP2+Full AC；meta 构建后只 materialize 本地 shard，BF16 参数通信、FP32 梯度归约。
+   完整 DCP checkpoint 已验证 step 1 保存、恢复 optimizer/scheduler/dataloader/train
+   state、执行 step 2 并再次保存。恢复 AdamW 状态后峰值显存约 51.40 GiB；首次训练约
+   44.66 GiB。symmetric-memory fused TP、NCCL 和真实多卡 overlap 仍需各自验证。
+9. 最终训练 checkpoint 必须设置 `last_save_model_only=False`。TorchTitan 默认的
+   model-only 最终保存是导出物，不含 optimizer、dataloader 或 train state，不能续训。
+10. Torch 2.10 容器复核中，FSDP replicate/shard、TP、CP 两种策略和 EP-aware grad
+    norm 的 2-rank gloo 等价性均通过；PP 1F1B 在修复 schedule API 兼容后可以运行，
+    但 step 2 起与非 PP 参考轨迹偏离（4 step 最大约 `8.5e-3`），因此 PP 当前状态是
+    **未通过**，不得以“闭环”或“完全对齐”描述，需继续定位跨 stage backward/update。
 
-多卡 GPU 验证清单（开发机是 macOS，无 nccl；以下在 GPU 环境执行）：
+多卡设备验证清单（按环境选择 gloo/nccl/hccl，并确保 PyTorch API 版本匹配）：
 
 ```bash
 # 等价性（nccl）

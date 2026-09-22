@@ -305,6 +305,16 @@ def build_pipeline_schedule(
             loss_fn=_scalar_loss_fn,
             scale_grads=False,
         )
+    # Torch 2.10's public ``step`` accepts a whole batch and splits tensor
+    # kwargs itself; hpmesh has already built microbatches because positions
+    # and labels are sequence-sharded before PP. Keep the denominator as a
+    # per-step schedule attribute and use the internal pre-split driver below.
+    schedule._hpmesh_global_valid_tokens = torch.ones((), dtype=torch.float32)
+    schedule._loss_fn = lambda pred, labels: _scalar_loss_fn(
+        pred,
+        labels,
+        global_valid_tokens=schedule._hpmesh_global_valid_tokens,
+    )
     logger.info(
         f"Using pipeline schedule {parallelism.pipeline_parallel_schedule} "
         f"with {num_microbatches} microbatches and {num_total_stages} stages."

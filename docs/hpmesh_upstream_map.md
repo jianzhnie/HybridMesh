@@ -1,7 +1,7 @@
 # hpmesh -> torchtitan 对应关系表
 
-[hpmesh](/Users/robin/work_dir/HybridMesh) 拿掉了 [TorchTitan](/Users/robin/work_dir/torchtitan) 的 `Configurable` 与 `Module` 两个抽象层，换来一个明显更短
-的框架：约 91 个模块、20.6k 行，覆盖 TP / FSDP2 / CP / EP / PP 五条并行路径的装配、
+[hpmesh](../hpmesh) 拿掉了 TorchTitan 的 `Configurable` 与 `Module` 两个抽象层，换来一个明显更短
+的框架：89 个 Python 模块、约 22.4k 行，覆盖 TP / FSDP2 / CP / EP / PP 五条并行路径的装配、
 训练循环、checkpoint 与等价性测试。
 
 下面是对应关系表：
@@ -12,7 +12,7 @@
 `# upstream: <path> @ <sha>` 之类的来源标注,那种标注试过又被退了,因为
 sha 会腐烂而表不会。
 
-**分类不是装饰,是操作指令。** 把 A 类的"逐字复制"规则套到 B 类文件上会毁掉
+**分类不是装饰,是操作指令。** 把 A 类的高保真同步规则套到 B 类文件上会毁掉
 设计;套到 C 类上会把项目**故意删掉**的抽象又拽回来。
 
 **比结构用 AST,不要比 diff 行数。** `utils/filesystem.py` 的 diff 有几十行,
@@ -32,50 +32,59 @@ sha 会腐烂而表不会。
 
 ## 图例
 
-- **A 移植 (vendored)** —— 从 torchtitan 复制。上游改了,hpmesh **应该**跟着改。
+- **A 移植 (vendored)** —— 从 torchtitan 移植。上游改了,hpmesh **应该**逐项核对。
   子类是它们的真实差异。
 - **B 适配 (adapted)** —— 同一个想法、不同的形状。上游改了,**读意图、不要抄形状**。
 - **C hpmesh 独有** —— 上游没有对应物(或同名不同源)。不要"对齐"它。
 - **D 缺口** —— 上游有,hpmesh **真的没有**。是要补还是不要补,是决策不是疏漏。
 
-`ratio` 是 AST 相似度,**表里的一律是"全量最佳匹配"**(脚本第 1 列),仅对 A/B
+分类按文件的**主要维护策略**划分；一个文件只能有一个主分类。文件内部若混合了移植
+与适配逻辑，在“改写点”中另行说明，避免同一文件同时收到互相冲突的操作指令。
+
+`ratio` 主要是 AST 相似度的历史快照,**历史行是"全量最佳匹配"**(脚本第 1 列),仅对 A/B
 类有意义。**1.000 不代表逐字相同** —— 剥掉
 docstring 后 `ast.unparse` 归一化了空白和引号。要判断"真逐字",看 ratio 为
 1.000 且人工确认过的那两个。少数行的"改写点"列会额外给出**同名比较**值 ——
 两者差得远时,最佳匹配多半是噪音,以同名值为准(见血的教训 6)。
 
+2026-09-21 复核后从 A1 移入 A2 的十行使用当前工作树的**指定对应文件直接比较**值，
+不是全量最佳匹配；这些值用于解释为何维护策略已经变化，不与历史排名混用。
+
 ***
 
-## A1 —— 逐字复制(改动需逐位验证)
+## A1 —— 高保真移植（改动需逐位验证）
+
+只有 `components/checkpointer/utils.py` 和 `utils/filesystem.py` 在该快照中经人工确认
+属于“去 docstring 后结构等价”；其余行即使 ratio 很高也不是逐字复制。
 
 | hpmesh                                 | torchtitan                              | ratio | <br />                                                          |
 | -------------------------------------- | --------------------------------------- | ----- | :-------------------------------------------------------------- |
 | `components/checkpointer/utils.py`     | `components/checkpointer/utils.py`      | 1.000 | <br />                                                          |
 | `utils/filesystem.py`                  | `tools/filesystem.py`                   | 1.000 | <br />                                                          |
 | `components/optimizer/utils.py`        | `components/optimizer/utils.py`         | 0.996 | <br />                                                          |
-| `parallel/parallel_dims.py`            | `distributed/parallel_dims.py`          | 0.988 | <br />                                                          |
 | `datasets/multimodal/mm_image.py`      | `hf_datasets/multimodal/utils/image.py` | 0.977 | <br />                                                          |
 | `datasets/multimodal/mm_text_utils.py` | `hf_datasets/multimodal/utils/text.py`  | 0.971 | <br />                                                          |
 | `datasets/multimodal/mm_video.py`      | `hf_datasets/multimodal/utils/video.py` | 0.967 | <br />                                                          |
-| `datasets/multimodal/mm_collator.py`   | `hf_datasets/multimodal/mm_collator.py` | 0.957 | <br />                                                          |
-| `models/common/multimodal.py`          | `models/common/multimodal.py`           | 0.945 | <br />                                                          |
 | `components/tokenizer.py`              | `components/tokenizer.py`               | 0.907 | <br />                                                          |
-| `datasets/types.py`                    | `components/data/types.py`              | 0.897 | <br />                                                          |
-| `parallel/tensor_parallel/linear.py`   | `distributed/linear.py`                 | 0.893 | <br />                                                          |
-| `components/checkpointer/dcp.py`       | `components/checkpointer/dcp.py`        | 0.862 | <br />                                                          |
-| `datasets/text/text.py`                | `hf_datasets/text_datasets.py`          | 0.852 | <br />                                                          |
-| `parallel/fully_shard/fsdp.py`         | `distributed/fsdp.py`                   | 0.846 | <br />                                                          |
-| `models/common/rope.py`                | `models/common/rope.py`                 | 0.823 | <br />                                                          |
-| `datasets/packing.py`                  | `components/data/packing.py`            | 0.820 | 配方做自由函数;选择器落在 `DataloaderConfig.packing`,上游落在模型 config registry |
 
 <br />
 
-A2 —— 移植但已改写(比例中等,需逐处核对)
+## A2 —— 移植但已改写（比例中等，需逐处核对）
 
 | hpmesh                                           | torchtitan                                              | ratio | 改写点                                                                                           |
 | ------------------------------------------------ | ------------------------------------------------------- | ----- | --------------------------------------------------------------------------------------------- |
 | `components/checkpointer/__init__.py`            | `components/checkpointer/__init__.py`                   | 0.757 | <br />                                                                                        |
 | `components/checkpointer/base.py`                | `components/checkpointer/base.py`                       | 0.717 | <br />                                                                                        |
+| `parallel/parallel_dims.py`                      | `distributed/parallel_dims.py`                          | 0.772 | hpmesh 扩展 world/loss/sparse mesh 视图，不能按旧 A1 结构覆盖                                           |
+| `datasets/multimodal/mm_collator.py`             | `hf_datasets/multimodal/mm_collator.py`                 | 0.777 | 增加 MRoPE grid/run/长度校验，当前已是契约适配                                                          |
+| `models/common/multimodal.py`                    | `models/common/multimodal.py`                           | 0.888 | 保留算法来源，但加入同步规避与更严格的 span/run 校验                                                      |
+| `datasets/types.py`                              | `components/data/types.py`                              | 0.506 | 去 Configurable 后重塑 build context 与 iteration policy                                             |
+| `parallel/tensor_parallel/linear.py`             | `distributed/linear.py`                                 | 0.511 | 保留 fused/fallback 数学意图，但运行时上下文和 autograd 形状已适配 hpmesh                                  |
+| `components/checkpointer/dcp.py`                 | `components/checkpointer/dcp.py`                        | 0.735 | 本地/remote storage、HF export 与生命周期已重塑                                                       |
+| `datasets/text/text.py`                          | `hf_datasets/text_datasets.py`                          | 0.767 | 路径与 processor 构造契约已适配                                                                       |
+| `parallel/fully_shard/fsdp.py`                   | `distributed/fsdp.py`                                   | 0.815 | 多轴 mesh 重建、HF decoder 与 MoE placement 是 hpmesh 适配                                            |
+| `models/common/rope.py`                          | `models/common/rope.py`                                 | 0.616 | 上游持续重构后结构已分叉；同步公式与边界修复，不同步 Module/缓存形状                                            |
+| `datasets/packing.py`                            | `components/data/packing.py`                            | 0.065 | 自由函数外还增加文档容量、padding mask、长文档切分和可恢复 remainder，按语义维护                              |
 | `models/common/scatter_add.py`                   | `ops/scatter_add.py`                                    | 0.711 | <br />                                                                                        |
 | `models/common/param_init.py`                    | `models/common/param_init.py`                           | 0.700 | <br />                                                                                        |
 | `datasets/sources.py`                            | `components/data/sources.py`                            | 0.700 | <br />                                                                                        |
@@ -84,33 +93,21 @@ A2 —— 移植但已改写(比例中等,需逐处核对)
 | `models/common/linear.py`                        | `models/common/linear.py`                               | 0.620 | <br />                                                                                        |
 | `datasets/loader.py`                             | `components/data/loader.py`                             | 0.590 | 去 `Configurable`;`GrainDataLoader` 直接收参数,无 config 类                                           |
 | `models/common/feed_forward.py`                  | `models/common/feed_forward.py`                         | 0.560 | **曾写完又被退**,不要在没有明确指令时重新引入                                                                     |
-| `parallel/spmd_shims.py`                         | `distributed/spmd_types.py`                             | 0.532 | **见 C 类说明**                                                                                   |
 | `models/common/dist_gemm.py`                     | `models/common/dist_gemm.py`                            | 0.527 | <br />                                                                                        |
 | `models/common/token_dispatcher.py`              | `models/common/token_dispatcher.py`                     | 0.441 | <br />                                                                                        |
 | `components/profiler.py`                         | `observability/profiler.py`                             | 0.413 | <br />                                                                                        |
 | `components/metrics.py`                          | `observability/metrics.py`                              | 0.381 | <br />                                                                                        |
 | `models/common/masks.py`                         | `models/common/attention.py`                            | 0.380 | 拆出了 mask 部分                                                                                   |
 | `components/optimizer/lr_scheduler.py`           | `components/optimizer/lr_scheduler.py`                  | 0.373 | 去 `Configurable`                                                                              |
-| `utils/spmd_context.py`                          | `distributed/spmd_types.py`                             | 0.350 | 同上                                                                                            |
-| `parallel/sharding.py`                           | `protocols/sharding.py`                                 | 0.340 | 换掉了 Module 协议                                                                                 |
 | `datasets/multimodal/mm_datasets.py`             | `hf_datasets/multimodal/mm_datasets.py`                 | 0.310 | 去 `Configurable`;packing 改自由函数 `build_mm_sample_packing`                                      |
-| `components/loss.py`                             | `components/loss.py`                                    | 0.297 | 见上,docstring 关于 upstream 的说法是错的(已于 2026-09-21 修正)                                             |
+| `components/loss.py`                             | `components/loss.py`                                    | 0.297 | 去 loss 类层次，保留自由函数与 vocab-parallel 数学                                                           |
 | `datasets/dataset.py`                            | `components/data/dataset.py`                            | 0.267 | 去 `Configurable`;三个节点类去 `Config` 后缀,构建走自由函数 `build_dataset`                                   |
 | `components/checkpointer/torch_checkpointing.py` | `components/checkpointer/torch_checkpointing.py`        | 0.265 | <br />                                                                                        |
 | `models/common/qkv.py`                           | `models/common/attention.py`                            | 0.242 | <br />                                                                                        |
 | `components/optimizer/optimizer.py`              | `components/optimizer/optimizer.py`                     | 0.240 | 容器化改写;`OptimizerWrapper` 已删                                                                   |
-| `trainer/config.py`                              | `config/configs.py`                                     | 0.189 | <br />                                                                                        |
-| `trainer/train.py`                               | `train.py`                                              | 0.186 | <br />                                                                                        |
-| `models/common/activation.py`                    | (同名,上游 `models/common/activation.py`)                   | 0.168 | **同名不同源**:最佳匹配是 `param_init.py`(噪音),同名仅 0.124,各自写的                                            |
-| `parallel/fully_shard/fsdp_wrap.py`              | `models/deepseek_v3/parallelize.py`                     | 0.155 | **B 类典型**:把 HF 模型套到 Decoder 形状上                                                               |
 | `models/common/moe.py`                           | `models/common/moe.py`                                  | 0.155 | <br />                                                                                        |
 | `parallel/activation_checkpoint.py`              | `distributed/activation_checkpoint.py`                  | 0.374 | **FullAC + SelectiveAC 已移植**;RegionAC(需 `torch_remat`)、MemoryBudgetAC(需编译)未移植,理由见文件 docstring |
 | `datasets/collators.py`                          | `components/data/collators.py`                          | 0.145 | <br />                                                                                        |
-| `models/common/embedding.py`                     | (同名,上游 `models/common/embedding.py`)                    | 0.141 | 同 `activation.py`,同名仅 0.138,同名不同源                                                             |
-| `parallel/pipeline_parallel/pp.py`               | `distributed/pipeline_parallel.py`                      | 0.130 | <br />                                                                                        |
-| `models/common/grouped_experts.py`               | `models/gpt_oss/moe.py`                                 | 0.119 | 上游的 `GroupedExperts` 在 `models/common/` 与 `gpt_oss` 各有一份                                      |
-| `mesh.py`                                        | (散在 `distributed/parallel_dims.py` + `trainer.py`)      | 0.111 | 上游无单一对应物,见 B 类                                                                                |
-| `utils/monitoring.py`                            | `tools/utils.py`                                        | 0.107 | 独立实现(含 `get_peak_flops`);名字毫不相干,是 AST 匹配找出来的                                                  |
 
 ## B —— 适配层(读意图,不要抄形状)
 
@@ -121,16 +118,20 @@ A2 —— 移植但已改写(比例中等,需逐处核对)
 | ---------------------------------------------- | ------------------------------------------------------------------------------------------------------ | ----------- |
 | `models/hf_wrapper.py`                         | `experiments/transformers_modeling_backend/model.py` 的包装层;上游另有 `models/*/model.py` 各一份                 | 0.059       |
 | `parallel/parallelize_hf.py`                   | `experiments/transformers_modeling_backend/parallelize.py` + 各 `models/*/parallelize.py`               | 0.089       |
-| `parallel/tensor_parallel/tp.py` + `linear.py` | `distributed/tensor_parallel.py` 等;hpmesh 是**手写 plan + 融合 GEMM**,不是声明式 `_sharding_config`              | 0.056       |
-| `parallel/expert_parallel/*`                   | `experiments/.../moe_replacement.py`;**不共享代码**,是另一套实现                                                  | 0.036-0.146 |
-| `parallel/context_parallel/*`                  | `distributed/context_parallel/`(`api.py`);但 `primitives.py` 的上游是 `models/common/cp_attention.py`,见 C 类 | 0.024-0.078 |
-| `parallel/pipeline_parallel/pipeline.py`       | `experiments/.../pipeline.py`;差异是 `None` -> `nn.Identity`、每 stage 追加 `rotary_emb`                      | 0.686       |
+| `parallel/tensor_parallel/tp.py`               | `distributed/tensor_parallel.py` + 各模型 TP plan；hpmesh 是**手写 plan realizer**，不是声明式 `_sharding_config` | 0.056       |
+| `parallel/expert_parallel/apply.py` + `ep.py`  | `experiments/.../moe_replacement.py` + 各模型 EP parallelize；hpmesh 搬运 HF 权重而非重新初始化                 | 0.036-0.146 |
+| `parallel/context_parallel/primitives.py`      | `models/common/cp_attention.py`；剥掉 attention 基类，只保留 redistribution                                   | 0.060       |
+| `parallel/fully_shard/fsdp_wrap.py`            | 各 `models/*/parallelize.py` 的 FSDP driver；HF 五部件适配                                                     | 0.155       |
+| `parallel/pipeline_parallel/pp.py`             | `distributed/pipeline_parallel.py`；hpmesh 直接消费 HF stage 部件                                             | 0.130       |
 | `trainer/trainer.py`                           | `trainer.py`,基本重写                                                                                      | 0.065       |
 | `trainer/config.py`                            | `config/configs.py`                                                                                    | 0.189       |
 | `trainer/train.py`                             | `train.py`                                                                                             | 0.186       |
+| `mesh.py`                                      | `distributed/parallel_dims.py` + `trainer.py` 中分散的 mesh 逻辑                                        | 0.111       |
+| `models/common/grouped_experts.py`             | `models/common/grouped_experts.py` + `models/gpt_oss/moe.py`                                           | 0.119       |
+| `utils/gc.py`                                  | `tools/utils.py` 的 GC helper，去 structured logger                                                     | 0.211       |
 
 **注意** **`mesh.py`**:上游没有单一对应物 —— mesh 逻辑散在
-`distributed/parallel_dims.py` 和 `trainer.py` 里,不是某个文件的移植(见 C 类)。
+`distributed/parallel_dims.py` 和 `trainer.py` 里,不是某个文件的移植。
 
 ***
 
@@ -138,45 +139,27 @@ A2 —— 移植但已改写(比例中等,需逐处核对)
 
 | hpmesh                                     | 说明                                                                                                                                                                                                                                                                                                     |
 | ------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `parallel/spmd_shims.py`                   | 0.532 —— **是** **`spmd_types`** **pip 包的薄壳,不是 torchtitan 的**。`spmd_types` 装在 site-packages。不要把它"对齐"到 `distributed/spmd_types.py`                                                                                                                                                                       |
-| `utils/spmd_context.py`                    | 同上,配合 `spmd_shims` 的上下文管理                                                                                                                                                                                                                                                                              |
+| `utils/spmd_context.py`                    | `spmd_types` pip 包的**独立活跃适配层**，由 trainer 和 `models/common/*` 使用；不依赖 `spmd_shims.py`                                                                                                                                                                                                                  |
 | `parallel/collectives.py`                  | 最优相似度 0.089,是独立实现                                                                                                                                                                                                                                                                                      |
 | `parallel/context_parallel/apply.py`       | 0.058;CP 的编排层,上游无对应文件                                                                                                                                                                                                                                                                                  |
 | `parallel/context_parallel/cp_kernel.py`   | 0.051;hpmesh 独有的 CP flex kernel                                                                                                                                                                                                                                                                        |
 | `parallel/context_parallel/input_shard.py` | 0.078                                                                                                                                                                                                                                                                                                  |
-| `parallel/context_parallel/primitives.py`  | 0.060 —— **有真实上游**:`models/common/cp_attention.py`。上游那里是 `KVAllGatherCPFlexInnerAttention` / `UlyssesCPFlexInnerAttention` 两个 `(CPInnerAttention, FlexInnerAttention)` 子类,hpmesh 没有 `FlexInnerAttention`,所以类层次被剥掉、只剩两个 redistribution 本身。**低 ratio 在这里不代表无源** —— 剥掉基类后 AST 结构必然对不上,这条是"改了形状的移植",不是"独有" |
-| `parallel/expert_parallel/apply.py`        | 0.146                                                                                                                                                                                                                                                                                                  |
-| `parallel/expert_parallel/ep.py`           | 0.036;HF block -> 原生 MoE 的**权重搬运**,上游 `moe_replacement.py` 是重新初始化,不是同一件事                                                                                                                                                                                                                               |
-| `mesh.py`                                  | 0.111;上游 mesh 逻辑散在 `distributed/parallel_dims.py` + `trainer.py`                                                                                                                                                                                                                                       |
 | `utils/logger_utils.py`                    | 0.070,上游无对应                                                                                                                                                                                                                                                                                            |
 | `utils/monitoring.py`                      | 与 `tools/utils.py` 0.107,独立实现(含 `get_peak_flops`)                                                                                                                                                                                                                                                      |
 | `utils/checkpoint_keys.py`                 | 上游无                                                                                                                                                                                                                                                                                                    |
-| `utils/gc.py`                              | 与 `tools/utils.py` 0.211                                                                                                                                                                                                                                                                               |
 | `utils/device.py`                          | 上游无(0.382 是噪音,命中实验目录)                                                                                                                                                                                                                                                                                  |
 | `utils/batch_invariant.py`                 | 上游无;上游把 batch-invariant 开关放在 `trainer.py`/`config/configs.py` 里,没有独立模块                                                                                                                                                                                                                                 |
 | `models/common/flex_kernel.py`             | **上游没有这个文件**(上一版说"上游是 torchtitan `Module` 子类"是错的)。hpmesh 无 Module 协议,自持 `_sharding_config`                                                                                                                                                                                                             |
 | `models/common/nn_modules.py`              | 上游有同路径文件,但 ratio **0.061** —— 上游那份是 `nn.X` + `Module` 的菱形继承包装,hpmesh 只留了 PP 占位所需的部分,不是移植(注:0.263 是它对 `param_init.py` 的最佳匹配,是噪音,不是同名比)                                                                                                                                                                  |
+| `models/common/activation.py`              | 与上游同名但不同源；公式由 hpmesh 自持，不能按 A 类覆盖                                                                                                                                                                                                                                                            |
+| `models/common/embedding.py`               | 与上游同名但不同源；包含 hpmesh 的 vocab-shard 契约                                                                                                                                                                                                                                                               |
 | `datasets/random_data.py`                  | 合成语料,上游无                                                                                                                                                                                                                                                                                               |
 | `datasets/build.py`                        | 工厂;上游把 `build()` 放在 config 上                                                                                                                                                                                                                                                                           |
 
-**已知悬空**:`parallel/sharding.py` 的 `ShardingConfig` 与
-`models/common/flex_kernel.py` 的 `HFFlexKernel._sharding_config` 目前
-**没有任何读取者** —— 唯一会读它们的 `set_hf_sharding_configs` 已随
-`hpmesh/parallel/hf_sharding.py` 在 `cc6e217` 被删除(`moe_swap.py`、
-`placements.py`、`spec.py`、`moe_probe.py` 同批)。这几个符号留着是给将来的
-分片层用的,不是活代码。TP 现在的实现是 `parallel/tensor_parallel/tp.py` 的
-plan 引擎,与它们无关。
-
-悬空是**成链**的,不止那几个符号:`parallel/sharding.py`(去 docstring 后 2902 字符,文件本身 6865 字节)唯一的
-导入者是 `parallel/spmd_shims.py`(0.532,是 `spmd_types` pip 包的薄壳),
-而 **`spmd_shims.py` 自己没有任何导入者** —— 已实测:`import hpmesh`、
-`import hpmesh.parallel`、`import hpmesh.parallel.expert_parallel` +
-`hpmesh.parallel.tensor_parallel.tp` 之后,`sys.modules` 里两个模块都不存在。
-`spmd_shims.py` 的 docstring 说 `resolve_placements` 是 "its only real
-consumer",这句现在是反的:它自己才是唯一的消费者链,而那条链的顶端没人接。
-所以"要么接线,要么删"面对的其实是**这两个文件一起**(`sharding.py` 单独留着
-没有意义)。注:`spmd_context.py` 是**活的**(trainer、`models/common/*` 都在
-用),它和 `spmd_shims.py` 只是名字像 —— 后者是上层 shim,不要一起删。
+**已清理悬空链**：`parallel/sharding.py` 与 `parallel/spmd_shims.py` 没有运行时
+消费者，已在 2026-09-21 一并删除。`utils/spmd_context.py` 是独立活代码，不在删除组
+内。`HFFlexKernel._sharding_config` 仍是无人读取的兼容字段；TP 的活跃实现继续是
+`parallel/tensor_parallel/tp.py` 的 plan 引擎。
 
 ***
 
@@ -184,8 +167,8 @@ consumer",这句现在是反的:它自己才是唯一的消费者链,而那条�
 
 | 上游                                                                                | 影响                                                                                       |
 | --------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------- |
-| `distributed/compile.py`                                                          | **被裁剪成一个 `torch.compile(model)`**(`parallelize_hf.py:158`,PP 每 chunk 一次在 `pp.py:255`)。裁掉的是四件互相独立的事:逐 block 编译、async TP `_micro_pipeline_tp`、`regional_inductor`、`capture_scalar_outputs`(后者是 token-choice MoE dispatch 的动态 shape 所需的) |
-| `models/common/moe_sharding.py`                                                   | **比"缺一个文件"更深**。hpmesh 有这套**形式**(`parallel/sharding.py` 的 `ShardingConfig` + `resolve_placements`),但没有 MoE 的**声明**,也没有引擎 —— `set_moe_sharding_config` 要求基类有 `sharding_config` 属性 + 一个读 `in_src/in_dst/out_src/out_dst_shardings` 的 `parallelize_module`,hpmesh 两个都没有。而且它真正的载荷是 **MoE-under-TP**(routed 专家按 `Shard(1)/Shard(2)` 上 TP 轴、router 保持 Replicate),而 hpmesh 的 TP **明确拒绝** MoE 专家(`tp.py:293`,`moe_tp_experts` 直接 raise:没有 fused-expert realizer)。所以这不是一个模块的缺口,是 **TP×MoE 这个组合维度整体没有** |
+| `distributed/compile.py`                                                          | **被裁剪成整体 `torch.compile(model)`**（PP 则每 chunk 一次）。裁掉的是四件互相独立的事：逐 block 编译、async TP `_micro_pipeline_tp`、`regional_inductor`、`capture_scalar_outputs`（后者是 token-choice MoE dispatch 的动态 shape 所需的） |
+| `models/common/moe_sharding.py`                                                   | **比“缺一个文件”更深**。旧的未接线 `parallel/sharding.py` 形式已删除；hpmesh 没有 MoE 的 TP 声明或读取声明的运行引擎。它真正的载荷是 **MoE-under-TP**（routed 专家在 TP 轴分片、router 保持 Replicate），而 hpmesh 的 TP 对 `moe_tp_experts` 明确 raise。所以这是 **TP×MoE 组合维度整体没有**，不是漏文件。 |
 | `components/quantization/`, `structured_logger/`, `protocols/`, `configurable.py` | **故意删除**,不是缺口。不要"补回来"                                                                    |
 
 **已从 D 移除**:`distributed/activation_checkpoint.py` 的 `SelectiveAC` —— 于
@@ -217,7 +200,6 @@ hpmesh 没有的 `Module` 协议上)、`MemoryBudgetAC` 只在模型被 compile 
 | `parallel/context_parallel/__init__.py`  | 23 | `distributed/context_parallel/__init__.py` |
 | `parallel/expert_parallel/__init__.py`   | 20 | 上游无对应(见 C 类)                               |
 | `parallel/pipeline_parallel/__init__.py` | 12 | 上游无对应                                      |
-| `components/optimizer/__init__.py`       | 34 | `components/optimizer/__init__.py`         |
 | `trainer/__init__.py`                    | 26 | 上游无对应                                      |
 
 `__init__.py` 的 ratio 平均偏低(0.3 上下)是正常的 —— 它们导出的是各自的公开面,
@@ -243,9 +225,19 @@ hpmesh 没有的 `Module` 协议上)、`MemoryBudgetAC` 只在模型被 compile 
 
 ## 版本与漂移
 
-- torchtitan `1c7ab8089` 之后 hpmesh 未跟进的:`git -C <torchtitan> log <sha>..HEAD -- torchtitan/`
-- 本表基线 hpmesh `58eb279`;其父提交 `53a2ead` 起,`hpmesh/parallel/context_parallel/`
-  做过一轮 CP 测试与文档整理。
+- 本文最近一次人工审计工作树：hpmesh `8a2f269`，TorchTitan `c6e416bbd`；详细验证
+  记录见 [`hpmesh_torchtitan_alignment_audit_2026-09-21.md`](./hpmesh_torchtitan_alignment_audit_2026-09-21.md)。
+- 表中的 ratio 除 A2 中明确标为 2026-09-21 复核的十行外，来自早期结构快照
+  （hpmesh `58eb279` 附近），只用于解释来源，**不是当前工作树的实时相似度**。
+  源码变化后应运行下方脚本重算，不能据旧 ratio 判定漂移。
+- 检查后续漂移：`git -C <torchtitan> log c6e416bbd..HEAD -- torchtitan/`。
+- 2026-09-22 设备验证补充：Qwen3-8B 已按 TorchTitan 的 meta 构建 → FSDP →
+  `to_empty` → checkpoint load 顺序完成 8 卡 HCCL、4096 序列的真实训练，并完成完整
+  DCP save→resume。训练示例显式使用 `last_save_model_only=False`；上游默认的
+  model-only 最终 checkpoint 只适合作为导出物，不能作为续训状态。
+- 同日并行复核修正了 EP 不应计入 world-size 乘积的 config helper，以及 Torch 2.10
+  functional-collective 的 TP fallback API。2-rank FSDP/TP/CP/EP-grad-norm 等价性通过；
+  PP 1F1B 的多步轨迹仍有约 `8.5e-3` 最大偏差，保持未通过状态。
 
 ***
 
@@ -300,7 +292,7 @@ for p in sorted(HP.rglob("*.py")):
 **必须先把 torchtitan 的候选集限定在** **`torchtitan/torchtitan/`** **下**,否则会匹配到
 `experiments/rl/` 之类的噪音。
 
-**性能提示(本次实测)**:不要用 `autojunk=False`,91 x 444 会跑十几分钟。
+**性能提示(历史实测)**:不要用 `autojunk=False`,91 x 444 会跑十几分钟。
 默认 `autojunk=True` 加那条上界剪枝就能在两分钟内跑完。
 
 **不要用** **`diff`** **行数判断改动量**,`quick_ratio()` 也**不能**用来筛候选 ——

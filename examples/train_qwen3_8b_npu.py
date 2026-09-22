@@ -38,6 +38,7 @@ DATASET_PATH = (
 def qwen3_8b_npu_config() -> HybridMeshConfig:
     model_path = os.environ.get("HPMESH_QWEN3_8B_PATH", MODEL_PATH)
     dataset_path = os.environ.get("HPMESH_DATASET_PATH", DATASET_PATH)
+    save_checkpoint = os.environ.get("HPMESH_SAVE_CHECKPOINT", "1") == "1"
     if not os.path.isfile(os.path.join(model_path, "config.json")):
         raise FileNotFoundError(f"Qwen3-8B config.json not found under {model_path}")
     if not os.path.isfile(dataset_path):
@@ -55,17 +56,21 @@ def qwen3_8b_npu_config() -> HybridMeshConfig:
         ),
         training=TrainingConfig(
             global_batch_size=int(os.environ.get("HPMESH_GLOBAL_BATCH_SIZE", "8")),
-            max_seq_len=int(os.environ.get("HPMESH_MAX_SEQ_LEN", "2048")),
+            max_seq_len=int(os.environ.get("HPMESH_MAX_SEQ_LEN", "4096")),
             steps=int(os.environ.get("HPMESH_STEPS", "100")),
             seed=42,
             deterministic=False,
             activation_checkpoint_mode="full",
             checkpoint_config=CheckpointConfig(
                 enable=True,
-                load_only=True,
+                load_only=not save_checkpoint,
                 initial_load_path=model_path,
                 initial_load_model_only=True,
                 initial_load_in_hf=True,
+                # This is a training checkpoint, not an export artifact: keep
+                # optimizer, scheduler, dataloader, and counters so the final
+                # step can be resumed safely.
+                last_save_model_only=False,
             ),
             dataloader_config=DataloaderConfig(
                 dataset="local_jsonl_sft",
@@ -73,10 +78,13 @@ def qwen3_8b_npu_config() -> HybridMeshConfig:
                 tokenizer_path=model_path,
                 prompt_field="problem",
                 response_field="solution",
+                packing="first_fit",
+                max_num_documents=1,
             ),
             metrics_config=MetricsConfig(log_freq=1),
             dump_folder=os.environ.get(
-                "HPMESH_DUMP_FOLDER", "./outputs/qwen3-8b-npu"
+                "HPMESH_DUMP_FOLDER",
+                "/home/jianzhnie/llmtuner/llm/HybridMesh/outputs/qwen3-8b-npu",
             ),
         ),
     )

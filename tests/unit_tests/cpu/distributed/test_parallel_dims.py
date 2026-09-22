@@ -200,6 +200,17 @@ def test_derive_dp_narrows_by_the_non_dp_sizes() -> None:
     assert cfg.derive_dp(world_size=8) == 4
 
 
+def test_derive_dp_does_not_count_ep_as_an_extra_world_axis() -> None:
+    """EP tiles the dense sparse-region ranks; it does not consume more ranks."""
+    cfg = _config(data_parallel_shard_size=-1, expert_parallel_size=4)
+    pd = build_parallel_dims(cfg, world_size=8)
+
+    assert cfg.derive_dp(world_size=8) == 8
+    assert pd is not None
+    assert pd.dp_shard == 8
+    assert pd.ep == 4
+
+
 def test_build_parallel_dims_resolves_against_world_size() -> None:
     """Single process -> no process group, so there is no ``ParallelDims`` at all.
 
