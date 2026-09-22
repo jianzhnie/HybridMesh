@@ -240,7 +240,10 @@ def test_the_timeout_applies_to_every_one_dimensional_group_and_the_default(
 
     monkeypatch.setattr(collectives.dist, "barrier", lambda **_: None)
     monkeypatch.setattr(
-        collectives.dist, "set_timeout", lambda t, g=None: lowered.append((t, g))
+        collectives.dist,
+        "set_timeout",
+        lambda t, g=None: lowered.append((t, g)),
+        raising=False,
     )
 
     collectives.set_pg_timeouts(timedelta(seconds=7), _Dims())
@@ -250,6 +253,54 @@ def test_the_timeout_applies_to_every_one_dimensional_group_and_the_default(
         (timedelta(seconds=7), "group:dp_shard"),
         (timedelta(seconds=7), None),  # the default (world) group, not a mesh
     ]
+
+
+def test_timeout_uses_torch_210_compatibility_api(monkeypatch) -> None:
+    """Torch 2.10 keeps runtime timeout adjustment in distributed_c10d."""
+    from datetime import timedelta
+
+    from hpmesh.parallel import collectives
+
+    lowered = []
+
+    class _Dims:
+        def get_all_one_dimensional_meshes(self):
+            return {}
+
+    monkeypatch.delattr(collectives.dist, "set_timeout", raising=False)
+    monkeypatch.setattr(collectives.dist, "barrier", lambda **_: None)
+    monkeypatch.setattr(
+        collectives.dist.distributed_c10d,
+        "_set_pg_timeout",
+        lambda timeout, group=None: lowered.append((timeout, group)),
+    )
+
+    collectives.set_pg_timeouts(timedelta(seconds=11), _Dims())
+
+    assert lowered == [(timedelta(seconds=11), None)]
+
+
+def test_timeout_adjustment_is_skipped_for_hccl(monkeypatch) -> None:
+    """HCCL does not implement c10d's runtime timeout adjustment."""
+    from datetime import timedelta
+
+    from hpmesh.parallel import collectives
+
+    class _Dims:
+        def get_all_one_dimensional_meshes(self):
+            raise AssertionError("groups must not be visited for HCCL")
+
+    monkeypatch.setattr(collectives.dist, "barrier", lambda **_: None)
+    monkeypatch.setattr(collectives.device_module, "synchronize", lambda *_: None)
+    monkeypatch.setattr(
+        collectives.dist.distributed_c10d,
+        "_set_pg_timeout",
+        lambda *_: pytest.fail("HCCL timeout setter must not be called"),
+    )
+
+    collectives.set_pg_timeouts(
+        timedelta(seconds=11), _Dims(), device=torch.device("npu:0")
+    )
 
 
 def test_a_non_positive_train_timeout_is_rejected() -> None:
