@@ -989,6 +989,14 @@ class DataloaderConfig:
         default=None,
         metadata={"help": "Corpus path. Required for --dataset local_jsonl."},
     )
+    prompt_field: str = field(
+        default="prompt",
+        metadata={"help": "Prompt field used by dataset=local_jsonl_sft."},
+    )
+    response_field: str = field(
+        default="response",
+        metadata={"help": "Assistant field used by dataset=local_jsonl_sft."},
+    )
     shuffle: bool = field(
         default=True,
         metadata={"help": "Globally shuffle before sharding across DP ranks"},
@@ -1056,8 +1064,12 @@ class DataloaderConfig:
                 f"tokenizer_path is required for dataset '{self.dataset}'. "
                 "Only 'random' runs without a tokenizer."
             )
-        if self.dataset == "local_jsonl" and not self.dataset_path:
-            raise ValueError("dataset_path is required for dataset 'local_jsonl'")
+        if self.dataset in {"local_jsonl", "local_jsonl_sft"} and not self.dataset_path:
+            raise ValueError(f"dataset_path is required for dataset {self.dataset!r}")
+        if self.dataset == "local_jsonl_sft" and (
+            not self.prompt_field.strip() or not self.response_field.strip()
+        ):
+            raise ValueError("local_jsonl_sft field names cannot be empty")
         # Membership in ``datasets.text.text.DATASETS`` /
         # ``datasets.multimodal.mm_datasets.MM_DATASETS`` is checked by
         # ``datasets/build.py`` at build time, not here: reading the registries

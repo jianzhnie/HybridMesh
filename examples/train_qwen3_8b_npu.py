@@ -25,16 +25,23 @@ from hpmesh.trainer import (
     ParallelConfig,
     TrainingConfig,
 )
-from hpmesh.trainer.config import CheckpointConfig, MetricsConfig
+from hpmesh.trainer.config import CheckpointConfig, DataloaderConfig, MetricsConfig
 from hpmesh.trainer.trainer import Trainer
 
 MODEL_PATH = "/home/jianzhnie/llmtuner/hfhub/models/Qwen/Qwen3-8B"
+DATASET_PATH = (
+    "/home/jianzhnie/llmtuner/hfhub/datasets/EleutherAI/"
+    "hendrycks_math/train.jsonl"
+)
 
 
 def qwen3_8b_npu_config() -> HybridMeshConfig:
     model_path = os.environ.get("HPMESH_QWEN3_8B_PATH", MODEL_PATH)
+    dataset_path = os.environ.get("HPMESH_DATASET_PATH", DATASET_PATH)
     if not os.path.isfile(os.path.join(model_path, "config.json")):
         raise FileNotFoundError(f"Qwen3-8B config.json not found under {model_path}")
+    if not os.path.isfile(dataset_path):
+        raise FileNotFoundError(f"training dataset not found: {dataset_path}")
 
     return HybridMeshConfig(
         model=ModelConfig(model_name_or_path=model_path),
@@ -49,15 +56,23 @@ def qwen3_8b_npu_config() -> HybridMeshConfig:
         training=TrainingConfig(
             global_batch_size=int(os.environ.get("HPMESH_GLOBAL_BATCH_SIZE", "8")),
             max_seq_len=int(os.environ.get("HPMESH_MAX_SEQ_LEN", "2048")),
-            steps=int(os.environ.get("HPMESH_STEPS", "20")),
+            steps=int(os.environ.get("HPMESH_STEPS", "100")),
             seed=42,
             deterministic=False,
             activation_checkpoint_mode="full",
             checkpoint_config=CheckpointConfig(
                 enable=True,
+                load_only=True,
                 initial_load_path=model_path,
                 initial_load_model_only=True,
                 initial_load_in_hf=True,
+            ),
+            dataloader_config=DataloaderConfig(
+                dataset="local_jsonl_sft",
+                dataset_path=dataset_path,
+                tokenizer_path=model_path,
+                prompt_field="problem",
+                response_field="solution",
             ),
             metrics_config=MetricsConfig(log_freq=1),
             dump_folder=os.environ.get(
