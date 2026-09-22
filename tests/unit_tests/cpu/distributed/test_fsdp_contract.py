@@ -19,10 +19,12 @@ accessors are plain attribute lookups on a tiny offline model.
 from __future__ import annotations
 
 import pytest
+import torch
 import torch.nn as nn
 from torch.nn import ModuleDict, ModuleList
 
 from hpmesh.models.hf_wrapper import HFTransformerModel, build_model_config
+from hpmesh.parallel.fully_shard import fsdp_wrap
 from hpmesh.parallel.fully_shard.fsdp import iter_transformer_layers
 
 _VOCAB = 32
@@ -132,3 +134,39 @@ def test_accessors_do_not_add_duplicate_parameters(tied: bool) -> None:
     wrapper = _wrapper(tied=tied)
 
     assert len(list(wrapper.parameters())) == len(list(wrapper.model.parameters()))
+
+
+def test_apply_fsdp_preserves_parameter_dtype_for_mixed_precision(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """BF16 construction must not be silently widened by the FSDP policy."""
+
+    class _Mesh:
+        def size(self) -> int:
+            return 2
+
+    captured: dict[str, object] = {}
+    monkeypatch.setattr(fsdp_wrap, "resolve_fsdp_mesh", lambda _dims: _Mesh())
+    monkeypatch.setattr(fsdp_wrap, "resolve_sparse_fsdp_mesh", lambda _dims: None)
+    monkeypatch.setattr(
+        fsdp_wrap,
+        "apply_fsdp_to_decoder",
+        lambda _model, _mesh, **kwargs: captured.update(kwargs),
+    )
+
+    model = nn.Linear(4, 4, dtype=torch.bfloat16)
+    parallel_dims = type(
+        "ParallelDimsStub",
+        (),
+        {"pp_enabled": False, "ep": 1},
+    )()
+    config = type(
+        "ParallelConfigStub",
+        (),
+        {"fsdp_reshard_after_forward": "default", "enable_fsdp_symm_mem": False},
+    )()
+
+    fsdp_wrap.apply_fsdp(model, None, config, parallel_dims)
+
+    assert captured["param_dtype"] is torch.bfloat16
+    assert captured["reduce_dtype"] is torch.float32

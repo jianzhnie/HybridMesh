@@ -304,13 +304,17 @@ class ParallelConfig:
     """
 
     def non_dp_sizes(self) -> int:
-        """Product of the fixed (non-derivable) degrees: dp_replicate*tp*pp*cp*ep."""
+        """Product of fixed world-mesh degrees: dp_replicate*tp*pp*cp.
+
+        EP is not an additional world dimension. It tiles the existing
+        ``dp_shard * cp * tp`` sparse region, matching ``ParallelDims`` and
+        TorchTitan's mesh algebra.
+        """
         return (
             self.data_parallel_replicate_size
             * self.tensor_parallel_size
             * self.pipeline_parallel_size
             * self.context_parallel_size
-            * self.expert_parallel_size
         )
 
     def derive_dp(self, world_size: int) -> int:
@@ -327,13 +331,13 @@ class ParallelConfig:
             if world_size % fixed != 0:
                 raise ValueError(
                     f"world_size={world_size} not divisible by "
-                    f"dp_replicate*tp*pp*cp*ep={fixed}"
+                    f"dp_replicate*tp*pp*cp={fixed}"
                 )
             return world_size // fixed
         dp_shard = self.data_parallel_shard_size
         if dp_shard * fixed != world_size:
             raise ValueError(
-                f"dp_shard*dp_replicate*tp*pp*cp*ep = {dp_shard * fixed} "
+                f"dp_shard*dp_replicate*tp*pp*cp = {dp_shard * fixed} "
                 f"!= world_size={world_size}"
             )
         return dp_shard
@@ -362,6 +366,7 @@ class ParallelConfig:
                 f"{self.train_timeout_seconds}"
             )
         for name in (
+            "data_parallel_replicate_size",
             "tensor_parallel_size",
             "pipeline_parallel_size",
             "context_parallel_size",

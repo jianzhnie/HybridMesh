@@ -13,13 +13,17 @@ fi
 export HPMESH_QWEN3_8B_PATH="${HPMESH_QWEN3_8B_PATH:-/home/jianzhnie/llmtuner/hfhub/models/Qwen/Qwen3-8B}"
 export HPMESH_DATASET_PATH="${HPMESH_DATASET_PATH:-/home/jianzhnie/llmtuner/hfhub/datasets/EleutherAI/hendrycks_math/train.jsonl}"
 export HPMESH_GLOBAL_BATCH_SIZE="${HPMESH_GLOBAL_BATCH_SIZE:-8}"
-export HPMESH_MAX_SEQ_LEN="${HPMESH_MAX_SEQ_LEN:-2048}"
+export HPMESH_MAX_SEQ_LEN="${HPMESH_MAX_SEQ_LEN:-4096}"
 export HPMESH_STEPS="${HPMESH_STEPS:-100}"
 export HPMESH_DUMP_FOLDER="${HPMESH_DUMP_FOLDER:-$repo_root/outputs/qwen3-8b-npu}"
+export HPMESH_SAVE_CHECKPOINT="${HPMESH_SAVE_CHECKPOINT:-1}"
+
+mkdir -p "$HPMESH_DUMP_FOLDER/logs"
+log_file="$HPMESH_DUMP_FOLDER/logs/train_$(date +%Y%m%d_%H%M%S).log"
 
 nproc_per_node="${HPMESH_NPROC_PER_NODE:-8}"
 master_addr="${MASTER_ADDR:-127.0.0.1}"
 master_port="${MASTER_PORT:-29500}"
 torchrun --master_addr="$master_addr" --master_port="$master_port" \
   --nproc_per_node="$nproc_per_node" \
-  -m examples.train_qwen3_8b_npu
+  -m examples.train_qwen3_8b_npu 2>&1 | tee "$log_file"

@@ -29,6 +29,7 @@ from hpmesh.trainer.config import (
 @pytest.mark.parametrize(
     "field",
     [
+        "data_parallel_replicate_size",
         "tensor_parallel_size",
         "pipeline_parallel_size",
         "context_parallel_size",

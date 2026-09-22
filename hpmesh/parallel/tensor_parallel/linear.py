@@ -47,17 +47,19 @@ def ensure_symm_mem_ops():
 def _functional_collectives():
     """Import torch's functional collectives, lazily and version-tolerantly.
 
-    The autograd-covered variants were renamed across torch releases
-    (``all_gather_into_tensor`` -> ``all_gather_single``); accept either rather
-    than pinning a torch version for what is a CPU fallback path.
+    The autograd-covered variants were renamed across torch releases. Current
+    torch exposes the dimension-preserving ``*_tensor_autograd`` names; older
+    releases used ``*_single`` or ``*_into_tensor``. Prefer the autograd
+    variants explicitly: the non-autograd collectives would silently break TP
+    weight/input gradients.
     """
     from torch.distributed import _functional_collectives as funcol
 
-    try:
+    if hasattr(funcol, "all_gather_tensor_autograd"):
+        return funcol.all_gather_tensor_autograd, funcol.reduce_scatter_tensor_autograd
+    if hasattr(funcol, "all_gather_single"):
         return funcol.all_gather_single, funcol.reduce_scatter_single
-    except AttributeError:
-        # Older torch spelling of the same autograd-covered collectives.
-        return funcol.all_gather_into_tensor, funcol.reduce_scatter_tensor
+    return funcol.all_gather_into_tensor, funcol.reduce_scatter_tensor
 
 
 def all_gather_linear(

@@ -22,6 +22,7 @@ from hpmesh.models.hf_wrapper import (
     HFTransformerModel,
     build_model_config,
     build_model_config_for,
+    materialize_meta_model,
 )
 from hpmesh.trainer import HybridMeshConfig, TrainingConfig
 
@@ -44,6 +45,36 @@ def model() -> HFTransformerModel:
         },
     )
     return HFTransformerModel(config).eval()
+
+
+def test_meta_materialization_restores_rope_and_loads_exact_weights() -> None:
+    """Meta construction must not leave RoPE's non-persistent buffers empty."""
+    config = build_model_config(
+        "qwen3",
+        seq_len=64,
+        arch_overrides={
+            "vocab_size": _VOCAB,
+            "hidden_size": _HIDDEN,
+            "intermediate_size": 64,
+            "num_hidden_layers": 2,
+            "num_attention_heads": 4,
+            "num_key_value_heads": 2,
+        },
+    )
+    torch.manual_seed(7)
+    reference = HFTransformerModel(config).eval()
+    with torch.device("meta"):
+        restored = HFTransformerModel(config).eval()
+
+    materialize_meta_model(restored, torch.device("cpu"))
+    restored.load_state_dict(reference.state_dict(), strict=True)
+
+    assert torch.equal(
+        restored.rotary_emb.inv_freq, reference.rotary_emb.inv_freq
+    )
+    ids = torch.randint(0, _VOCAB, (16,))
+    with torch.no_grad():
+        assert torch.equal(restored(ids), reference(ids))
 
 
 # -- part names ---------------------------------------------------------------

@@ -64,6 +64,7 @@ __all__ = [
     "HFTransformerModel",
     "build_model_config",
     "build_model_config_for",
+    "materialize_meta_model",
     "num_flops_per_token",
 ]
 
@@ -190,8 +191,15 @@ def build_model_config_for(cfg) -> PretrainedConfig:
     config = build_model_config(
         cfg.hf_model, seq_len=cfg.max_seq_len, arch_overrides=overrides
     )
+    # A real corpus normally packs several documents and needs block-causal
+    # masking. ``max_num_documents=1`` is the deliberate tensor-attention path:
+    # one padded SFT document per row needs only ordinary causality, which lets
+    # NPU/SDPA train without allowing attention across sample boundaries.
     config.attn_mask_type = (
-        "causal" if cfg.dataloader.dataset == "random" else "block_causal"
+        "causal"
+        if cfg.dataloader.dataset == "random"
+        or cfg.dataloader.max_num_documents == 1
+        else "block_causal"
     )
     return config
 
@@ -368,6 +376,47 @@ def _document_shift(labels: torch.Tensor, *, seq_len: int) -> torch.Tensor:
     boundaries, so it never calls this.
     """
     return next_token_targets(labels.reshape(-1), seq_len=seq_len)
+
+
+def materialize_meta_model(model: nn.Module, device: torch.device) -> None:
+    """Materialize an already-parallelized HF model without a full copy.
+
+    FSDP turns meta parameters into sharded meta ``DTensor`` objects; calling
+    ``to_empty`` afterwards allocates only their local shards. Non-persistent
+    buffers are not present in the HF checkpoint, so they must be reconstructed
+    rather than left as uninitialized ``to_empty`` storage. Decoder RoPE is the
+    only such buffer in the currently supported HF text models; unknown buffers
+    fail loudly so a new architecture cannot train on garbage state.
+    """
+    meta_buffers = [
+        (module, name)
+        for module in model.modules()
+        for name, value in module.named_buffers(recurse=False)
+        if value.is_meta
+    ]
+    model.to_empty(device=device)
+
+    refreshed: set[tuple[int, str]] = set()
+    rope_modules = {module for module, name in meta_buffers if name == "inv_freq"}
+    for module in rope_modules:
+        if not hasattr(module, "config"):
+            continue
+        fresh = type(module)(module.config, device=device)
+        for name, value in fresh.named_buffers(recurse=False):
+            if name in {"inv_freq", "original_inv_freq"}:
+                setattr(module, name, value)
+                refreshed.add((id(module), name))
+
+    unresolved = [
+        f"{type(module).__name__}.{name}"
+        for module, name in meta_buffers
+        if (id(module), name) not in refreshed
+    ]
+    if unresolved:
+        raise RuntimeError(
+            "meta materialization has unsupported non-checkpoint buffers: "
+            + ", ".join(unresolved)
+        )
 
 
 class HFTransformerModel(nn.Module):

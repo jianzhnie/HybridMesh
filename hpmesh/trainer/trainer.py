@@ -119,6 +119,7 @@ from ..models.hf_state_dict_adapter import HFTransformerStateDictAdapter
 from ..models.hf_wrapper import (
     HFTransformerModel,
     build_model_config_for,
+    materialize_meta_model,
     num_flops_per_token,
 )
 from ..parallel.collectives import (
@@ -248,7 +249,16 @@ class Trainer:
                 "pipeline parallelism."
             )
         hf_model_config = build_model_config_for(cfg)
-        model = HFTransformerModel(hf_model_config).to(self.device)
+        load_hf_weights = bool(
+            cfg.checkpoint.enable
+            and cfg.checkpoint.initial_load_in_hf
+            and cfg.checkpoint.initial_load_path
+        )
+        if load_hf_weights:
+            with torch.device("meta"):
+                model = HFTransformerModel(hf_model_config)
+        else:
+            model = HFTransformerModel(hf_model_config).to(self.device)
 
         # 3. parallelism, in Titan's order: tp/pp/cp/ep declared first, fsdp last
         #    (outer wraps inner). Each is a no-op when its degree is 1. The
@@ -282,6 +292,10 @@ class Trainer:
         else:
             self.model = orchestration
             self.model_parts = [orchestration]
+
+        if load_hf_weights:
+            for model_part in self.model_parts:
+                materialize_meta_model(model_part, self.device)
 
         self.optimizer = OptimizersContainer(
             cfg.optimizer, model_parts=self.model_parts
@@ -835,14 +849,28 @@ class Trainer:
 
         losses: list[torch.Tensor] | None = [] if self.pp_has_last_stage else None
         with self._param_context(), spmd_context(self.parallel_dims):
-            self.pp_schedule.step(
-                arg_mbs=arg_mbs if self.pp_has_first_stage else None,
-                kwarg_mbs=kwarg_mbs,
-                target_mbs=target_mbs,
-                losses=losses,
-                loss_kwargs={"global_valid_tokens": global_valid_tokens},
-                return_outputs=False,
-            )
+            # ``_step_microbatches`` is the Torch 2.10-compatible equivalent
+            # of the older public ``step(arg_mbs=..., kwarg_mbs=...)`` seam.
+            # The public API would split the already-split lists as kwargs and
+            # attempts to shard scalar loss kwargs along dimension 0.
+            if hasattr(self.pp_schedule, "_step_microbatches"):
+                self.pp_schedule._hpmesh_global_valid_tokens = global_valid_tokens
+                self.pp_schedule._step_microbatches(
+                    arg_mbs if self.pp_has_first_stage else None,
+                    kwarg_mbs,
+                    target_mbs,
+                    losses,
+                    return_outputs=False,
+                )
+            else:
+                self.pp_schedule.step(
+                    arg_mbs=arg_mbs if self.pp_has_first_stage else None,
+                    kwarg_mbs=kwarg_mbs,
+                    target_mbs=target_mbs,
+                    losses=losses,
+                    loss_kwargs={"global_valid_tokens": global_valid_tokens},
+                    return_outputs=False,
+                )
 
         if self.pp_has_last_stage:
             assert losses is not None
