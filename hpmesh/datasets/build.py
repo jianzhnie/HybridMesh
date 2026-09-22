@@ -31,7 +31,7 @@ from .collators import TextCollator
 from .loader import BaseDataLoader, GrainDataLoader
 from .packing import build_concat_then_split_packing, build_first_fit_packing
 from .random_data import RandomTokenDataLoader
-from .text.text import DATASETS, make_local_jsonl
+from .text.text import DATASETS, make_local_jsonl, make_local_jsonl_sft
 from .types import DatasetBuildContext, DatasetIterationPolicy
 
 if TYPE_CHECKING:
@@ -84,7 +84,7 @@ def build_dataloader(
     # and the config layer must not import them. Checked before the tokenizer
     # is built so a bad name fails fast without loading tokenizer assets.
     is_multimodal = (
-        dataloader_config.dataset != "local_jsonl"
+        dataloader_config.dataset not in {"local_jsonl", "local_jsonl_sft"}
         and dataloader_config.dataset not in DATASETS
     )
     if is_multimodal:
@@ -139,11 +139,16 @@ def build_dataloader(
         tokenizer = HuggingFaceTokenizer(
             tokenizer_path=dataloader_config.tokenizer_path
         )
-        recipe = (
-            make_local_jsonl(path=dataloader_config.dataset_path)
-            if dataloader_config.dataset == "local_jsonl"
-            else DATASETS[dataloader_config.dataset]
-        )
+        if dataloader_config.dataset == "local_jsonl":
+            recipe = make_local_jsonl(path=dataloader_config.dataset_path)
+        elif dataloader_config.dataset == "local_jsonl_sft":
+            recipe = make_local_jsonl_sft(
+                path=dataloader_config.dataset_path,
+                prompt_field=dataloader_config.prompt_field,
+                response_field=dataloader_config.response_field,
+            )
+        else:
+            recipe = DATASETS[dataloader_config.dataset]
         # Both recipes are built the same way and differ only in kind: the
         # discriminating work is in the packing node, never in the collator,
         # which is why the trainer needs no way to tell them apart.

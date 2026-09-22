@@ -11,9 +11,10 @@ if [[ "${HPMESH_SKIP_SET_ENV:-0}" != "1" ]]; then
 fi
 
 export HPMESH_QWEN3_8B_PATH="${HPMESH_QWEN3_8B_PATH:-/home/jianzhnie/llmtuner/hfhub/models/Qwen/Qwen3-8B}"
+export HPMESH_DATASET_PATH="${HPMESH_DATASET_PATH:-/home/jianzhnie/llmtuner/hfhub/datasets/EleutherAI/hendrycks_math/train.jsonl}"
 export HPMESH_GLOBAL_BATCH_SIZE="${HPMESH_GLOBAL_BATCH_SIZE:-8}"
 export HPMESH_MAX_SEQ_LEN="${HPMESH_MAX_SEQ_LEN:-2048}"
-export HPMESH_STEPS="${HPMESH_STEPS:-20}"
+export HPMESH_STEPS="${HPMESH_STEPS:-100}"
 export HPMESH_DUMP_FOLDER="${HPMESH_DUMP_FOLDER:-$repo_root/outputs/qwen3-8b-npu}"
 
 nproc_per_node="${HPMESH_NPROC_PER_NODE:-8}"

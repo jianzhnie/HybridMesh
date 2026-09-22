@@ -32,7 +32,13 @@ from ..types import DatasetBuildContext
 
 logger = get_logger(__name__)
 
-__all__ = ["ChatProcessor", "DATASETS", "TextProcessor", "make_local_jsonl"]
+__all__ = [
+    "ChatProcessor",
+    "DATASETS",
+    "TextProcessor",
+    "make_local_jsonl",
+    "make_local_jsonl_sft",
+]
 
 
 def _read_text(sample: dict[str, Any]) -> str:
@@ -202,6 +208,39 @@ def make_local_jsonl(*, path: str) -> SingleDataset:
     return SingleDataset(
         source=IndexedJsonlSource(patterns=(path,)),
         processor=TextProcessor,
+        post_filters=(lambda sample: sample is not None,),
+    )
+
+
+def make_local_jsonl_sft(
+    *, path: str, prompt_field: str, response_field: str
+) -> SingleDataset:
+    """Build a single-turn supervised-chat recipe from a local JSONL file."""
+
+    class _LocalJsonlChatProcessor(ChatProcessor):
+        def __init__(self, *, context: DatasetBuildContext) -> None:
+            def messages(sample: dict[str, Any]) -> list[dict[str, str]]:
+                try:
+                    prompt = sample[prompt_field]
+                    response = sample[response_field]
+                except KeyError as exc:
+                    raise KeyError(
+                        f"local_jsonl_sft row lacks configured field {exc.args[0]!r}"
+                    ) from exc
+                if not isinstance(prompt, str) or not isinstance(response, str):
+                    raise TypeError(
+                        "local_jsonl_sft prompt and response fields must be strings"
+                    )
+                return [
+                    {"role": "user", "content": prompt},
+                    {"role": "assistant", "content": response},
+                ]
+
+            super().__init__(context=context, messages_fn=messages)
+
+    return SingleDataset(
+        source=IndexedJsonlSource(patterns=(path,)),
+        processor=_LocalJsonlChatProcessor,
         post_filters=(lambda sample: sample is not None,),
     )
 
