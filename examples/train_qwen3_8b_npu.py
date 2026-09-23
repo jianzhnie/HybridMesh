@@ -48,7 +48,6 @@ def qwen3_8b_npu_config() -> HybridMeshConfig:
         model=ModelConfig(model_name_or_path=model_path),
         parallel=ParallelConfig(
             data_parallel_shard_size=-1,
-            backend="hccl",
         ),
         optimizer=OptimizerConfig(
             learning_rate=1e-5,

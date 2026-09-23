@@ -123,6 +123,39 @@ def _reject_unrepresentable_attention_kwargs(kwargs: dict) -> None:
         )
 
 
+def _run_flex(module, q, k, v, block_mask, kwargs) -> torch.Tensor:
+    """Run flex attention on already-redistributed q/k/v.
+
+    Returns the output in ``(batch, heads, seq, dim)`` on both backends. On
+    CUDA this goes through HF's ``flex_attention_forward``, whose ``score_mod``
+    applies ``softcap``/``s_aux``, and whose ``(batch, seq, heads, dim)``
+    output is transposed back. On CPU, transformers routes flex through
+    torch.compile, whose inductor flex lowering has no CPU target (this is why
+    the wrapper picks sdpa off CUDA), so this runs torch's eager
+    ``flex_attention`` instead -- the fallback exists so CP is exercisable on
+    CPU-only machines, e.g. the gloo equivalence tests -- after refusing the
+    attention kwargs it cannot express.
+    """
+    if q.is_cuda:
+        from transformers.integrations.flex_attention import (
+            flex_attention_forward,
+        )
+
+        out, _ = flex_attention_forward(module, q, k, v, block_mask, **kwargs)
+        return out.transpose(1, 2)
+    _reject_unrepresentable_attention_kwargs(kwargs)
+    from torch.nn.attention.flex_attention import flex_attention
+
+    return flex_attention(
+        q,
+        k,
+        v,
+        block_mask=block_mask,
+        scale=kwargs.get("scaling"),
+        enable_gqa=True,
+    )
+
+
 class _SeqToHead(torch.autograd.Function):
     """``(b, h, s/cp, d) -> (b, h/cp, s, d)``; the backward is the inverse swap."""
 
@@ -215,30 +248,9 @@ class CPFlexKernel(nn.Module):
         key, value = self._flex_cp_allgather(
             key.contiguous(), value.contiguous(), _SEQ_DIM, self._cp_pg_name
         )
-        if query.is_cuda:
-            from transformers.integrations.flex_attention import (
-                flex_attention_forward,
-            )
-
-            out, _ = flex_attention_forward(
-                module, query, key, value, block_mask, **kwargs
-            )
-            return out
-        # CPU: transformers routes flex through torch.compile, whose inductor
-        # flex lowering has no CPU target (this is why the wrapper picks sdpa
-        # off CUDA). The eager fallback exists so CP is exercisable on CPU-only
-        # machines, e.g. the gloo equivalence tests.
-        _reject_unrepresentable_attention_kwargs(kwargs)
-        from torch.nn.attention.flex_attention import flex_attention
-
-        return flex_attention(
-            query,
-            key,
-            value,
-            block_mask=block_mask,
-            scale=kwargs.get("scaling"),
-            enable_gqa=True,
-        ).transpose(1, 2)  # HF's interface contract is (batch, seq, heads, dim)
+        out = _run_flex(module, query, key, value, block_mask, kwargs)
+        # HF's interface contract is (batch, seq, heads, dim).
+        return out.transpose(1, 2)
 
     def _forward_ulysses(self, query, key, value, *, module, **kwargs):
         """Swap the token shard for a head shard, attend full-length, swap back.
@@ -254,26 +266,7 @@ class CPFlexKernel(nn.Module):
         k = _SeqToHead.apply(key.contiguous(), self._cp_group)
         v = _SeqToHead.apply(value.contiguous(), self._cp_group)
         block_mask = self._full_length_causal_mask(q)
-        if query.is_cuda:
-            from transformers.integrations.flex_attention import (
-                flex_attention_forward,
-            )
-
-            out, _ = flex_attention_forward(module, q, k, v, block_mask, **kwargs)
-            out = out.transpose(1, 2)  # HF returns (batch, seq, heads, dim)
-        else:
-            # Same CPU eager fallback as the kv_allgather path above.
-            _reject_unrepresentable_attention_kwargs(kwargs)
-            from torch.nn.attention.flex_attention import flex_attention
-
-            out = flex_attention(
-                q,
-                k,
-                v,
-                block_mask=block_mask,
-                scale=kwargs.get("scaling"),
-                enable_gqa=True,
-            )  # already (batch, heads, seq, dim)
+        out = _run_flex(module, q, k, v, block_mask, kwargs)
         out = _HeadToSeq.apply(out.contiguous(), self._cp_group)
         return out.transpose(1, 2)  # HF's interface contract is (b, s/cp, h, d)
 

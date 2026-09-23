@@ -136,6 +136,25 @@ def cross_entropy_loss(
     )
 
 
+def _shard_local_labels(
+    labels: torch.Tensor, vocab_start: int, local_vocab_size: int
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Map global labels to shard-local indices, masking non-owned tokens.
+
+    Returns ``(local_labels, out_of_range)``: ``local_labels`` shifted by
+    ``vocab_start`` with out-of-shard and ``IGNORE_INDEX`` entries clamped to 0
+    (safe to index with), and ``out_of_range`` marking exactly those entries.
+    Shared by forward and backward so both attribute a target to the same shard.
+    """
+    safe_labels = torch.where(labels != IGNORE_INDEX, labels, 0)
+    out_of_range = (safe_labels < vocab_start) | (
+        safe_labels >= vocab_start + local_vocab_size
+    )
+    local_labels = safe_labels - vocab_start
+    local_labels[out_of_range] = 0
+    return local_labels, out_of_range
+
+
 class _LossParallelCrossEntropy(torch.autograd.Function):
     """Vocab-parallel cross-entropy on local ``[T, V_local]`` logits.
 
@@ -222,12 +241,9 @@ class _LossParallelCrossEntropy(torch.autograd.Function):
 
         # Mask labels outside this shard; the all-reduce below then selects the
         # owner rank's log-probability for each target.
-        safe_labels = torch.where(labels != IGNORE_INDEX, labels, 0)
-        out_of_range = (safe_labels < vocab_start) | (
-            safe_labels >= vocab_start + local_vocab_size
+        local_labels, out_of_range = _shard_local_labels(
+            labels, vocab_start, local_vocab_size
         )
-        local_labels = safe_labels - vocab_start
-        local_labels[out_of_range] = 0
 
         local_result = torch.gather(log_probs, -1, local_labels.unsqueeze(-1))
         local_result[out_of_range.unsqueeze(-1)] = 0
@@ -253,12 +269,9 @@ class _LossParallelCrossEntropy(torch.autograd.Function):
         ctx, grad_output: torch.Tensor
     ) -> tuple[torch.Tensor, None, None, None, None]:
         log_probs, labels = ctx.saved_tensors
-        safe_labels = torch.where(labels != IGNORE_INDEX, labels, 0)
-        out_of_range = (safe_labels < ctx.vocab_start) | (
-            safe_labels >= ctx.vocab_start + ctx.local_vocab_size
+        local_labels, out_of_range = _shard_local_labels(
+            labels, ctx.vocab_start, ctx.local_vocab_size
         )
-        local_labels = safe_labels - ctx.vocab_start
-        local_labels[out_of_range] = 0
 
         # d/dz [ -log_softmax(z)_y ] = softmax(z) - onehot(y), assembled only for
         # this rank's slice -- targets outside the shard contribute
