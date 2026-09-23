@@ -4,11 +4,20 @@ NPU is preferred because it is HybridMesh's primary accelerator, followed by
 CUDA and other torch accelerators that provide distributed collectives. MPS is
 intentionally excluded: it has no distributed backend and cannot host a
 ``DeviceMesh`` even when torch reports it as available.
+
+The per-vendor availability predicates (``is_npu_available`` and friends), the
+peak-memory queries and ``is_npu_support_full_precision`` derive from
+OpenMMLab's ``mmengine.device`` conventions, merged here so nothing needs the
+mmengine dependency. Two pieces of that file were deliberately not carried
+over: its import-time ``DEVICE`` constant and ``get_device()`` duplicate this
+module's ``device_type`` / ``get_device_type()``, and its
+``torch.npu.set_compile_mode`` call mutates global torch state at import time.
 """
 
 from __future__ import annotations
 
 import importlib
+import importlib.util
 import os
 from typing import Any
 
@@ -18,6 +27,21 @@ try:
     importlib.import_module("torch_npu")
 except ImportError:
     pass
+
+# Register the vendor extensions so ``torch.mlu`` / ``torch.musa`` exist for
+# the availability probes below. Each import is a no-op when the vendor's
+# torch build is not installed.
+for _ext in ("torch_mlu", "torch_musa"):
+    try:
+        importlib.import_module(_ext)
+    except ImportError:
+        pass
+del _ext
+
+try:
+    from torch_npu.npu import utils as _npu_utils
+except ImportError:
+    _npu_utils = None
 
 ACCELERATOR_TYPES = frozenset(("npu", "cuda", "xpu", "mlu", "musa"))
 DEVICE_PRIORITY = ("npu", "cuda", "musa", "mlu", "xpu")
@@ -116,6 +140,71 @@ def should_use_pin_memory(device: torch.device | None = None) -> bool:
     """Return whether asynchronous pinned-memory copies are useful."""
     device = get_current_device() if device is None else device
     return device.type in {"cuda", "npu"}
+
+
+# -- Per-vendor availability predicates (mmengine.device-style surface). --
+# Thin wrappers over ``is_device_type_available`` where hpmesh knows the type;
+# ``mps`` and ``dipu`` are diagnostic-only and stay out of ACCELERATOR_TYPES.
+
+
+def is_cuda_available() -> bool:
+    """Return whether CUDA devices exist."""
+    return is_device_type_available("cuda")
+
+
+def is_npu_available() -> bool:
+    """Return whether Ascend PyTorch and NPU devices exist."""
+    return is_device_type_available("npu")
+
+
+def is_mlu_available() -> bool:
+    """Return whether Cambricon PyTorch and MLU devices exist."""
+    return is_device_type_available("mlu")
+
+
+def is_musa_available() -> bool:
+    """Return whether MUSA PyTorch and devices exist."""
+    return is_device_type_available("musa")
+
+
+def is_mps_available() -> bool:
+    """Return whether MPS devices exist (Apple Silicon; no distributed use)."""
+    return hasattr(torch.backends, "mps") and torch.backends.mps.is_available()
+
+
+def is_dipu_available() -> bool:
+    """Return whether the DIPU extension is importable."""
+    return importlib.util.find_spec("torch_dipu") is not None
+
+
+def is_npu_support_full_precision() -> bool:
+    """Return whether the NPU SoC supports full-precision training."""
+    if not is_npu_available() or _npu_utils is None:
+        return False
+    version_of_support_full_precision = 220
+    return _npu_utils.get_soc_version() >= version_of_support_full_precision
+
+
+def get_max_cuda_memory(device: torch.device | None = None) -> int:
+    """Peak CUDA memory occupied by tensors, in MB, and reset the peak.
+
+    With ``device=None`` the current device is reported. Note the side
+    effect: the peak counter is reset, so consecutive calls measure the
+    interval between calls, not the program maximum.
+    """
+    mem = torch.cuda.max_memory_allocated(device=device)
+    torch.cuda.reset_peak_memory_stats()
+    return int(mem) // (1024 * 1024)
+
+
+def get_max_musa_memory(device: torch.device | None = None) -> int:
+    """Peak MUSA memory occupied by tensors, in MB.
+
+    Unlike the CUDA variant there is no reset: ``torch.musa`` does not
+    support ``reset_peak_memory_stats`` yet.
+    """
+    mem = torch.musa.max_memory_allocated(device=device)
+    return int(mem) // (1024 * 1024)
 
 
 device_type, device_module = get_device_info()
