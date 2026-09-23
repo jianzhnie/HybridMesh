@@ -271,7 +271,10 @@ class WandBLogger(BaseLogger):
             key if self.tag is None else f"{self.tag}/{key}": value
             for key, value in metrics.items()
         }
-        self.wandb.log(prefixed, step=step)
+        # commit=True: without it wandb treats an explicit step as a partial
+        # record and holds it open, so a metric logged once per step can be
+        # merged into (or overwritten by) the next one.
+        self.wandb.log(prefixed, step=step, commit=True)
 
     def close(self) -> None:
         # ``run`` is None when init failed or ``finish`` already ran; calling

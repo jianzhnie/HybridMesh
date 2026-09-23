@@ -186,6 +186,9 @@ def get_peak_flops(device_name: str) -> float:
     if "b300" in name or "b200" in name:
         # https://resources.nvidia.com/en-us-blackwell-architecture
         return 2.25e15
+    if "mi350x" in name:
+        # https://www.amd.com/en/products/accelerators/instinct/mi350/mi350x.html
+        return 2300e12
     if "mi355x" in name:
         return 2500e12
     if "mi300x" in name or "mi325x" in name:

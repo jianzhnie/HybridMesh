@@ -1070,6 +1070,27 @@ def test_microbatch_defers_the_device_transfer_to_consumption() -> None:
     assert microbatch["num_valid_tokens"] == batch.labels.numel() - 4
 
 
+def test_microbatch_counts_only_the_ranks_share_under_sequence_sharding() -> None:
+    """The cumulative token count must survive the loss-mesh sum unchanged.
+
+    Every rank of a CP/TP group reads the *same* batch from the loader, and the
+    sequence is cut across the group in ``preprocess_inputs``. ``train_step``
+    sums ``ntokens_seen`` over the dp*cp*tp loss mesh, so each rank must
+    contribute only its ``1 / (cp * tp)`` share -- counting the whole batch
+    would report a corpus cp * tp times its true size.
+    """
+    trainer = _bare_trainer(_cfg_with_batch())
+    trainer.ntokens_seen = 0
+    trainer.parallel_dims = SimpleNamespace(cp=2, tp=2)
+
+    batch = _random_batch()
+    trainer._microbatch(batch)
+
+    assert trainer.ntokens_seen == batch.labels.numel() // 4
+    # Non-vacuity: the share differs from both the full count and zero.
+    assert 0 < trainer.ntokens_seen < batch.labels.numel()
+
+
 def test_the_synthetic_loader_reports_an_absolute_position_after_a_resume() -> None:
     """A checkpoint written *after* a resume must not lose the seek.
 

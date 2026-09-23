@@ -36,6 +36,8 @@ import torch.distributed as dist
 import torch.distributed._functional_collectives as funcol
 import torch.nn.functional as F
 
+from ..utils.batch_invariant import is_in_batch_invariant_mode
+
 __all__ = [
     "IGNORE_INDEX",
     "LossFunction",
@@ -366,6 +368,94 @@ def chunked_lm_head_cross_entropy(
     return total
 
 
+def _vocab_parallel_entropy(
+    logits: torch.Tensor, tp_group: dist.ProcessGroup
+) -> torch.Tensor:
+    """Exact per-token Shannon entropy from vocab-sharded logits, no gather.
+
+    ``H(p) = logsumexp(z) - sum(softmax(z) * z)`` needs two cross-shard sums:
+    the softmax denominator and the first moment ``sum(p * z)``. Both are
+    assembled with all-reduces against a shared max, so the vocabulary never
+    has to be gathered to compute the metric.
+    """
+    logits = logits.float()
+
+    local_max = torch.amax(logits, dim=-1, keepdim=True)
+    global_max = funcol.all_reduce(
+        local_max, reduceOp=dist.ReduceOp.MAX.name, group=tp_group
+    )
+
+    shifted = logits - global_max
+    shifted_exp = torch.exp(shifted)
+    local_sumexp = shifted_exp.sum(dim=-1)
+    # Avoid 0 * -inf for finite distributions with masked logits while
+    # preserving NaNs for invalid distributions such as all -inf logits.
+    shifted_weighted = torch.where(
+        torch.isneginf(shifted),
+        torch.zeros_like(shifted),
+        shifted_exp * shifted,
+    )
+    local_weighted_sum = shifted_weighted.sum(dim=-1)
+    global_stats = funcol.all_reduce(
+        torch.stack((local_sumexp, local_weighted_sum)),
+        reduceOp=dist.ReduceOp.SUM.name,
+        group=tp_group,
+    )
+    sumexp, weighted_sum = global_stats.unbind()
+    return torch.log(sumexp) - weighted_sum / sumexp
+
+
+class _GatherVocabShards(torch.autograd.Function):
+    """All-gather vocab-sharded logits, with a slice backward.
+
+    The gathered ``[T, V]`` logits are identical on every rank, so the gradient
+    of the downstream loss w.r.t. this rank's shard is the slice of the shared
+    full-vocab gradient the shard contributed -- a slice, not an all-reduce,
+    which would over-count by the TP degree.
+
+    ``vocab_shard_bounds`` gives the last rank a short shard when ``V`` is not
+    divisible by ``tp``, so the collective sees equal sizes by padding to the
+    chunk width first and trimming afterwards. The collective runs inside the
+    Function's ``forward`` (grad mode off): functional collectives register
+    their own backward otherwise, which is both the wrong gradient here and a
+    version-sensitive path.
+    """
+
+    @staticmethod
+    def forward(  # type: ignore[override]
+        ctx,
+        logits: torch.Tensor,
+        tp_group: dist.ProcessGroup,
+        global_vocab_size: int,
+    ) -> torch.Tensor:
+        tp_world_size = dist.get_world_size(tp_group)
+        tp_rank = dist.get_rank(tp_group)
+        ctx.vocab_start, ctx.vocab_end = vocab_shard_bounds(
+            global_vocab_size, tp_world_size, tp_rank
+        )
+        chunk_size = -(-global_vocab_size // tp_world_size)
+        padded = F.pad(logits, (0, chunk_size - logits.shape[-1]))
+        gathered = funcol.all_gather_tensor(padded, gather_dim=-1, group=tp_group)
+        return gathered[..., :global_vocab_size]
+
+    @staticmethod
+    def backward(  # type: ignore[override]
+        ctx, grad_output: torch.Tensor
+    ) -> tuple[torch.Tensor, None, None]:
+        return (
+            grad_output[..., ctx.vocab_start : ctx.vocab_end].contiguous(),
+            None,
+            None,
+        )
+
+
+def _gather_vocab_shards(
+    logits: torch.Tensor, tp_group: dist.ProcessGroup, global_vocab_size: int
+) -> torch.Tensor:
+    """All-gather vocab-sharded ``[T, V_local]`` logits into full ``[T, V]``."""
+    return _GatherVocabShards.apply(logits, tp_group, global_vocab_size)
+
+
 def compute_logprobs(
     logits: torch.Tensor,
     labels: torch.Tensor,
@@ -377,10 +467,14 @@ def compute_logprobs(
     """Per-token log-probabilities from ``logits[T, V]`` and ``labels[T]``.
 
     With a sharded vocabulary each rank holds only its own classes, so the
-    cross-entropy has to run through the vocab-parallel path before the gather.
-    Reachability note: nothing in hpmesh shards the lm_head yet, so today this
-    takes the plain path -- it is here because the local-vocab case is the whole
-    reason hpmesh has an ``_LossParallelCrossEntropy`` at all.
+    log-probabilities come from the vocab-parallel path and the entropy from
+    ``_vocab_parallel_entropy`` -- neither gathers the vocabulary. In
+    batch-invariant mode the shards are gathered first instead, so the trainer
+    performs the same operation sequence over full-vocab logits as an
+    inference generator does. Reachability note: nothing in hpmesh shards the
+    lm_head yet, so today this takes the plain path -- it is here because the
+    local-vocab case is the whole reason hpmesh has an
+    ``_LossParallelCrossEntropy`` at all.
 
     When ``return_entropy`` is set, also returns per-token Shannon entropy
     ``H(p) = logsumexp(logits) - sum(softmax(logits) * logits)``, shape ``[T]``.
@@ -391,11 +485,19 @@ def compute_logprobs(
     """
     if tp_group is not None and global_vocab_size is not None:
         if logits.shape[-1] != global_vocab_size:
-            # reduction="none" is the vocab-parallel path's per-token form: it
-            # returns -NLL directly, so no vocab all-gather is needed here.
-            return -_LossParallelCrossEntropy.apply(
-                logits, labels, tp_group, global_vocab_size, "none"
-            )
+            if is_in_batch_invariant_mode():
+                logits = _gather_vocab_shards(logits, tp_group, global_vocab_size)
+            else:
+                # reduction="none" is the vocab-parallel path's per-token form:
+                # it returns -NLL directly, so no vocab all-gather is needed.
+                logprobs = -_LossParallelCrossEntropy.apply(
+                    logits, labels, tp_group, global_vocab_size, "none"
+                )
+                if not return_entropy:
+                    return logprobs
+                with torch.no_grad():
+                    entropy = _vocab_parallel_entropy(logits, tp_group)
+                return logprobs, entropy
 
     # One bf16 -> fp32 upcast, shared by the logprobs and (if asked) the entropy.
     logits = logits.float()

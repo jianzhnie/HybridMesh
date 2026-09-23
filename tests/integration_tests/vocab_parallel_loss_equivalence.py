@@ -56,6 +56,7 @@ from hpmesh.components.loss import (
     cross_entropy_loss,
     vocab_shard_bounds,
 )
+from hpmesh.utils.batch_invariant import set_batch_invariant_mode
 
 T = 64  # tokens per rank's local shard
 SEED = 42
@@ -150,6 +151,70 @@ def _check_sharded_loss(
         _fail(
             rank,
             f"{name}: compute_logprobs max diff {_max_diff(logprobs, -ref_none):.3e}",
+        )
+
+    # return_entropy on the sharded path must not silently drop the entropy,
+    # and the no-gather computation must match the full-vocab formula.
+    local4 = logits[:, start:end].detach().clone().requires_grad_(True)
+    sharded_logprobs, sharded_entropy = compute_logprobs(
+        local4, labels, tp_group=group, global_vocab_size=vocab, return_entropy=True
+    )
+    ref_entropy = torch.logsumexp(logits.float(), dim=-1) - (
+        torch.softmax(logits.float(), dim=-1) * logits.float()
+    ).sum(dim=-1)
+    if not _agree(sharded_logprobs.detach(), -ref_none):
+        _fail(rank, f"{name}: sharded logprobs+entropy logprobs diverged")
+    if not _agree(sharded_entropy, ref_entropy):
+        _fail(
+            rank,
+            f"{name}: sharded entropy max diff "
+            f"{_max_diff(sharded_entropy, ref_entropy):.3e}",
+        )
+    if sharded_entropy.requires_grad:
+        _fail(rank, f"{name}: sharded entropy joined the autograd graph")
+
+    # Batch-invariant mode gathers the shards first, so the logprobs and the
+    # entropy must equal the full-vocab computation exactly (same op sequence).
+    set_batch_invariant_mode(True)
+    try:
+        local5 = logits[:, start:end].detach().clone().requires_grad_(True)
+        bi_logprobs, bi_entropy = compute_logprobs(
+            local5,
+            labels,
+            tp_group=group,
+            global_vocab_size=vocab,
+            return_entropy=True,
+        )
+    finally:
+        set_batch_invariant_mode(False)
+    plain_logprobs, plain_entropy = compute_logprobs(
+        logits.clone(), labels, return_entropy=True
+    )
+    if not _agree(bi_logprobs.detach(), plain_logprobs.detach()):
+        _fail(
+            rank,
+            f"{name}: batch-invariant gather logprobs max diff "
+            f"{_max_diff(bi_logprobs.detach(), plain_logprobs.detach()):.3e}",
+        )
+    if not _agree(bi_entropy, plain_entropy):
+        _fail(
+            rank,
+            f"{name}: batch-invariant gather entropy max diff "
+            f"{_max_diff(bi_entropy, plain_entropy):.3e}",
+        )
+
+    # The gather's backward slices the shared full-vocab gradient back to this
+    # rank's shard rather than all-reducing it.
+    bi_logprobs.sum().backward()
+    plain_for_grad = logits.clone().requires_grad_(True)
+    compute_logprobs(plain_for_grad, labels).sum().backward()
+    if local5.grad is None or plain_for_grad.grad is None:
+        _fail(rank, f"{name}: batch-invariant gather backward produced no grad")
+    elif not _agree(local5.grad, plain_for_grad.grad[:, start:end]):
+        _fail(
+            rank,
+            f"{name}: batch-invariant gather grad max diff "
+            f"{_max_diff(local5.grad, plain_for_grad.grad[:, start:end]):.3e}",
         )
 
 

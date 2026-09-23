@@ -17,8 +17,9 @@ things:
 Two departures from torchtitan, both subtractions:
 
 * **No ``structured_logger``.** torchtitan wraps saves in ``sl.log_trace_span``
-  and emits a latency metric from a ``save_future`` callback. Those go; the
-  ``logger.info`` timing lines that say the same thing stay.
+  and reports the async write's duration as a structured scalar from a
+  ``save_future`` callback. The spans go; the duration stays, as a
+  ``logger.info`` line from the same callback.
 
 * **No ``torchtitan.tools.filesystem``.** The local equivalent is
   ``hpmesh.utils.filesystem``, which has the same API for the paths this module
@@ -470,6 +471,7 @@ class CheckpointManager(BaseCheckpointManager):
 
         checkpoint_id = self._create_checkpoint_id(curr_step)
         states = self._flattened_model_states_sd()
+        async_save_started_at: float | None = None
 
         if self.async_mode == AsyncMode.ASYNC_WITH_PINNED_MEM:
             GarbageCollection.collect("GC collection invoked by checkpointer.")
@@ -483,6 +485,7 @@ class CheckpointManager(BaseCheckpointManager):
                     )
                 )
 
+            async_save_started_at = time.monotonic()
             result = self.dcp_save(
                 states,
                 checkpoint_id=checkpoint_id,
@@ -499,6 +502,7 @@ class CheckpointManager(BaseCheckpointManager):
 
         elif self.async_mode == AsyncMode.ASYNC:
             GarbageCollection.collect("GC collection invoked by checkpointer.")
+            async_save_started_at = time.monotonic()
             result = self.dcp_save(
                 states,
                 checkpoint_id=checkpoint_id,
@@ -517,6 +521,20 @@ class CheckpointManager(BaseCheckpointManager):
                 checkpoint_id=checkpoint_id,
                 async_mode=AsyncMode.DISABLED,
                 enable_garbage_collection=True,
+            )
+
+        if async_save_started_at is not None:
+            # The line below only measured staging: the background write's
+            # duration is otherwise invisible, which is the number that says
+            # whether async checkpointing is actually keeping up.
+            assert self.save_future is not None
+            self.save_future.add_done_callback(
+                lambda _: logger.info(
+                    "Finished writing the checkpoint for step %d in %.2f "
+                    "seconds (async total).",
+                    curr_step,
+                    time.monotonic() - async_save_started_at,
+                )
             )
 
         logger.info(
