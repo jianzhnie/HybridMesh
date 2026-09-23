@@ -23,13 +23,12 @@ from __future__ import annotations
 
 import torch
 import torch.distributed as dist
-from torch.distributed._composable.fsdp import FSDPModule
-from torch.distributed.device_mesh import DeviceMesh
 
 from hpmesh.trainer.config import ParallelConfig
 
 from ..parallel_dims import ParallelDims
 from .fsdp import (
+    _iter_fsdp_modules,
     apply_fsdp_to_decoder,
     resolve_fsdp_mesh,
     resolve_sparse_fsdp_mesh,
@@ -46,14 +45,12 @@ def _force_sum_grad_reduction(model: torch.nn.Module) -> None:
     implements it, so every other backend raises. Forcing plain SUM gives up
     that optimization, which is why the caller only turns it on off-NCCL.
     """
-    for module in model.modules():
-        if isinstance(module, FSDPModule):
-            module.set_force_sum_reduction_for_comms(True)
+    for module in _iter_fsdp_modules(model):
+        module.set_force_sum_reduction_for_comms(True)
 
 
 def apply_fsdp(
     model: torch.nn.Module,
-    mesh: DeviceMesh | None,
     cfg: ParallelConfig,
     parallel_dims: ParallelDims | None = None,
 ) -> torch.nn.Module:
@@ -110,7 +107,9 @@ def apply_fsdp(
         reshard_after_forward_policy=cfg.fsdp_reshard_after_forward,
         ep_size=parallel_dims.ep,
         edp_mesh=edp_mesh,
-        enable_symm_mem=cfg.enable_fsdp_symm_mem,
+        symm_mem_scope=(
+            cfg.fsdp_symm_mem_scope if cfg.enable_fsdp_symm_mem else None
+        ),
     )
     # ``apply_fsdp_to_decoder`` already calls ``disable_fsdp_gradient_division``
     # and, when asked, ``enable_fsdp_symm_mem``; do not repeat them here.

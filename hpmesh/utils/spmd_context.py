@@ -1,18 +1,13 @@
 """Ambient SPMD mesh context: the bottom layer of hpmesh's SPMD helpers.
 
-hpmesh's SPMD glue is split into two layers so that model components never
-import ``hpmesh.parallel``:
-
-* This module (bottom layer, ``hpmesh.utils``) holds the only shared mutable
-  SPMD state: a thread-local stack of active meshes plus the registered
-  dense/sparse meshes, and the by-name axis queries that read them
-  (``spmd_mesh_group`` / ``spmd_mesh_size``). It depends on torch and the
-  PyPI ``spmd_types`` package only, so ``models/common`` (and the trainer)
-  can ask "which process group is the TP axis?" without a reverse dependency
-  on the parallel layer.
-* ``hpmesh/parallel/spmd_shims.py`` (upper layer) holds the pieces only the
-  parallel layer uses: state-dict conversion, input/parameter annotation,
-  and redistribution helpers. It imports this module, never the reverse.
+This module holds the only shared mutable SPMD state: a thread-local stack of
+active meshes plus the registered dense/sparse meshes, and the by-name axis
+queries that read them (``spmd_mesh_group`` / ``spmd_mesh_size``). It depends
+on torch and the PyPI ``spmd_types`` package only, so ``models/common`` (and
+the trainer) can ask "which process group is the TP axis?" without a reverse
+dependency on the parallel layer. The trainer enters ``spmd_context`` once
+per run; every other consumer reads the ambient state through the helpers
+here.
 
 The split also removes a name collision: the old home of this code,
 ``hpmesh/parallel/spmd_types.py``, shadowed the PyPI ``spmd_types`` package
@@ -36,12 +31,10 @@ setattr(spmd.PartitionSpec, "__deepcopy__", lambda self, memo: self)  # noqa: B0
 
 __all__ = [
     "current_spmd_mesh",
-    "maybe_set_sparse_mesh",
     "set_current_spmd_mesh",
     "set_spmd_meshes",
     "spmd_context",
     "spmd_dense_mesh",
-    "spmd_local_context",
     "spmd_mesh_group",
     "spmd_mesh_size",
     "spmd_sparse_mesh",
@@ -112,24 +105,6 @@ def spmd_mesh_group(axis_name: str) -> torch.distributed.ProcessGroup | None:
     return group if group.size() > 1 else None
 
 
-def spmd_local_context(
-    *local_axes: str,
-) -> contextlib.AbstractContextManager[None]:
-    """Context manager treating the named mesh axes as local axes.
-
-    Local axes retain per-coordinate SPMD semantics during global type
-    checking: each coordinate selects an independent tensor, and only the
-    remaining axes describe that tensor's global sharding. This is a no-op for
-    axes with size 1.
-    """
-    active_axes = tuple(
-        dict.fromkeys(axis for axis in local_axes if spmd_mesh_size(axis) > 1)
-    )
-    if not active_axes:
-        return contextlib.nullcontext()
-    return spmd.set_current_mesh(local_axes=active_axes)
-
-
 @contextlib.contextmanager
 def set_current_spmd_mesh(mesh: DeviceMesh | None) -> Iterator[None]:
     """Set TorchTitan and spmd_types current mesh state for one runtime region."""
@@ -149,17 +124,6 @@ def set_current_spmd_mesh(mesh: DeviceMesh | None) -> Iterator[None]:
         finally:
             popped = stack.pop()
             assert popped is mesh
-
-
-@contextlib.contextmanager
-def maybe_set_sparse_mesh() -> Iterator[None]:
-    """Activate the registered sparse mesh, if present."""
-    if (mesh := spmd_sparse_mesh()) is None:
-        yield
-        return
-
-    with set_current_spmd_mesh(mesh):
-        yield
 
 
 @contextlib.contextmanager

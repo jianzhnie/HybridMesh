@@ -25,7 +25,7 @@ deliberate choice, and this is the table of it:
 Grafting happens after parsing, so a nested config's fields still reach the user
 as bare flags: --enable, --interval, --log_freq, --dataset, --profile_freq.
 HfArgumentParser has no way to prefix one group's fields, and hpmesh's top-level
-groups are flat too (--backend, --learning_rate).
+groups are flat too (--tensor_parallel_size, --learning_rate).
 
 Single process (step 0):
     python -m hpmesh --steps 20

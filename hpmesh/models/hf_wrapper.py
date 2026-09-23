@@ -453,7 +453,6 @@ class HFTransformerModel(nn.Module):
         self.model = model_cls(config=config)
         self.model.config._attn_implementation = config._attn_implementation
 
-        self.max_seq_len = getattr(config, "max_position_embeddings", None)
         self.cp_mesh = None
         self._cp_load_balancer = None
 

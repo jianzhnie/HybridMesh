@@ -157,4 +157,4 @@ def parallelize_hf_transformers(
         # See docs/hpmesh_upstream_map.md (D: ``distributed/compile.py``).
         model = torch.compile(model)
 
-    return apply_fsdp(model, mesh, cfg, parallel_dims)
+    return apply_fsdp(model, cfg, parallel_dims)

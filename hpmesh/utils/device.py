@@ -103,21 +103,6 @@ def set_device(device: torch.device) -> None:
         raise RuntimeError(f"Failed to set device {device}: {exc}") from exc
 
 
-def synchronize(device: torch.device | None = None) -> None:
-    """Synchronize pending accelerator work; CPU is already synchronous."""
-    device = get_current_device() if device is None else device
-    if device.type != "cpu":
-        getattr(torch, device.type).synchronize(device)
-
-
-def empty_cache() -> None:
-    """Release unused cache blocks when the backend provides that operation."""
-    if device_type != "cpu":
-        function = getattr(device_module, "empty_cache", None)
-        if function is not None:
-            function()
-
-
 def is_device_available(device: torch.device) -> bool:
     """Return whether a concrete device index is accessible."""
     if not is_device_type_available(device.type):
@@ -125,12 +110,6 @@ def is_device_available(device: torch.device) -> bool:
     if device.type == "cpu" or device.index is None:
         return True
     return device.index < getattr(torch, device.type).device_count()
-
-
-def validate_device(device: torch.device) -> None:
-    """Raise when ``device`` cannot be used by this process."""
-    if not is_device_available(device):
-        raise RuntimeError(f"Device {device} is not available")
 
 
 def should_use_pin_memory(device: torch.device | None = None) -> bool:

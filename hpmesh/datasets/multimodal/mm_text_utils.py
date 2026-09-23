@@ -1,71 +1,12 @@
 """Text processing utilities for multimodal datasets.
 
-Vendored from torchtitan ``hf_datasets/multimodal/utils/text.py`` unchanged.
+Vendored from torchtitan ``hf_datasets/multimodal/utils/text.py``; the
+``pad_seq_len`` / ``pad_batch_dim`` helpers were dropped as unused.
 """
 
 from __future__ import annotations
 
-import torch
-
-__all__ = ["insert_vision_placeholders", "pad_batch_dim", "pad_seq_len"]
-
-
-def pad_seq_len(
-    input_ids: torch.Tensor,
-    labels: torch.Tensor,
-    target_len: int,
-    *,
-    padding_idx: int,
-    ignore_idx: int,
-) -> tuple[torch.Tensor, torch.Tensor]:
-    """Pad input_ids and labels to desired sequence length."""
-    B, L = input_ids.shape
-
-    if L < target_len:
-        padding_length = target_len - L
-        padding_input = torch.full(
-            (B, padding_length), padding_idx, dtype=torch.long, device=input_ids.device
-        )
-        padding_labels = torch.full(
-            (B, padding_length), ignore_idx, dtype=torch.long, device=labels.device
-        )
-
-        input_ids = torch.cat([input_ids, padding_input], dim=1)
-        labels = torch.cat([labels, padding_labels], dim=1)
-
-    elif L > target_len:
-        input_ids = input_ids[:, :target_len]
-        labels = labels[:, :target_len]
-
-    return input_ids, labels
-
-
-def pad_batch_dim(
-    input_ids: torch.Tensor,
-    labels: torch.Tensor,
-    target_batch_size: int,
-    *,
-    padding_idx: int,
-    ignore_idx: int,
-) -> tuple[torch.Tensor, torch.Tensor]:
-    """Pad batch dimension to target size."""
-    B, L = input_ids.shape
-    assert B <= target_batch_size, f"Batch size {B} exceeds target {target_batch_size}"
-    if B == target_batch_size:
-        return input_ids, labels
-
-    padding_needed = target_batch_size - B
-    padding_input = torch.full(
-        (padding_needed, L), padding_idx, dtype=torch.long, device=input_ids.device
-    )
-    padding_labels = torch.full(
-        (padding_needed, L), ignore_idx, dtype=torch.long, device=labels.device
-    )
-
-    input_ids = torch.cat([input_ids, padding_input], dim=0)
-    labels = torch.cat([labels, padding_labels], dim=0)
-
-    return input_ids, labels
+__all__ = ["insert_vision_placeholders"]
 
 
 def insert_vision_placeholders(

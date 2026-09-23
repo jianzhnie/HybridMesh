@@ -141,19 +141,3 @@ def get_distributed_rank() -> int:
         return int(rank)
 
     return 0
-
-
-def get_outdir(path: str, *paths, inc: bool = False) -> str:
-    """Create and return an output directory. If inc=True, append an
-    incrementing suffix to avoid collisions."""
-    outdir = os.path.join(path, *paths)
-    os.makedirs(outdir, exist_ok=True)
-    if not inc:
-        return outdir
-
-    for count in range(1, 100):
-        outdir_inc = f"{outdir}-{count}"
-        if not os.path.exists(outdir_inc):
-            os.makedirs(outdir_inc)
-            return outdir_inc
-    raise RuntimeError("Failed to create unique output directory after 100 attempts")

@@ -112,7 +112,7 @@ class ModelConfig:
 
 @dataclass(kw_only=True, slots=True)
 class ParallelConfig:
-    """The parallelism sizes, plus the process group backend.
+    """The parallelism sizes.
 
     The field names and semantics are torchtitan's, spelled ``*_size`` rather
     than ``*_degree``. ``ParallelDims.from_config`` reads these six fields by
@@ -164,7 +164,18 @@ class ParallelConfig:
     enable_fsdp_symm_mem: bool = False
     """
     Whether to enable FSDP2 symmetric-memory communication optimizations for
-    all FSDP modules after `fully_shard` has been applied.
+    FSDP modules after `fully_shard` has been applied.
+    """
+
+    fsdp_symm_mem_scope: Literal["all", "dense"] = "all"
+    """
+    Which FSDP modules get symmetric-memory comms when
+    ``enable_fsdp_symm_mem`` is on: "all" covers every FSDP module; "dense"
+    skips modules flagged ``moe_enabled`` (an MoE transformer block is one
+    FSDP module, so its attention parameters are skipped along with its
+    experts). Symmetric memory is not always beneficial for the expert
+    (sparse) FSDP modules, hence the narrower option. Ignored when
+    ``enable_fsdp_symm_mem`` is False.
     """
 
     tensor_parallel_size: int = 1
@@ -342,9 +353,6 @@ class ParallelConfig:
             )
         return dp_shard
 
-    backend: str = "nccl"
-    """Distributed backend: nccl (CUDA), gloo (CPU), or hccl (Ascend)."""
-
     train_timeout_seconds: int = 100
     """Timeout, in seconds, applied to every process group once training starts.
 
@@ -451,9 +459,10 @@ class ParallelConfig:
                 "For NVIDIA GPUs, parallelism.enable_fsdp_symm_mem is only supported "
                 "for compute capability 9.0 or newer."
             )
-        if self.backend not in {"nccl", "gloo", "hccl"}:
+        if self.fsdp_symm_mem_scope not in ("all", "dense"):
             raise ValueError(
-                f"backend must be one of {{nccl, gloo, hccl}}, got {self.backend}"
+                "parallelism.fsdp_symm_mem_scope must be one of: 'all', 'dense' "
+                f"(got {self.fsdp_symm_mem_scope!r})"
             )
 
         # Import lazily so loading configs.py does not pull in pipelining.
