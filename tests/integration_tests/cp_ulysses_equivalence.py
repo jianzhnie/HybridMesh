@@ -87,7 +87,6 @@ def _cfg(num_kv_heads: int = 4) -> HybridMeshConfig:
             context_parallel_size=2,
             context_parallel_strategy="ulysses",
             context_parallel_load_balancer=None,
-            backend="gloo",
         ),
         training=TrainingConfig(max_seq_len=SEQ, steps=1),
     )

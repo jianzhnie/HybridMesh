@@ -35,7 +35,7 @@ def main() -> None:
             num_attention_heads=4,
             num_key_value_heads=4,
         ),
-        parallel=ParallelConfig(expert_parallel_size=2, backend="gloo"),
+        parallel=ParallelConfig(expert_parallel_size=2),
         training=TrainingConfig(
             global_batch_size=8,
             max_seq_len=32,

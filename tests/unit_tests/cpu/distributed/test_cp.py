@@ -152,7 +152,6 @@ def _ulysses_cfg(tp: int) -> ParallelConfig:
         context_parallel_size=2,
         context_parallel_strategy="ulysses",
         context_parallel_load_balancer=None,
-        backend="gloo",
     )
 
 

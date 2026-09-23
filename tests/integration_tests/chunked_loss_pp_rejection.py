@@ -37,7 +37,7 @@ def _cfg() -> HybridMeshConfig:
             num_attention_heads=4,
             num_key_value_heads=4,
         ),
-        parallel=ParallelConfig(pipeline_parallel_size=2, backend="gloo"),
+        parallel=ParallelConfig(pipeline_parallel_size=2),
         training=TrainingConfig(
             global_batch_size=8,
             max_seq_len=32,

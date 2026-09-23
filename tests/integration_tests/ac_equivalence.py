@@ -108,7 +108,7 @@ def main() -> None:
     world = dist.get_world_size()
     assert world == 2, f"this check assumes 2 ranks, got {world}"
 
-    cfg = ParallelConfig(data_parallel_replicate_size=2, backend="gloo")
+    cfg = ParallelConfig(data_parallel_replicate_size=2)
     parallel_dims = ParallelDims.from_config(cfg, world)
     parallel_dims.build_mesh()
     loss_mesh = parallel_dims.get_mesh("loss")
@@ -144,7 +144,7 @@ def main() -> None:
             mode,
             selective=SelectiveACConfig() if mode == "selective" else None,
         )
-        model = apply_fsdp(model, None, cfg, parallel_dims)
+        model = apply_fsdp(model, cfg, parallel_dims)
 
         opt = torch.optim.SGD(model.parameters(), lr=LR)
         losses: list[float] = []

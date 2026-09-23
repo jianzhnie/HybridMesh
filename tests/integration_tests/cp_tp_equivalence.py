@@ -85,7 +85,6 @@ def _cfg(strategy: str, *, heads: int = HEADS) -> HybridMeshConfig:
             context_parallel_size=CP,
             context_parallel_strategy=strategy,
             context_parallel_load_balancer=None,
-            backend="gloo",
         ),
         training=TrainingConfig(max_seq_len=SEQ, steps=1),
     )

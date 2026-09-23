@@ -166,7 +166,7 @@ def test_apply_fsdp_preserves_parameter_dtype_for_mixed_precision(
         {"fsdp_reshard_after_forward": "default", "enable_fsdp_symm_mem": False},
     )()
 
-    fsdp_wrap.apply_fsdp(model, None, config, parallel_dims)
+    fsdp_wrap.apply_fsdp(model, config, parallel_dims)
 
     assert captured["param_dtype"] is torch.bfloat16
     assert captured["reduce_dtype"] is torch.float32

@@ -122,7 +122,7 @@ def test_parallelize_hf_transformers_wires_ac_before_fsdp() -> None:
     """The one entry point applies AC on the plain (single-device) path too."""
     model = parallelize_hf_transformers(
         _model(),
-        cfg=ParallelConfig(backend="gloo"),
+        cfg=ParallelConfig(),
         mesh=None,
         parallel_dims=None,
         activation_checkpoint="full",
@@ -139,7 +139,7 @@ def test_parallelize_hf_transformers_threads_selective_ac() -> None:
     """
     model = parallelize_hf_transformers(
         _model(),
-        cfg=ParallelConfig(backend="gloo"),
+        cfg=ParallelConfig(),
         mesh=None,
         parallel_dims=None,
         activation_checkpoint="selective",

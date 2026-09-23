@@ -135,9 +135,9 @@ def main() -> None:
     assert world == 2, f"this check assumes 2 ranks, got {world}"
 
     if mode == "ddp":
-        cfg = ParallelConfig(data_parallel_replicate_size=2, backend="gloo")
+        cfg = ParallelConfig(data_parallel_replicate_size=2)
     else:
-        cfg = ParallelConfig(data_parallel_shard_size=2, backend="gloo")
+        cfg = ParallelConfig(data_parallel_shard_size=2)
     parallel_dims = ParallelDims.from_config(cfg, world)
     parallel_dims.build_mesh()
     loss_mesh = parallel_dims.get_mesh("loss")
@@ -164,7 +164,7 @@ def main() -> None:
         ref_losses.append(loss.item())
 
     # -- distributed run through the real apply_fsdp entry point ------------
-    model = apply_fsdp(_build_model(), None, cfg, parallel_dims)
+    model = apply_fsdp(_build_model(), cfg, parallel_dims)
     if not isinstance(model, FSDPModule):
         failures.append(f"apply_fsdp left the model unwrapped in {mode} mode")
 

@@ -84,7 +84,6 @@ def _cfg(load_balancer: str | None) -> HybridMeshConfig:
         parallel=ParallelConfig(
             context_parallel_size=2,
             context_parallel_load_balancer=load_balancer,
-            backend="gloo",
         ),
         training=TrainingConfig(max_seq_len=SEQ, steps=1),
     )
