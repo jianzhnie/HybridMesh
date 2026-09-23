@@ -58,7 +58,7 @@ What the migration added, and why each earned its place:
   and the first collective genuinely need; ``train`` drops every one of them
   (plus the world group) to ``parallel.train_timeout_seconds`` after this
   process's first completed step, so a later hang is reported in seconds rather
-  than mistaken for a slow launch -- see ``parallel.collectives.set_pg_timeouts``.
+  than mistaken for a slow launch -- see ``accelerator.collectives.set_pg_timeouts``.
 * **Profiling**, through ``components/profiler``: ``Profiler`` is entered once
   around the loop and stepped once per iteration, so Kineto traces land on a
   schedule and allocator memory snapshots are written periodically -- plus one
@@ -92,7 +92,15 @@ from torch.distributed.device_mesh import DeviceMesh
 from torch.distributed.tensor import DTensor
 
 from .. import parallel
+from ..accelerator.collectives import (
+    clip_grad_norm_,
+    dist_max,
+    dist_sum,
+    dist_sum_tensor,
+    set_pg_timeouts,
+)
 from ..accelerator.device import device_module, device_type
+from ..accelerator.mesh import build_mesh, build_parallel_dims, init_distributed
 from ..components.checkpointer import DATALOADER, TRAIN_STATE, CheckpointManager
 from ..components.loss import (
     IGNORE_INDEX,
@@ -109,7 +117,6 @@ from ..components.profiler import Profiler
 from ..datasets import build_dataloader
 from ..datasets.loader import BaseDataLoader, DataloaderExhaustedError, TrainerBatch
 from ..datasets.random_data import Batch, DataLoaderExhausted, RandomTokenDataLoader
-from ..mesh import build_mesh, build_parallel_dims, init_distributed
 from ..models.common.aux_loss import (
     AuxLoss,
     collect_aux_loss_metrics,
@@ -122,13 +129,6 @@ from ..models.hf_wrapper import (
     build_model_config_for,
     materialize_meta_model,
     num_flops_per_token,
-)
-from ..parallel.collectives import (
-    clip_grad_norm_,
-    dist_max,
-    dist_sum,
-    dist_sum_tensor,
-    set_pg_timeouts,
 )
 from ..parallel.parallel_dims import ParallelDims
 from ..parallel.pipeline_parallel import PipelineParallelSetup

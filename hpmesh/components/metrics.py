@@ -60,8 +60,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import TYPE_CHECKING, Any
 
-from ..utils.logger_utils import get_distributed_rank, get_logger
-from ..utils.monitoring import (
+from ..accelerator.monitoring import (
     Color,
     NoColor,
     colors_enabled,
@@ -69,6 +68,7 @@ from ..utils.monitoring import (
     get_device_name,
     get_peak_flops,
 )
+from ..utils.logger_utils import get_distributed_rank, get_logger
 
 if TYPE_CHECKING:
     # Annotation-only. ``parallel_dims`` imports the training config, which
