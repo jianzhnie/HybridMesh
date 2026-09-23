@@ -92,6 +92,7 @@ from torch.distributed.device_mesh import DeviceMesh
 from torch.distributed.tensor import DTensor
 
 from .. import parallel
+from ..accelerator.device import device_module, device_type
 from ..components.checkpointer import DATALOADER, TRAIN_STATE, CheckpointManager
 from ..components.loss import (
     IGNORE_INDEX,
@@ -136,7 +137,6 @@ from ..parallel.tensor_parallel.tp import (
     ColwiseLinearNoGather,
     RowwiseLinear,
 )
-from ..utils.device import device_module, device_type
 from ..utils.gc import GarbageCollection
 from ..utils.logger_utils import get_logger
 from ..utils.spmd_context import spmd_context

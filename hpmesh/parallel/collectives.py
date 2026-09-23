@@ -30,7 +30,7 @@ import torch
 import torch.distributed as dist
 from torch.distributed.tensor import DTensor
 
-from ..utils.device import device_module
+from ..accelerator.device import device_module
 
 logger = logging.getLogger(__name__)
 

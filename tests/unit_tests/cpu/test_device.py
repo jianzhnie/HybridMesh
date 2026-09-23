@@ -5,7 +5,7 @@ from __future__ import annotations
 import pytest
 import torch
 
-from hpmesh.utils import device
+from hpmesh.accelerator import device
 
 
 def test_device_priority_prefers_npu(monkeypatch) -> None:

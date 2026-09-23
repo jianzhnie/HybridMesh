@@ -138,7 +138,7 @@ class DeviceMemoryMonitor:
 
     def _device_module(self):
         if self.device_type != "cpu":
-            from ..utils.device import device_module
+            from ..accelerator.device import device_module
 
             return device_module
         return None
@@ -184,7 +184,7 @@ class DeviceMemoryMonitor:
 
 def build_device_memory_monitor() -> DeviceMemoryMonitor:
     """Build a monitor and say which device it is watching."""
-    from ..utils.device import device_type
+    from ..accelerator.device import device_type
 
     monitor = DeviceMemoryMonitor(device_type)
     if device_type != "cpu":

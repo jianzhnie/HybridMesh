@@ -10,7 +10,7 @@ actually uses. Two departures:
 * **One device type, decided once.** torchtitan resolves ``device_type`` with
   ``torch._utils._get_available_device_type()`` and then reaches for ``torch.xpu``,
   ``torch.neuron`` and friends at the point of use. hpmesh resolves ``cuda`` or
-  ``cpu`` in ``utils/device.py`` (see the note there on why MPS is excluded) and
+  ``cpu`` in ``accelerator/device.py`` (see the note there on why MPS is excluded) and
   everything else stays out. A probe for a device this package cannot train on
   is a branch nothing can exercise.
 
@@ -35,7 +35,7 @@ from dataclasses import dataclass, fields
 
 import torch
 
-from .device import device_module, device_type
+from ..accelerator.device import device_module, device_type
 
 __all__ = [
     "Color",
@@ -125,7 +125,7 @@ def colors_enabled(*, disable_color_printing: bool) -> bool:
 def get_device_name() -> str:
     """The training device's name, or ``"cpu"`` when there is no device to ask.
 
-    ``device_module`` is ``torch`` itself in the CPU case (see ``utils/device``),
+    ``device_module`` is ``torch`` itself in the CPU case (see ``accelerator/device``),
     and ``torch`` exposes no ``get_device_name`` -- so the type is checked rather
     than assumed.
     """

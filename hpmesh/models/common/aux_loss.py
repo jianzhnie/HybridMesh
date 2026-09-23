@@ -42,7 +42,7 @@ import torch
 import torch.nn as nn
 from torch.distributed._functional_collectives import all_reduce
 
-from hpmesh.utils.device import device_type
+from hpmesh.accelerator.device import device_type
 
 if TYPE_CHECKING:
     # Annotation-only: ``ParallelDims`` appears in two signatures below and

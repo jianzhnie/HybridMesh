@@ -28,7 +28,7 @@ Departures from torchtitan, each a subtraction or a device-portability fix:
   and the version probe around ``export_chrome_trace`` guards a branch that
   cannot be taken.
 
-* **No XPU activity.** The device is resolved once in ``utils/device.py`` as
+* **No XPU activity.** The device is resolved once in ``accelerator/device.py`` as
   ``cuda`` or ``cpu``; there is no third case to ask about.
 
 * **Memory history is recorded through the device module, not ``torch``.** See
@@ -51,7 +51,7 @@ import torch
 if TYPE_CHECKING:
     from ..trainer.config import ProfilerConfig
 
-from ..utils.device import device_type
+from ..accelerator.device import device_type
 from ..utils.logger_utils import get_distributed_rank, get_logger
 from ..utils.monitoring import read_memory_snapshot, record_memory_history
 
