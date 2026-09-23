@@ -79,7 +79,7 @@ docstring 后 `ast.unparse` 归一化了空白和引号。要判断"真逐字",�
 | `datasets/multimodal/mm_collator.py`             | `hf_datasets/multimodal/mm_collator.py`                 | 0.777 | 增加 MRoPE grid/run/长度校验，当前已是契约适配                                                          |
 | `models/common/multimodal.py`                    | `models/common/multimodal.py`                           | 0.888 | 保留算法来源，但加入同步规避与更严格的 span/run 校验                                                      |
 | `datasets/types.py`                              | `components/data/types.py`                              | 0.506 | 去 Configurable 后重塑 build context 与 iteration policy                                             |
-| `parallel/tensor_parallel/linear.py`             | `distributed/linear.py`                                 | 0.511 | 保留 fused/fallback 数学意图，但运行时上下文和 autograd 形状已适配 hpmesh                                  |
+| `parallel/tensor_parallel/linear.py`             | `models/common/dist_gemm.py`（原 `distributed/linear.py`，上游 e72fd863d 搬迁并改名 `Async*`，数学不变） | 0.511 | 保留 fused/fallback 数学意图，但运行时上下文和 autograd 形状已适配 hpmesh                                  |
 | `components/checkpointer/dcp.py`                 | `components/checkpointer/dcp.py`                        | 0.735 | 本地/remote storage、HF export 与生命周期已重塑                                                       |
 | `datasets/text/text.py`                          | `hf_datasets/text_datasets.py`                          | 0.767 | 路径与 processor 构造契约已适配                                                                       |
 | `parallel/fully_shard/fsdp.py`                   | `distributed/fsdp.py`                                   | 0.815 | 多轴 mesh 重建、HF decoder 与 MoE placement 是 hpmesh 适配                                            |
@@ -118,7 +118,7 @@ docstring 后 `ast.unparse` 归一化了空白和引号。要判断"真逐字",�
 | ---------------------------------------------- | ------------------------------------------------------------------------------------------------------ | ----------- |
 | `models/hf_wrapper.py`                         | `experiments/transformers_modeling_backend/model.py` 的包装层;上游另有 `models/*/model.py` 各一份                 | 0.059       |
 | `parallel/parallelize_hf.py`                   | `experiments/transformers_modeling_backend/parallelize.py` + 各 `models/*/parallelize.py`               | 0.089       |
-| `parallel/tensor_parallel/tp.py`               | `distributed/tensor_parallel.py` + 各模型 TP plan；hpmesh 是**手写 plan realizer**，不是声明式 `_sharding_config` | 0.056       |
+| `parallel/tensor_parallel/tp.py`               | 各模型 TP plan；上游 `distributed/tensor_parallel.py` 已随 DTensor 后端删除、无后继文件。hpmesh 是**手写 plan realizer**，不是声明式 `_sharding_config` | 0.056       |
 | `parallel/expert_parallel/apply.py` + `ep.py`  | `experiments/.../moe_replacement.py` + 各模型 EP parallelize；hpmesh 搬运 HF 权重而非重新初始化                 | 0.036-0.146 |
 | `parallel/context_parallel/primitives.py`      | `models/common/cp_attention.py`；剥掉 attention 基类，只保留 redistribution                                   | 0.060       |
 | `parallel/fully_shard/fsdp_wrap.py`            | 各 `models/*/parallelize.py` 的 FSDP driver；HF 五部件适配                                                     | 0.155       |
@@ -170,6 +170,12 @@ docstring 后 `ast.unparse` 归一化了空白和引号。要判断"真逐字",�
 | `distributed/compile.py`                                                          | **被裁剪成整体 `torch.compile(model)`**（PP 则每 chunk 一次）。裁掉的是四件互相独立的事：逐 block 编译、async TP `_micro_pipeline_tp`、`regional_inductor`、`capture_scalar_outputs`（后者是 token-choice MoE dispatch 的动态 shape 所需的） |
 | `models/common/moe_sharding.py`                                                   | **比“缺一个文件”更深**。旧的未接线 `parallel/sharding.py` 形式已删除；hpmesh 没有 MoE 的 TP 声明或读取声明的运行引擎。它真正的载荷是 **MoE-under-TP**（routed 专家在 TP 轴分片、router 保持 Replicate），而 hpmesh 的 TP 对 `moe_tp_experts` 明确 raise。所以这是 **TP×MoE 组合维度整体没有**，不是漏文件。 |
 | `components/quantization/`, `structured_logger/`, `protocols/`, `configurable.py` | **故意删除**,不是缺口。不要"补回来"                                                                    |
+| `components/optimizer/ema.py`（2026-09 新增，515 行）                                    | 在线 EMA 模型平均；需 config/trainer/checkpointer 三侧接线，hpmesh 无任何消费者                                |
+| quantile-balanced MoE routing（f8bb599a7，kimi_k3 在用）                               | `QuantileBalancedTopKRouter` + optimizer hook，跨 moe.py 与 optimizer.py                      |
+| MoE padding-mask 负载均衡（d34a13fdf）                                                  | routing 统计与 aux loss 屏蔽 padding token；hpmesh `MoE.forward` 无 padding_mask 通道，接线需改 EP swap 后调用链 |
+| `CastLinear`（150c4f73a 配套）                                                         | lm_head compute-dtype 变换；hpmesh 不带 `Linear` 类体系                                            |
+| Ulysses CP × varlen/packed（baff3c681）                                              | redistribution 原语 hpmesh 已有，缺 varlen 内层 attention 路径；`apply_cp` 对该组合保持 fail-fast          |
+| 多轮对话 SFT 的 renderer 路径（4a0d8dab3）                                                 | 依赖 `renderers==0.1.11` 与上游 `components/renderer.py`（Configurable 系）                    |
 
 **已从 D 移除**:`distributed/activation_checkpoint.py` 的 `SelectiveAC` —— 于
 2026-09-21 移植(见 A2)。至此该文件只剩两处未移植,都是环境依赖而非删减:
@@ -225,12 +231,21 @@ hpmesh 没有的 `Module` 协议上)、`MemoryBudgetAC` 只在模型被 compile 
 
 ## 版本与漂移
 
-- 本文最近一次人工审计工作树：hpmesh `8a2f269`，TorchTitan `c6e416bbd`；详细验证
-  记录见 [`hpmesh_torchtitan_alignment_audit_2026-09-21.md`](./hpmesh_torchtitan_alignment_audit_2026-09-21.md)。
+- 本文最近一次人工审计工作树：hpmesh `5749d19`（+本轮改动），TorchTitan `b64103072`；
+  详细验证记录见
+  [`hpmesh_torchtitan_alignment_audit_2026-09-23.md`](./hpmesh_torchtitan_alignment_audit_2026-09-23.md)。
+  上一轮审计（hpmesh `8a2f269` × TorchTitan `c6e416bbd`）引用的
+  `hpmesh_torchtitan_alignment_audit_2026-09-21.md` 不在当前工作区。
+- 检查后续漂移：`git -C <torchtitan> log b64103072..HEAD -- torchtitan/`。
+- 2026-09-23 映射修订：上游 `distributed/linear.py` 已删除、内容迁入
+  `models/common/dist_gemm.py`（改名 `AsyncAllGatherLinear`/`AsyncLinearReduceScatter`，
+  数学不变），此后上游 dist_gemm.py 同时对应 hpmesh 的 `parallel/tensor_parallel/linear.py`
+  （autograd 原语）与 `models/common/dist_gemm.py`（模块层），一对二；
+  `distributed/tensor_parallel.py` 已随 DTensor 后端整体删除、无后继。
+- 早前基线：hpmesh `8a2f269`，TorchTitan `c6e416bbd`。
 - 表中的 ratio 除 A2 中明确标为 2026-09-21 复核的十行外，来自早期结构快照
   （hpmesh `58eb279` 附近），只用于解释来源，**不是当前工作树的实时相似度**。
   源码变化后应运行下方脚本重算，不能据旧 ratio 判定漂移。
-- 检查后续漂移：`git -C <torchtitan> log c6e416bbd..HEAD -- torchtitan/`。
 - 2026-09-22 设备验证补充：Qwen3-8B 已按 TorchTitan 的 meta 构建 → FSDP →
   `to_empty` → checkpoint load 顺序完成 8 卡 HCCL、4096 序列的真实训练，并完成完整
   DCP save→resume。训练示例显式使用 `last_save_model_only=False`；上游默认的

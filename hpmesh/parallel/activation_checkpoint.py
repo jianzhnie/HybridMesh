@@ -177,7 +177,11 @@ def _mm_recompute_shapes(
                 "force_recompute_mm_shapes_by_fqns expected to match a "
                 f"nn.Linear, but got: {submod}"
             )
-        out_f, in_f = submod.weight.shape
+        # ``shape[-1]`` / ``numel() // in_f`` instead of unpacking a 2D shape,
+        # so a stacked weight (extra leading projection dim) resolves to the
+        # same (in, out) pair its per-projection GEMMs run at.
+        in_f = submod.weight.shape[-1]
+        out_f = submod.weight.numel() // in_f
         shapes.add((in_f, out_f))
     return shapes
 

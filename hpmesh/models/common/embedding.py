@@ -56,10 +56,20 @@ class Embedding(nn.Embedding):
         offset = dist.get_rank(tp_group) * chunk_size
         mask = (input >= offset) & (input < offset + self.weight.shape[0])
         local_input = (input - offset).clamp(0, self.weight.shape[0] - 1)
+        # padding_idx is a global row id; only the shard that owns that row may
+        # hand it to the local F.embedding. Any other shard would either crash
+        # (the id is beyond the shard's row count) or silently zero the
+        # gradient of an unrelated local row.
+        local_padding_idx = None
+        if (
+            self.padding_idx is not None
+            and offset <= self.padding_idx < offset + self.weight.shape[0]
+        ):
+            local_padding_idx = self.padding_idx - offset
         out = F.embedding(
             local_input,
             self.weight,
-            self.padding_idx,
+            local_padding_idx,
             self.max_norm,
             self.norm_type,
             self.scale_grad_by_freq,

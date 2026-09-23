@@ -126,14 +126,45 @@ def disable_fsdp_gradient_division(model: nn.Module) -> None:
             module.set_gradient_divide_factor(1.0)
 
 
-def enable_fsdp_symm_mem(model: nn.Module) -> None:
+def _fsdp_shard_degree(dp_mesh: DeviceMesh) -> int:
+    """The degree by which FSDP shards dim 0 over ``dp_mesh``.
+
+    FSDP cuts a parameter's dim 0 only over its shard axes: ``dp_shard``,
+    plus ``cp`` when CP is on (``resolve_fsdp_mesh`` folds the two into
+    ``dp_shard_cp``). ``dp_replicate`` replicates, so it must not inflate the
+    degree compared against ``num_experts`` -- under HSDP (dp_replicate > 1)
+    the raw mesh size would over-count and mis-pick ``Shard(1)`` for the
+    expert weights.
     """
-    Enable symmetric-memory communication optimizations for all FSDP modules.
+    degree = dp_mesh.size()
+    if "dp_replicate" in (dp_mesh.mesh_dim_names or ()):
+        degree //= dp_mesh["dp_replicate"].size()
+    return degree
+
+
+def enable_fsdp_symm_mem(model: nn.Module, scope: str | None = "all") -> None:
+    """Enable symmetric-memory communication for the FSDP modules ``scope`` selects.
+
+    ``None`` disables it. ``"all"`` covers every FSDP module; ``"dense"``
+    skips any module flagged ``moe_enabled`` -- an MoE transformer block is one
+    FSDP module, so its attention parameters are skipped along with its
+    experts. Symmetric memory is not always beneficial for the expert (sparse)
+    FSDP modules, hence the narrower scope.
     """
+    if scope is None:
+        return
+    if scope not in ("all", "dense"):
+        raise ValueError(
+            f"enable_fsdp_symm_mem scope must be one of 'all', 'dense', None; "
+            f"got {scope!r}"
+        )
     for module in model.modules():
-        if isinstance(module, FSDPModule):
-            module.set_force_sum_reduction_for_comms(True)
-            module.set_symm_mem_for_comm()
+        if not isinstance(module, FSDPModule):
+            continue
+        if scope == "dense" and getattr(module, "moe_enabled", False):
+            continue
+        module.set_force_sum_reduction_for_comms(True)
+        module.set_symm_mem_for_comm()
 
 
 def get_fsdp_reshard_after_forward_policy(
@@ -330,7 +361,7 @@ def apply_fsdp_to_decoder(
                 assert edp_mesh is not None
                 efsdp_ep_size = edp_mesh["efsdp"].size() * ep_size
             else:
-                efsdp_ep_size = fsdp_config["mesh"].size()
+                efsdp_ep_size = _fsdp_shard_degree(dp_mesh)
 
             if efsdp_ep_size > num_experts:
                 expert_shard_placement = Shard(1)
@@ -415,7 +446,7 @@ def apply_fsdp_to_decoder(
     fully_shard(model, **fsdp_config)
 
     if enable_symm_mem:
-        enable_fsdp_symm_mem(model)
+        enable_fsdp_symm_mem(model, "all")
 
     # Disable FSDP's automatic gradient division for all FSDP modules
     disable_fsdp_gradient_division(model)

@@ -603,7 +603,9 @@ class Trainer:
           labels, before any reshaping: throughput is a report about the loader
           ("tokens it produced"), not about the loss. The two numbers differ --
           a document's final position is loaded but never predicted -- and that
-          is why they are not one field.
+          is why they are not one field. The cumulative count is divided by
+          ``cp * tp`` because every rank of a CP/TP group reads the same batch
+          and the report sums it over the loss mesh (see ``train_step``).
         * **Everything else stays on the host until its group is consumed.**
           ``_preprocess`` moves one group's tensors to the device just ahead of
           that group's forward (see ``_to_device``), so holding the rest of the
@@ -611,7 +613,18 @@ class Trainer:
           invariant ``torchtitan`` documents for ``batch_generator``.
         """
         labels = batch.labels if isinstance(batch, Batch) else batch["labels"]
-        self.ntokens_seen += labels.numel()
+        # Count this rank's share of the sequence, not the whole batch: every
+        # rank of a CP/TP group reads the *same* batch from the loader, and the
+        # sequence is cut across the group later (``shard_batch_for_cp`` /
+        # ``shard_batch_for_tp``). Counting the full batch here and then summing
+        # over the dp*cp*tp loss mesh in ``train_step`` would report a corpus
+        # cp * tp times its true size; counting the share makes that sum
+        # reconstruct the tokens actually read.
+        parallel_dims = getattr(self, "parallel_dims", None)
+        sequence_shards = (
+            1 if parallel_dims is None else parallel_dims.cp * parallel_dims.tp
+        )
+        self.ntokens_seen += labels.numel() // sequence_shards
         num_valid_tokens = self._count_valid_tokens(batch)
 
         if isinstance(batch, dict):

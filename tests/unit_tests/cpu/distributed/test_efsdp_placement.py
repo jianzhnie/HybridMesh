@@ -25,6 +25,8 @@ Boundary pinned (efsdp axis size 1 on a single-rank mesh, so
 
 from __future__ import annotations
 
+import math
+
 import pytest
 import torch
 import torch.distributed as dist
@@ -36,7 +38,11 @@ import hpmesh.parallel.fully_shard.fsdp as fsdp_module
 from hpmesh.models.common.grouped_experts import GroupedExperts
 from hpmesh.models.common.moe import MoE, RoutedExperts, TokenChoiceTopKRouter
 from hpmesh.models.common.token_dispatcher import LocalTokenDispatcher
-from hpmesh.parallel.fully_shard.fsdp import apply_fsdp_to_decoder
+from hpmesh.parallel.fully_shard.fsdp import (
+    _fsdp_shard_degree,
+    apply_fsdp_to_decoder,
+    enable_fsdp_symm_mem,
+)
 
 _DIM = 8
 _HIDDEN = 16
@@ -155,3 +161,52 @@ def test_degree_above_experts_shards_the_feature_axis(
     the comparison, where the buggy read agrees."""
     placement = _expert_placement(monkeypatch, total=2, local=1, ep_size=4)
     assert placement == Shard(1)
+
+
+# -- FSDP shard degree over the dense mesh -------------------------------------
+
+
+class _MeshStub:
+    """Stand-in for the rebuilt FSDP mesh; multi-axis real meshes need a
+    multi-rank process group, which a CPU test does not have."""
+
+    def __init__(self, axes: dict[str, int]) -> None:
+        self._axes = axes
+
+    @property
+    def mesh_dim_names(self) -> tuple[str, ...]:
+        return tuple(self._axes)
+
+    def size(self) -> int:
+        return math.prod(self._axes.values())
+
+    def __getitem__(self, name: str) -> _MeshStub:
+        return _MeshStub({name: self._axes[name]})
+
+
+def test_shard_degree_is_the_shard_axis_when_no_replication() -> None:
+    assert _fsdp_shard_degree(_MeshStub({"dp_shard": 4})) == 4
+
+
+def test_shard_degree_folds_cp_into_the_shard_axis() -> None:
+    """``resolve_fsdp_mesh`` flattens (dp_shard, cp) into ``dp_shard_cp``."""
+    assert _fsdp_shard_degree(_MeshStub({"dp_shard_cp": 8})) == 8
+
+
+def test_shard_degree_excludes_dp_replicate() -> None:
+    """HSDP: dp_replicate=2, dp_shard=4, num_experts=4 must compare 4, not 8 --
+    counting the replicate axis mis-picks Shard(1) for the experts."""
+    assert _fsdp_shard_degree(_MeshStub({"dp_replicate": 2, "dp_shard": 4})) == 4
+    assert _fsdp_shard_degree(_MeshStub({"dp_replicate": 2, "dp_shard_cp": 8})) == 8
+
+
+# -- symmetric-memory scope -----------------------------------------------------
+
+
+def test_symm_mem_none_scope_is_a_noop() -> None:
+    enable_fsdp_symm_mem(nn.Linear(4, 4), None)
+
+
+def test_symm_mem_rejects_an_unknown_scope() -> None:
+    with pytest.raises(ValueError, match="scope"):
+        enable_fsdp_symm_mem(nn.Linear(4, 4), "sparse")
