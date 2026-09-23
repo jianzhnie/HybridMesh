@@ -80,7 +80,6 @@ def _cfg() -> HybridMeshConfig:
         parallel=ParallelConfig(
             tensor_parallel_size=TP,
             data_parallel_shard_size=DP_SHARD,
-            backend="gloo",
         ),
         optimizer=OptimizerConfig(learning_rate=3e-4, weight_decay=0.0),
         training=TrainingConfig(

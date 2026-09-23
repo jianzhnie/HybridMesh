@@ -63,7 +63,6 @@ def _cfg() -> HybridMeshConfig:
             # Contiguous split: the gathered logits then concatenate in rank
             # order and compare against the dense reference directly.
             context_parallel_load_balancer=None,
-            backend="gloo",
         ),
         training=TrainingConfig(max_seq_len=SEQ, steps=1),
     )

@@ -138,11 +138,6 @@ def test_symmetric_memory_is_rejected_off_a_supported_device() -> None:
         ParallelConfig(enable_fsdp_symm_mem=True)
 
 
-def test_an_unknown_backend_is_rejected() -> None:
-    with pytest.raises(ValueError, match="backend must be one of"):
-        ParallelConfig(backend="mpi")
-
-
 def test_an_unknown_pipeline_schedule_is_rejected() -> None:
     """``get_schedule_class`` is the authority; the error names the bad value."""
     with pytest.raises(

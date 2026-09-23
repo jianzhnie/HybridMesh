@@ -122,7 +122,7 @@ def main() -> None:
     assert world == 2, f"this check assumes 2 ranks, got {world}"
 
     cfg = HybridMeshConfig(
-        parallel=ParallelConfig(context_parallel_size=2, backend="gloo"),
+        parallel=ParallelConfig(context_parallel_size=2),
         training=TrainingConfig(max_seq_len=SEQ, steps=STEPS),
     )
     parallel_dims = ParallelDims.from_config(cfg.parallel, world)
@@ -150,7 +150,7 @@ def main() -> None:
         ref_losses.append(loss_sum.item() / SEQ)
 
     # -- pure-CP run through the real apply_fsdp entry point -------------------
-    model = apply_fsdp(_build_model(), None, cfg.parallel, parallel_dims)
+    model = apply_fsdp(_build_model(), cfg.parallel, parallel_dims)
     if not isinstance(model, FSDPModule):
         failures.append("apply_fsdp left the model unsharded under pure CP")
 
