@@ -32,9 +32,9 @@ import torch.nn.functional as F
 from torch.distributed.tensor import DTensor
 from transformers import AutoConfig
 
+from hpmesh.accelerator.collectives import dist_sum
 from hpmesh.models.common.moe import MoE
 from hpmesh.models.hf_wrapper import HFTransformerModel
-from hpmesh.parallel.collectives import dist_sum
 from hpmesh.parallel.parallel_dims import ParallelDims
 from hpmesh.parallel.parallelize_hf import parallelize_hf_transformers
 from hpmesh.trainer import ParallelConfig

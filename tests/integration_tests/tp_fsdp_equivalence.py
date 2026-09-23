@@ -38,10 +38,10 @@ import torch
 import torch.distributed as dist
 from torch.distributed.tensor import DTensor
 
+from hpmesh.accelerator.collectives import clip_grad_norm_
 from hpmesh.components.loss import IGNORE_INDEX, cross_entropy_loss
 from hpmesh.datasets.random_data import Batch, RandomTokenSource, batch_iterator
 from hpmesh.models.hf_wrapper import HFTransformerModel, build_model_config_for
-from hpmesh.parallel.collectives import clip_grad_norm_
 from hpmesh.parallel.parallel_dims import ParallelDims
 from hpmesh.parallel.tensor_parallel.tp import (
     ColwiseLinear,

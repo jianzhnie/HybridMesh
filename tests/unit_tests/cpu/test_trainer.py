@@ -27,6 +27,12 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+from hpmesh.accelerator.collectives import (
+    clip_grad_norm_,
+    dist_max,
+    dist_sum,
+    dist_sum_tensor,
+)
 from hpmesh.components.checkpointer import (
     DATALOADER,
     TRAIN_STATE,
@@ -48,12 +54,6 @@ from hpmesh.datasets.random_data import (
     batch_iterator,
 )
 from hpmesh.models.hf_wrapper import HFTransformerModel, build_model_config
-from hpmesh.parallel.collectives import (
-    clip_grad_norm_,
-    dist_max,
-    dist_sum,
-    dist_sum_tensor,
-)
 from hpmesh.trainer.config import (
     CheckpointConfig,
     HybridMeshConfig,

@@ -41,11 +41,11 @@ import torch
 import torch.distributed as dist
 import torch.nn as nn
 
+from hpmesh.accelerator.collectives import clip_grad_norm_
 from hpmesh.components.loss import IGNORE_INDEX, cross_entropy_loss
 from hpmesh.components.metrics import get_metrics_rank
 from hpmesh.datasets.random_data import RandomTokenSource, batch_iterator
 from hpmesh.models.hf_wrapper import HFTransformerModel, build_model_config_for
-from hpmesh.parallel.collectives import clip_grad_norm_
 from hpmesh.trainer import (
     HybridMeshConfig,
     ModelConfig,

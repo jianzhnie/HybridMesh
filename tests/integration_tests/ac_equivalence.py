@@ -32,8 +32,8 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torch.distributed.tensor import DTensor
 
+from hpmesh.accelerator.collectives import dist_sum
 from hpmesh.parallel.activation_checkpoint import apply_ac
-from hpmesh.parallel.collectives import dist_sum
 from hpmesh.parallel.fully_shard.fsdp_wrap import apply_fsdp
 from hpmesh.parallel.parallel_dims import ParallelDims
 from hpmesh.trainer import ParallelConfig
