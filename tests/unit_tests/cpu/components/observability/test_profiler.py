@@ -16,6 +16,7 @@ import pickle
 import pytest
 import torch
 
+from hpmesh.accelerator.monitoring import record_memory_history
 from hpmesh.components import profiler as profiler_module
 from hpmesh.components.profiler import (
     MEMORY_EXIT_DIR,
@@ -26,7 +27,6 @@ from hpmesh.components.profiler import (
     _caused_by_oom,
 )
 from hpmesh.trainer.config import ProfilerConfig as Config
-from hpmesh.utils.monitoring import record_memory_history
 
 # -- config -------------------------------------------------------------------
 

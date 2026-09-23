@@ -29,7 +29,7 @@ import torch
 import torch.distributed as dist
 import torch.nn.functional as F
 
-from hpmesh.mesh import build_mesh
+from hpmesh.accelerator.mesh import build_mesh
 from hpmesh.models.hf_wrapper import HFTransformerModel, build_model_config
 from hpmesh.parallel.parallel_dims import ParallelDims
 from hpmesh.parallel.tensor_parallel.tp import (

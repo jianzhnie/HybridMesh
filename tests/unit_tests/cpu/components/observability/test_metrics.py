@@ -12,6 +12,7 @@ import logging
 
 import pytest
 
+from hpmesh.accelerator.monitoring import Color, NoColor, colors_enabled, get_peak_flops
 from hpmesh.components import metrics as metrics_module
 from hpmesh.components.metrics import (
     BaseLogger,
@@ -32,7 +33,6 @@ from hpmesh.trainer.config import (
 from hpmesh.trainer.config import (
     MetricsConfig as Config,
 )
-from hpmesh.utils.monitoring import Color, NoColor, colors_enabled, get_peak_flops
 
 
 class _RecordingLogger(BaseLogger):

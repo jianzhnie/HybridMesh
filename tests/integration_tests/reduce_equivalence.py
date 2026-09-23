@@ -23,7 +23,7 @@ from __future__ import annotations
 import torch
 import torch.distributed as dist
 
-from hpmesh.parallel.collectives import dist_max, dist_sum_tensor
+from hpmesh.accelerator.collectives import dist_max, dist_sum_tensor
 
 # Rank r holds 2 + r, so the SUM is 5 and the MAX is 3 on both ranks. A wrong
 # answer is then attributable to a specific rank rather than to "the sum is off".

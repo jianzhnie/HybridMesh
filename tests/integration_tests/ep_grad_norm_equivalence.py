@@ -19,7 +19,7 @@ import torch
 import torch.distributed as dist
 from torch.distributed.device_mesh import init_device_mesh
 
-from hpmesh.parallel.collectives import clip_grad_norm_
+from hpmesh.accelerator.collectives import clip_grad_norm_
 
 
 def main() -> None:

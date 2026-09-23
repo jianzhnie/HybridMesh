@@ -50,7 +50,7 @@ import torch.nn.functional as F
 from torch.distributed._composable.fsdp import FSDPModule
 from torch.distributed.tensor import DTensor
 
-from hpmesh.parallel.collectives import dist_sum
+from hpmesh.accelerator.collectives import dist_sum
 from hpmesh.parallel.fully_shard.fsdp_wrap import apply_fsdp
 from hpmesh.parallel.parallel_dims import ParallelDims
 from hpmesh.trainer import ParallelConfig
