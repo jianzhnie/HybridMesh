@@ -21,7 +21,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-__all__ = ["ActivationFn", "SiTUGLU", "SwiGLU"]
+__all__ = ["ActivationFn", "SwiGLU"]
 
 
 class ActivationFn(nn.Module, ABC):
@@ -42,30 +42,3 @@ class SwiGLU(ActivationFn):
 
     def forward(self, gate: torch.Tensor, up: torch.Tensor) -> torch.Tensor:
         return F.silu(gate) * up
-
-
-class SiTUGLU(ActivationFn):
-    """Kimi's SiTU-GLU activation, evaluated in FP32.
-
-    ``beta`` bounds the gate through a tanh, which keeps the activation from
-    saturating as the gate grows. ``linear_beta`` applies the same bound to the
-    up half; leaving it ``None`` bounds the gate only.
-
-    The FP32 promotion is not incidental: ``tanh`` and ``sigmoid`` on bf16
-    inputs lose enough precision to move the loss, so the compute runs wide and
-    casts back on the way out.
-    """
-
-    def __init__(self, *, beta: float = 1.0, linear_beta: float | None = None) -> None:
-        super().__init__()
-        self.beta = beta
-        self.linear_beta = linear_beta
-
-    def forward(self, gate: torch.Tensor, up: torch.Tensor) -> torch.Tensor:
-        input_dtype = gate.dtype
-        gate_f = gate.float()
-        up_f = up.float()
-        gate_f = self.beta * torch.tanh(gate_f / self.beta) * torch.sigmoid(gate_f)
-        if self.linear_beta is not None:
-            up_f = self.linear_beta * torch.tanh(up_f / self.linear_beta)
-        return (gate_f * up_f).to(input_dtype)

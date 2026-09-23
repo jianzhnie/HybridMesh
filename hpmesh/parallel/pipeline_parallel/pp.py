@@ -253,7 +253,7 @@ def apply_pp(
         part = apply_tp(part, dense_mesh, cfg)
         if compile:
             part = torch.compile(part)
-        part = apply_fsdp(part, dense_mesh, cfg, parallel_dims)
+        part = apply_fsdp(part, cfg, parallel_dims)
         model_parts[i] = part
         # Rebind the stage's submodule in case a transform replaced the chunk.
         stages[i].submod = part

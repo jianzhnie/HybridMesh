@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import logging
-from collections.abc import Iterable
 from dataclasses import dataclass, field
 from enum import StrEnum
 
@@ -17,8 +16,6 @@ logger = logging.getLogger(__name__)
 __all__ = [
     "MeshAxisName",
     "ParallelDims",
-    "unfold_dp_axis",
-    "unfold_dp_axes",
 ]
 
 
@@ -43,21 +40,6 @@ class MeshAxisName(StrEnum):
     PP = "pp"
     EP = "ep"
     EFSDP = "efsdp"
-
-
-def unfold_dp_axis(axis: MeshAxisName | str) -> tuple[MeshAxisName, ...]:
-    """Expand logical ``dp`` into concrete dense storage mesh axes."""
-    axis_name = MeshAxisName(axis)
-    if axis_name == MeshAxisName.DP:
-        return (MeshAxisName.DP_REPLICATE, MeshAxisName.DP_SHARD)
-    return (axis_name,)
-
-
-def unfold_dp_axes(axes: Iterable[MeshAxisName | str]) -> list[str]:
-    """Expand logical ``dp`` into concrete dense storage mesh axes."""
-    return [
-        concrete_axis.value for axis in axes for concrete_axis in unfold_dp_axis(axis)
-    ]
 
 
 @dataclass
@@ -416,45 +398,6 @@ class ParallelDims:
             self.build_mesh()
         return self._global_meshes.get("spmd_sparse_for_fwdbwd")
 
-    def get_dense_tp_mesh(self) -> DeviceMesh:
-        """Return the TP-axis mesh used by dense forward/backward computation."""
-        return self.spmd_dense_mesh()["tp"]
-
-    def get_activated_mesh(self, axes: list[str]) -> DeviceMesh | None:
-        """Submesh of ``axes`` filtered to those actually enabled in this run.
-
-        Returns a mesh containing the axes in ``axes`` that are enabled. If
-        none of the axes in ``axes`` is enabled, returns ``None``. This
-        differs from ``get_optional_mesh``, which returns ``None`` as soon
-        as any axis in ``axes`` is not enabled.
-        """
-        if not self._single_axis_meshes:
-            self.build_mesh()
-        axes = [
-            axis
-            for axis in axes
-            if axis in self._single_axis_meshes
-            and self.get_optional_mesh(axis) is not None
-        ]
-        return self.get_optional_mesh(axes) if axes else None
-
-    def resolve_mesh(self, axes: Iterable[MeshAxisName | str]) -> DeviceMesh | None:
-        """Resolve the device mesh for a set of mesh axis names.
-
-        Given the axes, query ``parallel_dims`` for the corresponding SPMD
-        mesh (dense or sparse).
-
-        ``axes`` is always a superset of the resolved mesh's axes: we always
-        specify every axis. Unsupported axes are dropped.
-
-        Returns ``None`` when none of the kept axes is enabled.
-        """
-        in_band = ("dp", "cp", "tp", "ep")
-        axes_list = [
-            axis.value if isinstance(axis, MeshAxisName) else axis for axis in axes
-        ]
-        return self.get_activated_mesh([axis for axis in axes_list if axis in in_band])
-
     def get_all_one_dimensional_meshes(self) -> dict[str, DeviceMesh]:
         """Get all enabled one-dimensional device meshes.
 
@@ -493,12 +436,6 @@ class ParallelDims:
         }
 
     @property
-    def world_mesh(self) -> DeviceMesh:
-        if self._world_mesh is None:
-            self._world_mesh = self.build_mesh()
-        return self._world_mesh
-
-    @property
     def dp_enabled(self):
         return self.dp_replicate > 1 or self.dp_shard > 1
 
@@ -519,10 +456,6 @@ class ParallelDims:
         return self.dp_enabled or self.cp_enabled
 
     @property
-    def fsdp_enabled(self):
-        return self.dp_shard_enabled or self.cp_enabled
-
-    @property
     def tp_enabled(self):
         return self.tp > 1
 
@@ -537,13 +470,3 @@ class ParallelDims:
     @property
     def non_data_parallel_size(self):
         return self.cp * self.tp * self.pp
-
-    @property
-    def seq_len_divisor(self):
-        # Sequence Parallel requires that seq_len be divisible by TP degree.
-        # https://github.com/pytorch/torchtitan/pull/640#discussion_r1849481001
-
-        # Context Parallel requires that seq_len be divisible by 2 * CP degree,
-        # when load balancing is enabled (by default).
-        # https://github.com/pytorch/pytorch/blob/4f62dcc/torch/distributed/tensor/experimental/_attention.py#L1246  # noqa: E501
-        return self.tp * (self.cp * 2)
