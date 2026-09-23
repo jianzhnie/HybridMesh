@@ -35,7 +35,7 @@ from dataclasses import dataclass, fields
 
 import torch
 
-from ..accelerator.device import device_module, device_type
+from .device import device_module, device_type
 
 __all__ = [
     "Color",

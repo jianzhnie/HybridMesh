@@ -25,14 +25,14 @@ from __future__ import annotations
 
 import torch.distributed as dist
 
-from .accelerator.device import (
+from ..parallel.parallel_dims import ParallelDims
+from ..trainer.config import HybridMeshConfig
+from .device import (
     device_type,
     get_current_device,
     get_distributed_backend,
     set_device,
 )
-from .parallel.parallel_dims import ParallelDims
-from .trainer.config import HybridMeshConfig
 
 # Mesh axis names. `axis` names a specific DeviceMesh axis; `dim` is for shapes.
 # These are the axes of the dense mesh the parallel layer is handed; ``pp`` is

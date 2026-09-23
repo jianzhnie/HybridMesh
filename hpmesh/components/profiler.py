@@ -52,8 +52,8 @@ if TYPE_CHECKING:
     from ..trainer.config import ProfilerConfig
 
 from ..accelerator.device import device_type
+from ..accelerator.monitoring import read_memory_snapshot, record_memory_history
 from ..utils.logger_utils import get_distributed_rank, get_logger
-from ..utils.monitoring import read_memory_snapshot, record_memory_history
 
 logger = get_logger(__name__)
 

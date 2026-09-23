@@ -1,11 +1,23 @@
-"""Accelerator layer: device discovery plus vendored distributed collectives.
+"""Accelerator layer: device discovery, communication primitives, and their
+configuration functions.
 
-``device.py`` is hpmesh's backend-neutral device module (NPU/CUDA/MLU/MUSA
-discovery, distributed-backend selection, per-vendor predicates). ``dist.py``
-and ``utils.py`` are vendored from OpenMMLab's ``mmengine.dist``, de-mmengine'd
-to depend only on torch and ``.device`` -- a standalone toolbox (multi-launcher
-``init_dist``, object collectives, ``cast_data_device``) that is not part of
-the trainer's assembly path.
+Members:
+
+* ``device.py`` -- hpmesh's backend-neutral device module (NPU/CUDA/MLU/MUSA
+  discovery, distributed-backend selection, per-vendor predicates).
+* ``mesh.py`` -- ``init_distributed`` / ``build_parallel_dims`` /
+  ``build_mesh``: process-group bootstrap and topology construction.
+* ``collectives.py`` -- reductions (``dist_sum``/``dist_max``), PG timeouts,
+  and EP-aware ``clip_grad_norm_``.
+* ``monitoring.py`` -- device memory monitors/snapshots and ``get_peak_flops``.
+* ``dist.py`` + ``utils.py`` -- vendored from OpenMMLab's ``mmengine.dist``,
+  de-mmengine'd to depend only on torch and ``.device``; a standalone toolbox
+  (multi-launcher ``init_dist``, object collectives, ``cast_data_device``).
+
+Only the vendored toolbox is re-exported here. ``mesh`` / ``collectives`` /
+``monitoring`` are imported as submodules (``hpmesh.accelerator.mesh`` ...):
+re-exporting them would make ``import hpmesh.accelerator`` pull in the
+parallel and trainer layers and close an import cycle.
 """
 
 from .dist import (
