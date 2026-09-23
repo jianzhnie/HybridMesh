@@ -20,7 +20,8 @@ What changed from upstream:
 * ``torch_remat`` is gone. Upstream wraps each projection in
   ``remat.region(..., recompute=...)``, which only steers activation
   checkpointing; calling the projection directly is the same arithmetic.
-* ``current_spmd_mesh`` is read through ``hpmesh.utils.spmd_context``.
+* The TP group is read per forward through
+  ``hpmesh.utils.spmd_context.spmd_mesh_group``.
 
 The fallback matters: when TP is not active there is no collective to fuse, so
 each module runs its plain path. That keeps a TP=1 run working, but it also means
@@ -33,7 +34,6 @@ import logging
 import math
 
 import torch
-import torch.distributed as dist
 import torch.nn as nn
 
 from hpmesh.models.common.feed_forward import FeedForward
@@ -42,7 +42,7 @@ from hpmesh.parallel.tensor_parallel.linear import (
     AllGatherLinear,
     LinearReduceScatter,
 )
-from hpmesh.utils.spmd_context import current_spmd_mesh
+from hpmesh.utils.spmd_context import spmd_mesh_group
 
 logger = logging.getLogger(__name__)
 
@@ -78,22 +78,6 @@ def _warn_once_no_tp_overlap() -> None:
         )
 
 
-def _tp_group_from_context() -> dist.ProcessGroup | None:
-    """The TP process group from the current SPMD mesh context, or None.
-
-    Resolved per forward rather than captured at parallelize time, so these
-    modules need no parallelize override and hold no group state.
-
-    None means "run the stock projection": either no mesh context or a TP degree
-    of 1, in which case there is no collective to fuse.
-    """
-    mesh = current_spmd_mesh()
-    if mesh is None or "tp" not in (mesh.mesh_dim_names or ()):
-        return None
-    tp_group = mesh.get_group("tp")
-    return tp_group if tp_group.size() > 1 else None
-
-
 def validate_dist_gemm_preconditions(*, enable_sp: bool) -> None:
     """Reject configurations the fused modules cannot serve.
 
@@ -126,7 +110,7 @@ class AllGatherFusedQKVLinear(QKVLinear):
     """
 
     def _project(self, x: torch.Tensor) -> torch.Tensor:
-        tp_group = _tp_group_from_context()
+        tp_group = spmd_mesh_group("tp")
         if tp_group is None:
             _warn_once_no_tp_overlap()
             return super()._project(x)
@@ -183,7 +167,7 @@ class RowParallelLinear(nn.Module):
             nn.init.uniform_(self.bias, -bound, bound)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        tp_group = _tp_group_from_context()
+        tp_group = spmd_mesh_group("tp")
         if tp_group is None:
             _warn_once_no_tp_overlap()
             return torch.nn.functional.linear(x, self.weight, self.bias)
@@ -217,7 +201,7 @@ class DistGEMMFeedForward(FeedForward):
     """
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        tp_group = _tp_group_from_context()
+        tp_group = spmd_mesh_group("tp")
         if tp_group is None:
             _warn_once_no_tp_overlap()
             return super().forward(x)

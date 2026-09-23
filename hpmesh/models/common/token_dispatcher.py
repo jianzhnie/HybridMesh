@@ -531,17 +531,11 @@ class AllToAllTokenDispatcher(BaseEPTokenDispatcher):
             metadata.output_splits,
         )
 
-        out_TD = torch.zeros_like(x_TD)
-        routed_output_RD = _materialize(routed_output_RD)
-        routed_output_RD = (
-            routed_output_RD.to(torch.float32)
-            * metadata.topk_scores_experts_sorted_N.reshape(-1, 1)
-        ).to(routed_output_RD.dtype)
-
-        token_indices_experts_sorted_N = metadata.token_indices_experts_sorted_N
-        out_TD = deterministic_scatter_add(
-            out_TD,
-            token_indices_experts_sorted_N.reshape(-1, 1).expand(-1, out_TD.shape[-1]),
-            routed_output_RD,
+        # The tokens are back on their home ranks; weighting by score and
+        # scattering home is exactly the local dispatcher's combine.
+        return LocalTokenDispatcher.combine(
+            self,
+            _materialize(routed_output_RD),
+            metadata,
+            x_TD,
         )
-        return out_TD

@@ -111,6 +111,18 @@ class _IndexedJsonlDataSource:
             return json.loads(file.readline())
 
 
+def _reject_duplicated_hf_fields(load_dataset_kwargs: dict[str, Any]) -> None:
+    """Refuse kwargs that shadow the sources' first-class Hugging Face fields."""
+    duplicated = {"split", "name", "revision", "streaming"} & (
+        load_dataset_kwargs.keys()
+    )
+    if duplicated:
+        raise ValueError(
+            "first-class Hugging Face fields repeated in kwargs: "
+            f"{sorted(duplicated)}"
+        )
+
+
 @dataclass(kw_only=True)
 class HuggingFaceRandomAccessSource:
     """Provides random access to a materialized Hugging Face dataset."""
@@ -122,14 +134,7 @@ class HuggingFaceRandomAccessSource:
     load_dataset_kwargs: dict[str, Any] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
-        duplicated = {"split", "name", "revision", "streaming"} & (
-            self.load_dataset_kwargs.keys()
-        )
-        if duplicated:
-            raise ValueError(
-                "first-class Hugging Face fields repeated in kwargs: "
-                f"{sorted(duplicated)}"
-            )
+        _reject_duplicated_hf_fields(self.load_dataset_kwargs)
 
 
 class _HuggingFaceRandomAccessDataSource:
@@ -162,14 +167,7 @@ class HuggingFaceStreamingSource:
     load_dataset_kwargs: dict[str, Any] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
-        duplicated = {"split", "name", "revision", "streaming"} & (
-            self.load_dataset_kwargs.keys()
-        )
-        if duplicated:
-            raise ValueError(
-                "first-class Hugging Face fields repeated in kwargs: "
-                f"{sorted(duplicated)}"
-            )
+        _reject_duplicated_hf_fields(self.load_dataset_kwargs)
 
 
 def build_source(

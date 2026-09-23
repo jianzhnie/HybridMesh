@@ -278,6 +278,6 @@ def test_fused_qkv_exposes_the_same_checkpoint_keys() -> None:
 
 def test_tp_group_is_none_without_a_mesh_context() -> None:
     """No registered SPMD mesh means no TP axis, so the fallback path is taken."""
-    from hpmesh.models.common.dist_gemm import _tp_group_from_context
+    from hpmesh.utils.spmd_context import spmd_mesh_group
 
-    assert _tp_group_from_context() is None
+    assert spmd_mesh_group("tp") is None
