@@ -332,6 +332,7 @@ class Trainer:
             compile=cfg.training.compile,
             activation_checkpoint=cfg.training.activation_checkpoint_mode,
             selective_ac=cfg.training.selective_ac,
+            memory_budget_ac=cfg.training.memory_budget_ac,
             global_batch_size=cfg.training.global_batch_size,
             dataset=cfg.training.dataloader.dataset,
         )

@@ -1273,6 +1273,39 @@ class SelectiveACConfig:
 
 
 @dataclass(kw_only=True)
+class MemoryBudgetACConfig:
+    """Settings for ``activation_checkpoint_mode='memory_budget'``.
+
+    Ported from torchtitan's ``MemoryBudgetAC.Config``. That policy carries no
+    checkpointing code of its own: it sets one process-global,
+    ``torch._functorch.config.activation_memory_budget``, and lets the compile
+    partitioner trade compute for memory inside each compiled region -- so the
+    mode only means anything when ``training.compile`` is on, and selecting it
+    without compile is a config error, exactly as upstream validates.
+
+    Upstream's ``visualize_memory_budget_pareto`` is not ported: it dumps SVGs
+    into a trainer dump folder, a concept hpmesh's AC path does not have.
+    """
+
+    memory_budget: float = field(
+        default=0.5,
+        metadata={
+            "help": "How much the compile partitioner trades compute for "
+            "memory: 0.0 is the activation memory of full checkpointing over "
+            "the compiled region, 1.0 the default runtime-optimized strategy. "
+            "Must be in [0, 1]."
+        },
+    )
+
+    def __post_init__(self) -> None:
+        if not 0 <= self.memory_budget <= 1:
+            raise ValueError(
+                "memory_budget must be finite and between 0 and 1, got "
+                f"{self.memory_budget}"
+            )
+
+
+@dataclass(kw_only=True)
 class ValidationConfig:
     """The validation (eval) loop's knobs (see ``Trainer.validate``).
 
@@ -1336,9 +1369,12 @@ class TrainingConfig:
         default="none",
         metadata={
             "help": "Activation checkpointing: 'none' (off), 'full' (recompute "
-            "each decoder layer during backward), or 'selective' (per-op: save "
+            "each decoder layer during backward), 'selective' (per-op: save "
             "the expensive ops, recompute the rest -- tune it with "
-            "selective_ac). Wraps layers after TP/EP/CP and before compile/FSDP."
+            "selective_ac), or 'memory_budget' (let the compile partitioner "
+            "trade compute for memory -- tune it with memory_budget_ac, "
+            "requires compile=True). Wraps layers after TP/EP/CP and before "
+            "compile/FSDP."
         },
     )
     selective_ac: SelectiveACConfig = field(
@@ -1346,6 +1382,13 @@ class TrainingConfig:
         metadata={
             "help": "Selective activation checkpointing. Read only under "
             "activation_checkpoint_mode='selective'."
+        },
+    )
+    memory_budget_ac: MemoryBudgetACConfig = field(
+        default_factory=MemoryBudgetACConfig,
+        metadata={
+            "help": "Memory-budget activation checkpointing. Read only under "
+            "activation_checkpoint_mode='memory_budget'."
         },
     )
     deterministic: bool = field(
@@ -1494,10 +1537,29 @@ class TrainingConfig:
                 "chunked_loss_num_chunks must be >= 1 (1 disables chunking), "
                 f"got {self.chunked_loss_num_chunks}"
             )
-        if self.activation_checkpoint_mode not in ("none", "full", "selective"):
+        if self.activation_checkpoint_mode == "region":
+            raise NotImplementedError(
+                "training.activation_checkpoint_mode='region' (upstream "
+                "RegionAC) needs torch_remat and model-declared remat "
+                "regions, which hpmesh has no equivalent of; see "
+                "parallel/activation_checkpoint.py's docstring."
+            )
+        if self.activation_checkpoint_mode not in (
+            "none",
+            "full",
+            "selective",
+            "memory_budget",
+        ):
             raise ValueError(
                 "training.activation_checkpoint_mode must be one of: 'none', "
-                f"'full', 'selective' (got {self.activation_checkpoint_mode!r})"
+                "'full', 'selective', 'memory_budget' (got "
+                f"{self.activation_checkpoint_mode!r})"
+            )
+        if self.activation_checkpoint_mode == "memory_budget" and not self.compile:
+            raise ValueError(
+                "training.activation_checkpoint_mode='memory_budget' requires "
+                "training.compile=True: the budget is consumed by the compile "
+                "partitioner, so without compile it would silently do nothing."
             )
 
 

@@ -96,7 +96,7 @@ C 类上会把项目**故意删掉**的抽象又拽回来。
 | `models/common/rope.py` | `models/common/rope.py` | 0.616 | 上游持续重构后结构已分叉；同步公式与边界修复，不同步 Module/缓存形状 |
 | `models/common/scatter_add.py` | `ops/scatter_add.py` | 0.711 | |
 | `models/common/token_dispatcher.py` | `models/common/token_dispatcher.py` | 0.441 | |
-| `parallel/activation_checkpoint.py` | `distributed/activation_checkpoint.py` | 0.374 | **FullAC + SelectiveAC 已移植**；RegionAC（需 `torch_remat`）、MemoryBudgetAC（需编译）未移植，理由见文件 docstring |
+| `parallel/activation_checkpoint.py` | `distributed/activation_checkpoint.py` | 0.374 | **FullAC + SelectiveAC + MemoryBudgetAC 已移植**（后者按上游语义设 `torch._functorch.config.activation_memory_budget`，需 compile，torch 无该 knob 时 loud-raise）；RegionAC 未移植（需 `torch_remat` + `Module.configure_remat_regions`，配置即 NotImplementedError），理由见文件 docstring |
 | `parallel/fully_shard/fsdp.py` | `distributed/fsdp.py` | 0.815 | 多轴 mesh 重建、HF decoder 与 MoE placement 是 hpmesh 适配 |
 | `parallel/parallel_dims.py` | `distributed/parallel_dims.py` | 0.772 | hpmesh 扩展 world/loss/sparse mesh 视图，不能按旧 A1 结构覆盖 |
 | `parallel/pipeline_parallel/pipeline.py` | `experiments/transformers_modeling_backend/pipeline.py` | 0.686 | `None` → `nn.Identity`；每 stage 追加 `rotary_emb`；stage 内 layer 保留原始索引（不重新编号），避免多 stage state-dict FQN 冲突 |
@@ -236,12 +236,18 @@ PP per-stage seed——`utils/seed.py` 的 `derive_distinct_seed`（上游
 `structured_logger/`、`protocols/`、`configurable.py`。
 
 **已从 D 移除**：`distributed/activation_checkpoint.py` 的 `SelectiveAC`——于
-2026-09-21 移植（见 A2）。至此该文件只剩两处未移植，都是环境依赖而非删减：`RegionAC`
-需要 `torch_remat`（hpmesh 不依赖，且它的"模型声明 region"建立在 hpmesh 没有的
-`Module` 协议上）、`MemoryBudgetAC` 只在模型被 compile 后才有意义（它本身没有策略代码，
-只是设两个 `torch._functorch.config` 全局量）。两者连同 `_disable_dynamo_lru_cache`
-（修的是 SAC+PP 的重编译交互，而 hpmesh 在 `pp > 1` 上直接拒绝 AC，够不到那个场景）都在
-文件 docstring 里写明了。
+2026-09-21 移植（见 A2）；`MemoryBudgetAC`——于 2026-09-24 移植：它没有策略代码，
+只是设一个 `torch._functorch.config.activation_memory_budget` 全局量让 compile
+partitioner 做取舍，落为 `training.activation_checkpoint_mode='memory_budget'` +
+`MemoryBudgetACConfig`（budget ∈ [0,1]，同上游校验），按上游 trainer 校验在
+compile 关闭时 fail-fast；torch 无该 knob（本机 2.2.2 即如此）时 loud-raise 而非
+静默设一个没人读的全局量；上游的 `visualize_memory_budget_pareto`（往 dump folder
+倒 SVG）未移植，hpmesh 的 AC 路径没有 dump folder 概念。该文件仍有两处未移植，都是
+环境依赖而非删减：`RegionAC` 需要 `torch_remat`（hpmesh 不依赖，且它的"模型声明
+region"建立在 hpmesh 没有的 `Module.configure_remat_regions` 协议上）——配置
+`mode='region'` 在 config 与 `apply_ac` 两处都是显式 `NotImplementedError`，解锁
+条件写在报错与文件 docstring 里；`_disable_dynamo_lru_cache`（修的是 SAC+PP 的
+重编译交互，而 hpmesh 在 `pp > 1` 上直接拒绝 AC，够不到那个场景）。
 
 **已从 D 移除**：`tools/validate.py`——上一版既写了它、又写"上游也没有这个路径，已从
 表里移除"，自相矛盾。核实：上游 `torchtitan/tools/validate.py` **确实不存在**，这一行

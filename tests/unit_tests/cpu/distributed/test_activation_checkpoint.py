@@ -19,6 +19,11 @@ Four things are pinned:
 * the selective save set's shape -- that upstream's ``topk`` entry is absent
   (HF's routers mutate it in place, which torch's selective checkpoint rejects)
   and that the fqn->shape expansion emits ``(in, out)``.
+
+Plus the two non-wrapping modes: ``memory_budget`` sets (and validates) its
+one ``torch._functorch.config`` global and refuses a torch that lacks it or a
+run without compile; ``region`` is a loud ``NotImplementedError`` naming its
+unlock conditions.
 """
 
 from __future__ import annotations
@@ -39,7 +44,12 @@ from hpmesh.parallel.activation_checkpoint import (
     apply_ac,
 )
 from hpmesh.parallel.parallelize_hf import parallelize_hf_transformers
-from hpmesh.trainer.config import ParallelConfig, SelectiveACConfig
+from hpmesh.trainer.config import (
+    MemoryBudgetACConfig,
+    ParallelConfig,
+    SelectiveACConfig,
+    TrainingConfig,
+)
 
 _VOCAB = 32
 _HIDDEN = 16
@@ -101,7 +111,14 @@ def test_selective_needs_its_config() -> None:
 
 
 def test_valid_modes_are_the_configs_accepted_set() -> None:
-    assert VALID_AC_MODES == ("none", "full", "selective")
+    assert VALID_AC_MODES == ("none", "full", "selective", "memory_budget")
+
+
+def test_region_mode_is_a_loud_not_implemented() -> None:
+    """RegionAC is not silently aliased to another mode: its unlock conditions
+    (a torch_remat dependency plus model-declared remat regions) are named."""
+    with pytest.raises(NotImplementedError, match="torch_remat"):
+        apply_ac(_model(), "region")
 
 
 def test_full_wraps_every_layer() -> None:
@@ -147,6 +164,101 @@ def test_parallelize_hf_transformers_threads_selective_ac() -> None:
     )
 
     assert all(isinstance(layer, CheckpointWrapper) for layer in model.layers)
+
+
+# -- memory_budget ------------------------------------------------------------
+
+
+def test_memory_budget_config_validates_range() -> None:
+    """The upstream bound: finite and in [0, 1], default 0.5."""
+    assert MemoryBudgetACConfig().memory_budget == 0.5
+    MemoryBudgetACConfig(memory_budget=0.0)
+    MemoryBudgetACConfig(memory_budget=1.0)
+    with pytest.raises(ValueError, match="between 0 and 1"):
+        MemoryBudgetACConfig(memory_budget=-0.1)
+    with pytest.raises(ValueError, match="between 0 and 1"):
+        MemoryBudgetACConfig(memory_budget=1.1)
+
+
+def test_memory_budget_needs_its_config() -> None:
+    with pytest.raises(ValueError, match="MemoryBudgetACConfig"):
+        apply_ac(_model(), "memory_budget", compile_enabled=True)
+
+
+def test_memory_budget_requires_compile() -> None:
+    """Without compile the budget is a global nothing reads -- loud, not silent."""
+    with pytest.raises(ValueError, match="requires compile"):
+        apply_ac(
+            _model(),
+            "memory_budget",
+            memory_budget=MemoryBudgetACConfig(),
+            compile_enabled=False,
+        )
+
+
+def test_memory_budget_sets_the_functorch_global(monkeypatch) -> None:
+    """The whole policy: one process-global the compile partitioner reads.
+
+    The knob only exists on newer torch, so it is monkeypatched in here; the
+    test then also pins that the model is handed back UNWRAPPED (this mode
+    wraps nothing -- the partitioner does the work).
+    """
+    monkeypatch.setattr(
+        torch._functorch.config, "activation_memory_budget", 1.0, raising=False
+    )
+    model = _model()
+
+    assert (
+        apply_ac(
+            model,
+            "memory_budget",
+            memory_budget=MemoryBudgetACConfig(memory_budget=0.25),
+            compile_enabled=True,
+        )
+        is model
+    )
+
+    assert torch._functorch.config.activation_memory_budget == 0.25
+    assert not any(isinstance(layer, CheckpointWrapper) for layer in model.layers)
+
+
+def test_memory_budget_refuses_a_torch_without_the_knob(monkeypatch) -> None:
+    """On a torch whose functorch config has no ``activation_memory_budget``,
+    setting it would be a silent no-op, so the mode refuses instead."""
+    monkeypatch.delattr(
+        torch._functorch.config, "activation_memory_budget", raising=False
+    )
+    with pytest.raises(NotImplementedError, match="activation_memory_budget"):
+        apply_ac(
+            _model(),
+            "memory_budget",
+            memory_budget=MemoryBudgetACConfig(),
+            compile_enabled=True,
+        )
+
+
+def test_memory_budget_requires_compile_through_the_entry_point() -> None:
+    """The entry point threads ``compile`` into the guard, so selecting the
+    mode without compile fails at parallelize time, not at first backward."""
+    with pytest.raises(ValueError, match="requires compile"):
+        parallelize_hf_transformers(
+            _model(),
+            cfg=ParallelConfig(),
+            mesh=None,
+            parallel_dims=None,
+            compile=False,
+            activation_checkpoint="memory_budget",
+            memory_budget_ac=MemoryBudgetACConfig(),
+        )
+
+
+def test_training_config_validates_memory_budget_and_region_modes() -> None:
+    """Config-time fail fast, matching upstream's trainer validation."""
+    TrainingConfig(activation_checkpoint_mode="memory_budget", compile=True)
+    with pytest.raises(ValueError, match="requires training.compile"):
+        TrainingConfig(activation_checkpoint_mode="memory_budget")
+    with pytest.raises(NotImplementedError, match="torch_remat"):
+        TrainingConfig(activation_checkpoint_mode="region")
 
 
 # -- numerics ------------------------------------------------------------------
