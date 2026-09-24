@@ -92,6 +92,7 @@ from torch.distributed.device_mesh import DeviceMesh
 from torch.distributed.tensor import DTensor
 
 from .. import parallel
+from ..accelerator import dist_utils
 from ..accelerator.collectives import (
     clip_grad_norm_,
     dist_max,
@@ -940,9 +941,9 @@ class Trainer:
                 # shard in place is the reduction, since every rank of a TP
                 # group holds the same shard of the same parameter.
                 if isinstance(grad, DTensor):
-                    dist.all_reduce(grad.to_local(), group=group)
+                    dist_utils.all_reduce(grad.to_local(), group=group)
                 else:
-                    dist.all_reduce(grad, group=group)
+                    dist_utils.all_reduce(grad, group=group)
 
     def _param_context(self):
         """The context a forward/backward runs inside.
@@ -1132,14 +1133,14 @@ class Trainer:
         # the flag still crosses stages through the pp reduction below.
         if pp_mesh is None or self.pp_has_last_stage:
             if loss_mesh is not None:
-                dist.all_reduce(
+                dist_utils.all_reduce(
                     step_is_finite,
-                    op=dist.ReduceOp.MIN,
+                    op="min",
                     group=loss_mesh.get_group(),
                 )
         if pp_mesh is not None:
-            dist.all_reduce(
-                step_is_finite, op=dist.ReduceOp.MIN, group=pp_mesh.get_group()
+            dist_utils.all_reduce(
+                step_is_finite, op="min", group=pp_mesh.get_group()
             )
         # grad_norm arrives already world-reduced (clip_grad_norm_ materializes
         # the DTensor norm and reduces across PP), so this term is the same on

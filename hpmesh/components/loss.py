@@ -36,6 +36,7 @@ import torch.distributed as dist
 import torch.distributed._functional_collectives as funcol
 import torch.nn.functional as F
 
+from ..accelerator import dist_utils
 from ..utils.batch_invariant import is_in_batch_invariant_mode
 
 __all__ = [
@@ -195,8 +196,8 @@ class _LossParallelCrossEntropy(torch.autograd.Function):
         # This rank's slice of the vocabulary, by the same bounds the
         # vocab-parallel embedding uses -- the two must agree or the embedding
         # and the loss disagree about which rank owns which token.
-        tp_world_size = dist.get_world_size(tp_group)
-        tp_rank = dist.get_rank(tp_group)
+        tp_world_size = dist_utils.get_world_size(tp_group)
+        tp_rank = dist_utils.get_rank(tp_group)
         vocab_start, vocab_end = vocab_shard_bounds(
             global_vocab_size, tp_world_size, tp_rank
         )
@@ -441,8 +442,8 @@ class _GatherVocabShards(torch.autograd.Function):
         tp_group: dist.ProcessGroup,
         global_vocab_size: int,
     ) -> torch.Tensor:
-        tp_world_size = dist.get_world_size(tp_group)
-        tp_rank = dist.get_rank(tp_group)
+        tp_world_size = dist_utils.get_world_size(tp_group)
+        tp_rank = dist_utils.get_rank(tp_group)
         ctx.vocab_start, ctx.vocab_end = vocab_shard_bounds(
             global_vocab_size, tp_world_size, tp_rank
         )

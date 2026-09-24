@@ -41,10 +41,11 @@ class GarbageCollection:
         gc.disable()
         self.collect("Initial GC collection")
         if debug:
-            import torch.distributed as dist
             from torch.utils.viz._cycles import warn_tensor_cycles
 
-            if not dist.is_initialized() or dist.get_rank() == 0:
+            from ..accelerator import dist_utils
+
+            if dist_utils.is_main_process():
                 warn_tensor_cycles()
 
     def run(self, step_count: int) -> bool:

@@ -22,10 +22,10 @@ on it.
 from __future__ import annotations
 
 import torch
-import torch.distributed as dist
 
 from hpmesh.trainer.config import ParallelConfig
 
+from ...accelerator import dist_utils
 from ..parallel_dims import ParallelDims
 from .fsdp import (
     _iter_fsdp_modules,
@@ -115,7 +115,7 @@ def apply_fsdp(
     # and, when asked, ``enable_fsdp_symm_mem``; do not repeat them here.
 
     # gloo implements no PREMUL_SUM; NCCL does, and there it is the faster path.
-    if dist.is_initialized() and dist.get_backend() != "nccl":
+    if dist_utils.is_distributed() and dist_utils.get_backend() != "nccl":
         _force_sum_grad_reduction(model)
 
     return model
