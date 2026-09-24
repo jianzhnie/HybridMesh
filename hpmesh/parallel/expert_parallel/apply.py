@@ -32,6 +32,12 @@ def apply_ep(
     attention kernel, so CP and EP compose freely.
     """
     if cfg.ep == 1:
+        if cfg.moe_quantile_balancing:
+            raise NotImplementedError(
+                "moe_quantile_balancing is installed by the EP swap, which "
+                "ep=1 never runs -- there is no hpmesh MoE to balance. Run "
+                "with ep > 1 to use it."
+            )
         return model
 
     if ep_group is None or ep_group.size() != cfg.ep:
@@ -42,7 +48,10 @@ def apply_ep(
             "resolves it from parallel_dims)."
         )
     swapped = swap_hf_moe_blocks(
-        model, ep_group=ep_group, router_aux_loss_coef=cfg.router_aux_loss_coef
+        model,
+        ep_group=ep_group,
+        router_aux_loss_coef=cfg.router_aux_loss_coef,
+        quantile_balancing=cfg.moe_quantile_balancing,
     )
     logger.info(
         "Applied EP (all-to-all dispatch): swapped %d MoE blocks, degree %d",

@@ -20,8 +20,8 @@ Ported from torchtitan's ``components/checkpointer/``. Three layers:
 wrapper segment from an FQN.
 
 State keys. A checkpoint is keyed by the top-level names in ``base``: ``model``,
-``optimizer``, ``lr_scheduler``, ``dataloader``, ``train_state``. hpmesh fills in
-the first two plus whatever the caller passes in ``states``:
+``optimizer``, ``lr_scheduler``, ``dataloader``, ``train_state``, ``ema``.
+hpmesh fills in the first two plus whatever the caller passes in ``states``:
 
 * ``model`` -- a ``ModelWrapper`` over the model chunks.
 * ``optimizer`` -- the ``OptimizersContainer`` itself, passed through. It is
@@ -42,10 +42,17 @@ the first two plus whatever the caller passes in ``states``:
   or decay is set.
 * ``dataloader`` -- the ``BaseDataLoader``, registered only when it is loadable.
   See the trainer's ``_build_dataloader`` for why the synthetic one is not.
+* ``ema`` -- the ``EMA`` pseudo-optimizer from
+  ``components/optimizer/ema.py``, registered only when the run configures one
+  (``training.ema_config``). Its state dict is the same flat, FQN-keyed layout
+  as optimizer state. A load that restores the model but not this key -- an
+  ``exclude_from_loading=["ema"]`` load, or any model-only load -- cold-starts
+  the average from the just-loaded weights (see ``dcp.CheckpointManager``).
 """
 
 from .base import (
     DATALOADER,
+    EMA,
     LR_SCHEDULER,
     MODEL,
     OPTIMIZER,
@@ -63,6 +70,7 @@ __all__ = [
     "CheckpointManager",
     "CheckpointStorage",
     "DATALOADER",
+    "EMA",
     "LR_SCHEDULER",
     "MODEL",
     "ModelWrapper",

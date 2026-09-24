@@ -64,6 +64,7 @@ if TYPE_CHECKING:
 from ...utils.logger_utils import get_logger
 from .base import (
     DATALOADER,
+    EMA,
     LR_SCHEDULER,
     MODEL,
     OPTIMIZER,
@@ -153,6 +154,10 @@ class CheckpointManager(BaseCheckpointManager):
             optimizer restores ``base_lrs`` but not the step count. Registering
             it here also keeps it ordered after the optimizer, which it must be:
             ``load_state_dict`` writes ``base_lrs`` into the optimizers.
+        ema: online EMA of model weights (``components.optimizer.EMA``), or
+            None when the run has not configured one. Registered under the
+            ``ema`` key; on a load that restores the model but not the EMA, the
+            average is cold-started from the just-loaded weights.
         states: extra states to save beyond the model and optimizer.
         folder: absolute directory the checkpoints live in. Already joined with
             the run's dump folder by the caller.
@@ -168,6 +173,7 @@ class CheckpointManager(BaseCheckpointManager):
         model_parts: list[nn.Module],
         optimizer: Any,
         lr_scheduler: Any,
+        ema: Any | None = None,
         states: dict[str, Any],
         folder: str,
         sd_adapter: Any | None = None,
@@ -196,6 +202,8 @@ class CheckpointManager(BaseCheckpointManager):
                 LR_SCHEDULER: lr_scheduler,
             }
         )
+        if ema is not None:
+            self.states[EMA] = ema
 
         # -- loading and saving policy --
         self.load_only = config.load_only
@@ -439,6 +447,14 @@ class CheckpointManager(BaseCheckpointManager):
             if MODEL in states:
                 states[MODEL].load_state_dict(state_dict)
 
+        # Reseed EMA from the just-loaded weights if it wasn't itself restored
+        # (excluded via exclude_from_loading, or a model_only load -- which is
+        # also how EMA gets turned on mid-run against a checkpoint that
+        # predates it). MODEL is never excludable, so its presence means model
+        # weights were actually restored to reseed from.
+        if MODEL in states and EMA in self.states and EMA not in states:
+            self.states[EMA].load_state_dict({})
+
     def _save(self, curr_step: int, last_step: bool = False) -> bool:
         """Save the checkpoint for the current step.
 
@@ -669,6 +685,7 @@ __all__ = [
     "AsyncMode",
     "CheckpointManager",
     "DATALOADER",
+    "EMA",
     "EXPORT_DTYPE_MAP",
     "LR_SCHEDULER",
 ]

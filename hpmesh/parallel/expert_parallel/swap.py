@@ -81,6 +81,7 @@ from ...models.common.moe import (
     MOE_LAYER_ATTRS,
     MicrobatchWiseLoadBalanceLoss,
     MoE,
+    QuantileBalancedTopKRouter,
     RoutedExperts,
     TokenChoiceTopKRouter,
 )
@@ -411,6 +412,7 @@ def _convert_block(
     ep_group: dist.ProcessGroup | None,
     aux_loss_coeff: float | None,
     load_balance_coeff: float | None,
+    quantile_balancing: bool,
 ) -> MoE:
     """Build the hpmesh MoE for one HF block and move its weights over."""
     ep_size = 1 if ep_group is None else dist_utils.get_world_size(ep_group)
@@ -443,21 +445,54 @@ def _convert_block(
 
     num_expert_groups, num_limited_groups = _read_expert_groups(block, router_gate)
     grouped = GroupedExperts(dim, hidden, num_local)
-    router = TokenChoiceTopKRouter(
-        num_experts,
-        dim,
-        top_k,
-        score_func=_read_score_func(block, router_gate),
-        route_norm=_read_route_norm(block, router_gate),
-        route_scale=_read_route_scale(block, router_gate),
-        num_expert_groups=num_expert_groups,
-        num_limited_groups=num_limited_groups,
-        aux_loss=(
-            MicrobatchWiseLoadBalanceLoss(coeff=aux_loss_coeff)
-            if aux_loss_coeff
-            else None
-        ),
-    )
+    score_func = _read_score_func(block, router_gate)
+    if quantile_balancing:
+        # The quantile scheme is defined over sigmoid scores (the histogram
+        # range derives from their [0, 1] bound) and routes freely over all
+        # experts, so a softmax family or a group-limited one cannot adopt it.
+        if score_func != "sigmoid":
+            raise NotImplementedError(
+                f"quantile-balanced routing requires sigmoid router scores, "
+                f"got {score_func!r} for {type(block).__name__}."
+            )
+        if num_expert_groups is not None and num_expert_groups > 1:
+            raise NotImplementedError(
+                f"quantile-balanced routing selects a free Top-(K+1) over all "
+                f"experts; {type(block).__name__}'s group-limited routing is "
+                "incompatible with it. (A single group is no restriction and "
+                "is accepted.)"
+            )
+        router = QuantileBalancedTopKRouter(
+            num_experts,
+            dim,
+            top_k,
+            route_norm=_read_route_norm(block, router_gate),
+            route_scale=_read_route_scale(block, router_gate),
+            aux_loss=(
+                MicrobatchWiseLoadBalanceLoss(coeff=aux_loss_coeff)
+                if aux_loss_coeff
+                else None
+            ),
+        )
+        # The quantile update owns expert_bias_E; the sign-based update is
+        # off (MoE registers the buffer for a quantile router regardless).
+        load_balance_coeff = None
+    else:
+        router = TokenChoiceTopKRouter(
+            num_experts,
+            dim,
+            top_k,
+            score_func=score_func,
+            route_norm=_read_route_norm(block, router_gate),
+            route_scale=_read_route_scale(block, router_gate),
+            num_expert_groups=num_expert_groups,
+            num_limited_groups=num_limited_groups,
+            aux_loss=(
+                MicrobatchWiseLoadBalanceLoss(coeff=aux_loss_coeff)
+                if aux_loss_coeff
+                else None
+            ),
+        )
     if ep_group is None:
         dispatcher = LocalTokenDispatcher(num_experts, top_k)
     else:
@@ -598,6 +633,7 @@ def swap_hf_moe_blocks(
     *,
     ep_group=None,
     router_aux_loss_coef: float | None = None,
+    quantile_balancing: bool = False,
 ) -> int:
     """Replace every HF MoE block in ``model`` with hpmesh's MoE, in place.
 
@@ -611,6 +647,12 @@ def swap_hf_moe_blocks(
             loss. ``None`` takes the HF config's ``router_aux_loss_coef``
             (Qwen3Moe has one; DeepSeek-V3's config has no such field and gets
             no loss). A float here overrides the config for every MoE layer.
+        quantile_balancing: replace the sign-based load-balancing bias with
+            quantile-balanced routing (``QuantileBalancedTopKRouter``): the
+            bias is then re-solved from a required-bias histogram once per
+            optimizer step instead of nudged by the sign rule, and
+            ``load_balance_coeff`` is forced off. Requires sigmoid router
+            scores and no group-limited routing.
 
     Returns:
         The number of blocks swapped. Mixed sparse/dense models (e.g.
@@ -664,6 +706,7 @@ def swap_hf_moe_blocks(
             ep_group=ep_group,
             aux_loss_coeff=aux_loss_coeff,
             load_balance_coeff=load_balance_coeff,
+            quantile_balancing=quantile_balancing,
         )
         # Replace in the slot the block was actually found in. Writing to a
         # different attribute would leave the original block in place and route

@@ -47,7 +47,7 @@ step 1 恢复 optimizer、scheduler、dataloader 和 train state 后完成并保
 | `trainer.config.HybridMeshConfig` 及各子 config | `config/configs.py` 与各组件嵌套 `Config` | hpmesh 的 SEAM 0：全部字段集中；上游字段分散在组件 | 通过（适配）；新增功能必须先落到这里 |
 | `HybridMeshConfig.auto_fill_model` | 上游模型 registry/config build | hpmesh 用 HF `AutoConfig` 填充；上游选原生模型 config | 通过；本地模型与 Hub 配置分别测试 |
 | `accelerator.mesh.build_parallel_dims`, `build_mesh` | `distributed/parallel_dims.py` + `trainer.py` | 上游无单一对应函数；hpmesh 把解析与 mesh 构造分开 | 通过（适配） |
-| `accelerator.dist_utils._init_dist_pytorch` | `train.py` 的 PG 初始化段 | 2026-09-24 起为 trainer 的 PG 引导（原 `mesh.init_distributed` 已并入）：trainer 直接调它而非 `init_dist` 门面，避开后者的 `mp.set_start_method('spawn')` 副作用；厂商加速器 backend 由设备层推导（`HPMESH_DIST_BACKEND` 可覆盖），CUDA 路径才消费 `backend` 实参 | 通过；后端特有行为需实际设备验证 |
+| `accelerator.dist_utils._init_dist_pytorch` | `train.py` 的 PG 初始化段 | 2026-09-24 起为 trainer 的 PG 引导（原 `mesh.init_distributed` 已并入）：trainer 直接调它而非 `init_dist` 门面，避开后者的 `mp.set_start_method('spawn')` 副作用；厂商加速器 backend 由设备层推导，CUDA 路径才消费 `backend` 实参 | 通过；后端特有行为需实际设备验证 |
 | `Trainer.__init__` | `torchtitan/trainer.py::Trainer.__init__` | hpmesh 直接接收 HF wrapper、容器和自由函数；没有 Configurable build | 通过（适配） |
 | `Trainer.batch_generator` | `Trainer.next_batch`/post-dataloading 路径 | hpmesh 把 dataloader exhausted、CP/TP shard 和设备搬运集中处理 | 通过（适配） |
 | `Trainer.forward_backward_step`, `train_step` | `Trainer.train_step` 及 PP/non-PP 分支 | hpmesh 显式支持梯度累积、chunk loss、PP loss；非日志 step 不保留 loss graph | 通过；有 graph 释放回归测试 |
@@ -89,6 +89,7 @@ step 1 恢复 optimizer、scheduler、dataloader 和 train state 后完成并保
 | `Embedding.forward` | 上游同名文件仅供概念比较 | hpmesh 是 C 类独立实现并支持 vocab shard bounds；不是同名移植。2026-09-23 移植上游 #4637 同源修复：vocab-parallel 分支把全局 `padding_idx` 映射为本地坐标，只有持有该行的 shard 传入，修复越界崩溃与他 shard 行梯度被静默抑制，**通过** |
 | `scatter_add.deterministic_scatter_add` 及 autograd hooks | `ops/scatter_add.py` | 路径不同，算法来源明确；前后向测试覆盖，**通过** |
 | `grouped_experts.GroupedExperts.forward` | `models/common/grouped_experts.py` 与 `models/gpt_oss/moe.py` | hpmesh 统一 grouped-mm/fallback，并承载 HF 权重形状，**通过（适配）** |
+| `cast_linear.CastLinear`, `to_cast_linear` | `models/common/linear.py::CastLinear`（150c4f73a 配套） | 前向 input/weight/bias 转 `compute_dtype` 后 `F.linear`，参数保原 dtype（autograd 回 cast）；`nn.Linear` 子类 + 同 `Parameter` 重绑定，state-dict FQN 与 tying 不变；经 `ModelConfig.compute_dtype` 启用，默认关闭逐位回归，**通过（适配）** |
 
 ### 4.2 Attention、RoPE 与 mask
 
@@ -109,8 +110,9 @@ step 1 恢复 optimizer、scheduler、dataloader 和 train state 后完成并保
 | hpmesh 符号 | TorchTitan 对应符号 | 差异与正确性 |
 |---|---|---|
 | `RouterGateLinear`, `_RouterGateLinearFunction` | `models/common/linear.py` 同名实现 | 前向 FP32 输出、后向 FP32 GEMM；CUDA bf16 使用 `out_dtype`，其他设备安全提升，**通过** |
-| `TokenChoiceTopKRouter.forward` | `models/common/moe.py` router | hpmesh 参数化而非 Config 构建，保留 softmax/sigmoid、group limit、route norm，**通过（适配）**。上游 e07084202 抽出可覆写 hooks，hpmesh 以 `_select_experts` 为覆写 seam，数学一致 |
-| `RoutedExperts.forward`, `MoE.forward` | 上游同名逻辑 | hpmesh 专家权重是 EP swap 后的本地切片，不是上游 SPMD DTensor，**通过（适配）** |
+| `TokenChoiceTopKRouter.forward` | `models/common/moe.py` router | hpmesh 参数化而非 Config 构建，保留 softmax/sigmoid、group limit、route norm，**通过（适配）**。上游 e07084202 抽出可覆写 hooks，hpmesh 以 `_select_experts` 为覆写 seam，数学一致。2026-09-24 起 `_debug_force_load_balance` 调试开关已移植（构造参数，round-robin `(t*K+k)%E`，gating 值仍取真实 score，bias/group 限制均绕过——与上游逐字一致） |
+| `RoutedExperts.forward`, `MoE.forward` | 上游同名逻辑 | hpmesh 专家权重是 EP swap 后的本地切片，不是上游 SPMD DTensor，**通过（适配）**。2026-09-24 起 `MoE.set_padding_mask` 一次性暂存通道（上游 d34a13fdf 同源）：mask（True=padding）只过滤负载均衡统计（`tokens_per_expert_E`、aux loss f/p、quantile 直方图），routing 决策/dispatch/expert compute 始终跑完整 token 流，无 mask 逐位不变；CP/TP 由 `shard_padding_mask_for_cp/tp` 与 token 流同序切分 |
+| `QuantileBalancedTopKRouter`, `QuantileBalancer`, `register_moe_quantile_balancing_hook` | 上游 f8bb599a7 同名实现 | 训练时 biased top-(K+1)：前 K dispatch、第 K+1 个 biased 分为 cutoff；1000-bin int32 直方图（non-persistent）按 token 分片轴 all-reduce 后取 `top_k/num_experts` 分位数（bin 内插值），mean-centred 覆写 `expert_bias_E`；与 sign-based bias 互斥（同层构造 raise、跨层 hook raise、全 quantile 时 LB hook 自动不注册）；`ParallelConfig.moe_quantile_balancing` 启用，**通过（适配）** |
 | `MoE.update_expert_bias` | 上游 expert bias 更新 | 在 optimizer step hook 执行；跨 PP part 汇总，**通过**。2026-09-24 起注册严格性与上游对齐：所有 MoE层 `load_balance_coeff` 混合配置（部分为 None）即 `ValueError`（上游 `_should_register_moe_balancing_hook` 同源），coeff 全 None 时不注册 hook（免每步无谓 collective） |
 | `MicrobatchWiseLoadBalanceLoss` | 上游 load-balance loss | hpmesh 用 autograd carrier 注入并按有效 token 归一，**通过（适配）** |
 | `aux_loss.AuxLoss.inject/collect_aux_loss_metrics` | `models/common/aux_loss.py` | 去全局 Module registry，使用显式寄存器与 step denominator；与上游逐符号一致（`reduce_mesh="dp"` ↔ hpmesh `"batch"` 是 mesh 命名适配），**通过** |
@@ -254,13 +256,15 @@ step 1 恢复 optimizer、scheduler、dataloader 和 train state 后完成并保
 - `models/common/moe_sharding.py`：缺少的是 **TP×MoE 整个组合能力**，不是一个文件。
   `apply_tp` 会拒绝 `moe_tp_experts`，这是正确的 fail-fast。
 - RegionAC/MemoryBudgetAC：分别依赖 `torch_remat`/compile；当前明确不支持。
-- 2026-09-23 审计新增登记（上游 `c6e416bbd..b64103072` 引入，均未在 hpmesh 实现）：
+- 2026-09-23 审计新增登记（上游 `c6e416bbd..b64103072` 引入）：
   - `components/optimizer/ema.py`：在线 EMA 模型平均（1b9eef3bd，515 行），需
     config/trainer/checkpointer 三侧接线，hpmesh 无任何 EMA 消费者。
-  - Quantile-balanced MoE routing（f8bb599a7）：`QuantileBalancedTopKRouter` +
-    optimizer hook，跨 moe.py 与 optimizer.py，上游 kimi_k3 在用。
-  - MoE padding-mask 负载均衡（d34a13fdf）：routing 统计/aux loss 屏蔽 padding
-    token；hpmesh `MoE.forward` 无 padding_mask 通道，接线需改 swap 后调用链。
+  - Quantile-balanced MoE routing（f8bb599a7）：**已移植**（批 2，
+    `QuantileBalancedTopKRouter` + `QuantileBalancer` + quantile hook；与
+    sign-based bias 互斥，`ParallelConfig.moe_quantile_balancing` 启用，见 §4.3）。
+  - MoE padding-mask 负载均衡（d34a13fdf）：**已移植**（批 2，
+    `MoE.set_padding_mask` 通道；mask 只过滤统计不动执行，无 mask 逐位不变，
+    见 §4.3）。
   - `CastLinear`（lm_head compute-dtype 变换，150c4f73a 配套）。
   - Ulysses CP × varlen/packed（baff3c681）：上游 `UlyssesCPVarlenInnerAttention`
     已支持；hpmesh redistribution 原语已具备，缺 varlen 内层路径，`apply.py` 对该
@@ -275,11 +279,14 @@ step 1 恢复 optimizer、scheduler、dataloader 和 train state 后完成并保
   - `token_dispatcher.py` 的 TorchAO/DeepEP/HybridEP 三个 dispatcher：环境依赖型
     不移植（torchao 非依赖、DeepEP/HybridEP 为 CUDA-only），理由见文件 docstring。
   - router `_debug_force_load_balance`：纯调试开关，有意不移植。
+  - router `_debug_force_load_balance`：**已移植**（批 1，`TokenChoiceTopKRouter`
+    同名构造参数，round-robin 语义逐字一致，见 §4.3）。
+  - `CastLinear`：**已移植**（批 1，`models/common/cast_linear.py` +
+    `ModelConfig.compute_dtype`，state-dict FQN 不变，默认关闭，见 §4.1）。
+  - PP per-stage seed：**已移植**（批 1，`utils/seed.py::derive_distinct_seed` +
+    trainer 接线；DTensor RNG tracker 不移植）。
   - `pipeline_with_first_stage_modules`：多模态 first-stage 并入 stage 0，当前无
     消费者。
-  - PP per-stage seed（上游 `distinct_seed_mesh_dims=["pp"]` + DTensor RNG
-    tracker）：hpmesh 各 stage 共用全局 seed；HF 模型通常 dropout=0 且初始化走
-    materialize 路径，影响面小，登记于此。
   - transformers_modeling_backend 复核（同目录全量盘点，结论：其余功能均有
     等价支持或已登记裁剪）曾登记三项，**均已于 2026-09-24 对齐**：
     - DSA 模型：wrapper 构造期对 `index_topk` fail-fast（稠密 additive mask

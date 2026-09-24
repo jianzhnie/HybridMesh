@@ -24,12 +24,11 @@ def test_current_device_uses_local_rank(monkeypatch) -> None:
     assert device.get_current_device(use_cpu=True) == torch.device("cpu")
 
 
-def test_distributed_backend_has_explicit_override(monkeypatch) -> None:
+def test_distributed_backend_follows_device_type(monkeypatch) -> None:
     monkeypatch.setattr(device, "device_type", "npu")
-    monkeypatch.delenv("HPMESH_DIST_BACKEND", raising=False)
     assert device.get_distributed_backend() == "hccl"
 
-    monkeypatch.setenv("HPMESH_DIST_BACKEND", "gloo")
+    monkeypatch.setattr(device, "device_type", "cpu")
     assert device.get_distributed_backend() == "gloo"
 
 

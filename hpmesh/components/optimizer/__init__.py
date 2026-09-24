@@ -10,12 +10,16 @@ paths under the same names, so the two trees can be read side by side:
   ``ParamGroupConfig`` produced.
 * ``lr_scheduler`` -- ``LRSchedulersContainer``, one ``LambdaLR`` per inner
   optimizer, and the WSD curve they share.
+* ``ema`` -- ``EMA``, an online exponential moving average of the weights,
+  shaped as a pseudo-``OptimizersContainer`` so its checkpoint state rides the
+  same flat, FQN-keyed format.
 
 ``utils`` is vendored from torchtitan's ``components/optimizer/utils.py``;
 ``init_optim_state`` was moved verbatim out of ``components/checkpointer/base.py``,
 where it lived only because hpmesh had nowhere to put it.
 """
 
+from .ema import EMA
 from .lr_scheduler import LRSchedulersContainer, build_lr_scheduler
 from .optimizer import OptimizersContainer
 from .utils import (
@@ -25,6 +29,7 @@ from .utils import (
 )
 
 __all__ = [
+    "EMA",
     "LRSchedulersContainer",
     "OptimizersContainer",
     "build_lr_scheduler",

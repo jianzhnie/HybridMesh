@@ -110,9 +110,8 @@ def get_current_device(*, use_cpu: bool = False) -> torch.device:
 
 
 def get_distributed_backend() -> str:
-    """Return the backend, with ``HPMESH_DIST_BACKEND`` as a diagnostic override."""
-    override = os.environ.get("HPMESH_DIST_BACKEND", "").strip().lower()
-    return override or _BACKENDS[device_type]
+    """Return the backend derived from the active device type."""
+    return _BACKENDS[device_type]
 
 
 def set_device(device: torch.device) -> None:
