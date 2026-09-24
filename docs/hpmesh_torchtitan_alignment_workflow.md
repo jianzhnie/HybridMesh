@@ -1,14 +1,16 @@
 # hpmesh 对齐 TorchTitan 的 Agent 执行流程
 
-本文用于指导 agent 持续对齐 `hpmesh` 与 TorchTitan，同时保持 hpmesh 的设计边界和
-运行正确性。它是一份执行流程，不取代以下三份事实文档：
+本文指导 agent 持续对齐 `hpmesh` 与 TorchTitan，同时保持 hpmesh 的设计边界和运行
+正确性。它是执行流程，不取代三份事实文档：
 
-- [`hpmesh_upstream_map.md`](./hpmesh_upstream_map.md)：文件来源及 A/B/C/D 分类的唯一权威。
+- [`hpmesh_upstream_map.md`](./hpmesh_upstream_map.md)：文件来源与 A/B/C/D 分类的唯一权威。
 - [`hpmesh_torchtitan_symbol_guide.md`](./hpmesh_torchtitan_symbol_guide.md)：函数、类和方法的对应关系。
 - [`hybridmesh_design.md`](./hybridmesh_design.md)：架构契约、装配顺序和支持边界。
 
-若三份文档与源码冲突，以当前源码及可复现测试为准；确认事实后先修正上述权威文档，
-再继续迁移。
+若三份文档与源码冲突，以当前源码及可复现测试为准；确认事实后先修正文档，再继续迁移。
+
+文中 `<hpmesh>` / `<torchtitan>` 指两个仓库的检出根目录（本仓库即 `<hpmesh>` 的
+上一级；torchtitan 检出位置依机器而定）。
 
 ## 1. 目标与非目标
 
@@ -29,7 +31,7 @@
 
 ## 2. 不可破坏的 hpmesh 契约
 
-每轮对齐前，agent 必须确认并保持以下约束：
+每轮对齐前必须确认并保持：
 
 1. 配置沿 `CLI -> HybridMeshConfig -> 顶层显式参数` 单向传递。
 2. 并行装配由普通函数完成，非 PP 路径顺序保持：
@@ -42,8 +44,9 @@
    五部件契约；`named_children()` 不负责改写 state-dict FQN。
 4. 模型和并行底层不得读取 trainer 的全局运行配置。
 5. TP、CP、EP、PP 和 FSDP 的未支持组合必须 fail fast。
-6. `utils/spmd_context.py` 是活跃运行路径；不要与悬空的
-   `parallel/spmd_shims.py -> parallel/sharding.py` 链混淆。
+6. `accelerator/spmd_context.py` 是活跃运行路径；旧的悬空链
+   `parallel/spmd_shims.py -> parallel/sharding.py` 已于 2026-09-21 删除，不要以
+   任何形式复活或与之混淆。
 
 ## 3. 执行前准备
 
@@ -57,20 +60,19 @@
 ### 3.2 加载环境
 
 ```bash
-cd /home/jianzhnie/llmtuner/llm/HybridMesh
-source ./set_env.sh
+cd <hpmesh>
+source ./set_env.sh   # 存在时
 ```
 
-目标设备测试使用项目指定的最新 `vllm-ascend-env`。如果当前 agent 无法进入该容器，
-应继续完成静态检查和 CPU 可运行测试，并明确把设备验证列为未完成，不能声称已经通过。
+目标设备测试使用项目指定的最新 `vllm-ascend-env` 容器。当前 agent 无法进入该容器时，
+继续完成静态检查和 CPU 可运行测试，并明确把设备验证列为未完成，不能声称已经通过。
 
 ### 3.3 记录审计基线
 
 ```bash
-git -C /home/jianzhnie/llmtuner/llm/HybridMesh rev-parse HEAD
-git -C /home/jianzhnie/llmtuner/llm/torchtitan rev-parse HEAD
-git -C /home/jianzhnie/llmtuner/llm/torchtitan \
-  log <上次-torchtitan-基线>..HEAD -- torchtitan/
+git -C <hpmesh> rev-parse HEAD
+git -C <torchtitan> rev-parse HEAD
+git -C <torchtitan> log <上次-torchtitan-基线>..HEAD -- torchtitan/
 ```
 
 把双方提交、日期、Python/PyTorch/Transformers 版本写入本轮验证记录。固定 SHA 只进入
@@ -78,13 +80,13 @@ git -C /home/jianzhnie/llmtuner/llm/torchtitan \
 
 ## 4. 建立变更清单
 
-对 TorchTitan 的每个变更文件执行以下步骤：
+对 TorchTitan 的每个变更文件执行：
 
 1. 在 `hpmesh_upstream_map.md` 查找文件级对应关系。
 2. 在 symbol guide 中定位受影响的函数、类及 hpmesh 调用者。
 3. 用 `rg` 检查 hpmesh 当前调用图、测试和公开导出。
 4. 记录上游改动真正维护的不变量，而不是先复制实现。
-5. 为每项变更建立如下记录：
+5. 为每项变更建立记录：
 
 | 字段 | 内容 |
 |---|---|
@@ -102,9 +104,7 @@ git -C /home/jianzhnie/llmtuner/llm/torchtitan \
 
 ### 5.1 A 类：高保真移植
 
-适用于算法和结构主要来自 TorchTitan 的文件。
-
-执行顺序：
+适用于算法和结构主要来自 TorchTitan 的文件。执行顺序：
 
 1. 比较同名符号，再比较文件整体。
 2. 剥离 docstring 后用 AST 结构比较辅助定位差异。
@@ -121,18 +121,16 @@ git -C /home/jianzhnie/llmtuner/llm/torchtitan \
 ### 5.2 B 类：语义适配
 
 适用于相同意图但实现形状不同的文件。只迁移不变量、错误检查和数学语义，不复制上游
-类层次。
-
-重点模块包括：
+类层次。重点模块：
 
 - `models/hf_wrapper.py`
 - `parallel/parallelize_hf.py`
 - `parallel/tensor_parallel/tp.py`
 - `parallel/expert_parallel/*`
-- `parallel/context_parallel/primitives.py`
+- `parallel/context_parallel/cp_kernel.py`（CP redistribution 与 kernel；原 `primitives.py` 已于 2026-09-23 删除）
 - `parallel/fully_shard/fsdp_wrap.py`
 - `parallel/pipeline_parallel/pp.py`
-- `trainer/*` 与 `mesh.py`
+- `trainer/*` 与 `accelerator/mesh.py`
 
 实现前必须写明对应不变量，例如：
 
@@ -144,20 +142,16 @@ git -C /home/jianzhnie/llmtuner/llm/torchtitan \
 
 ### 5.3 C 类：hpmesh 独有
 
-C 类没有可机械同步的上游实现。agent 只能依据 hpmesh 的调用图、设计契约和测试判断
-是否修改。
+C 类没有可机械同步的上游实现，只能依据 hpmesh 的调用图、设计契约和测试判断是否修改。
 
-特别注意：
-
-- `utils/spmd_context.py` 是活代码。
-- `parallel/spmd_shims.py` 与 `parallel/sharding.py` 当前构成悬空链，只能整体决定
-  “接线或删除”。
+- `accelerator/spmd_context.py` 是活代码。
 - CP 编排、flex kernel、random dataset、build factory 和工具模块不能因低相似度或
   同名文件被强行覆盖。
 
 ### 5.4 D 类：真正缺口
 
-D 类必须独立设计和验收，不能伪装成单文件同步。目前主要包括：
+D 类必须独立设计和验收，不能伪装成单文件同步。当前清单以
+[`hpmesh_upstream_map.md`](./hpmesh_upstream_map.md) D 类表为准，长期项包括：
 
 - TorchTitan compile 层中的逐 block compile、async TP 和 regional compile。
 - TP×MoE 的声明、专家权重分片和执行引擎。
@@ -202,7 +196,7 @@ git diff --check
 先运行受影响模块，再运行完整可运行集合。记录 `passed / failed / skipped /
 deselected`，并单列 optional dependency 或 PyTorch API 不匹配导致的未运行项。
 
-“可运行集合通过”不能写成“全套测试通过”。失败项不得在没有证据时归因于环境。
+"可运行集合通过"不能写成"全套测试通过"。失败项不得在没有证据时归因于环境。
 
 ### 7.3 多进程等价性
 
@@ -233,12 +227,13 @@ deselected`，并单列 optional dependency 或 PyTorch API 不匹配导致的�
 - 多卡 overlap、超时和死锁安全。
 - checkpoint 保存、退出、恢复后的 loss 轨迹。
 
-若容器中的 PyTorch 缺少所需私有 API，应记录为“环境未覆盖”，保留 fail-fast，不可为了
+若容器中的 PyTorch 缺少所需私有 API，记录为"环境未覆盖"，保留 fail-fast，不可为了
 让测试变绿而绕过 placement、DTensor 或 collective 语义检查。
 
 ## 8. 结果记录模板
 
-每个批次完成后追加一份记录：
+每个批次完成后追加一份记录（长期记录单独成文，命名
+`hpmesh_torchtitan_alignment_audit_<日期>.md`，并在 upstream map 的版本章节登记）：
 
 ```markdown
 ## <批次名称>
@@ -271,7 +266,7 @@ deselected`，并单列 optional dependency 或 PyTorch API 不匹配导致的�
 
 ## 9. 完成门禁
 
-只有同时满足以下条件，agent 才能宣告一批对齐完成：
+只有同时满足以下条件，才能宣告一批对齐完成：
 
 1. 上游变化已经逐文件、逐关键符号审计。
 2. A/B/C/D 主分类明确且无冲突。
@@ -283,8 +278,8 @@ deselected`，并单列 optional dependency 或 PyTorch API 不匹配导致的�
 8. 三份权威文档已按事实同步更新。
 9. 工作区中用户原有的无关修改保持不变。
 
-若任一项未满足，应将状态写为“部分完成”或“受限”，列出剩余动作，不得用“已完全
-对齐”代替具体证据。
+若任一项未满足，状态写为"部分完成"或"受限"，列出剩余动作，不得用"已完全对齐"
+代替具体证据。
 
 ## 10. Agent 最终交付格式
 
@@ -297,5 +292,5 @@ deselected`，并单列 optional dependency 或 PyTorch API 不匹配导致的�
 5. 尚未支持的组合和 loud-raise 状态。
 6. 更新后的文档链接。
 
-不要仅报告“测试通过”或“已与上游一致”；必须说明通过了哪些测试、在哪个环境中通过，
+不要仅报告"测试通过"或"已与上游一致"；必须说明通过了哪些测试、在哪个环境中通过，
 以及哪些能力仍未验证。
