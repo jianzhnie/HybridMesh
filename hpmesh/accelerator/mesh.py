@@ -31,6 +31,7 @@ from .device import (
     device_type,
     get_current_device,
     get_distributed_backend,
+    get_env_dist_info,
     set_device,
 )
 
@@ -96,13 +97,14 @@ def init_distributed() -> tuple[int, int, int]:
 
     Single-process (no torchrun) -> (0, 0, 1) and no process group, so the
     prototype also runs as a plain CPU/GPU script for step 0.
+
+    This is the trainer's entry point; ``dist_utils.init_dist`` is the
+    multi-launcher variant kept for standalone scripts.
     """
     import os
 
     if "RANK" in os.environ and "WORLD_SIZE" in os.environ:
-        rank = int(os.environ["RANK"])
-        local_rank = int(os.environ.get("LOCAL_RANK", 0))
-        world_size = int(os.environ["WORLD_SIZE"])
+        rank, world_size, local_rank = get_env_dist_info()
         if device_type != "cpu":
             set_device(get_current_device())
         backend = get_distributed_backend()

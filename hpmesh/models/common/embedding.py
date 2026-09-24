@@ -19,10 +19,10 @@ TODO(pianpwk): rename to VocabParallelEmbedding
 from __future__ import annotations
 
 import torch
-import torch.distributed as dist
 import torch.nn as nn
 import torch.nn.functional as F
 
+from ...accelerator import dist_utils
 from ...accelerator.spmd_context import spmd_mesh_group
 from ...components.loss import vocab_shard_bounds
 
@@ -53,12 +53,12 @@ class Embedding(nn.Embedding):
                 self.sparse,
             )
 
-        tp_size = dist.get_world_size(tp_group)
+        tp_size = dist_utils.get_world_size(tp_group)
         # Same bounds the vocab-parallel loss uses -- the two must agree on
         # which rank owns which token (and the helper clamps the shard start to
         # the vocabulary, which the hand-rolled ``rank * chunk_size`` did not).
         offset, _ = vocab_shard_bounds(
-            self.num_embeddings, tp_size, dist.get_rank(tp_group)
+            self.num_embeddings, tp_size, dist_utils.get_rank(tp_group)
         )
         mask = (input >= offset) & (input < offset + self.weight.shape[0])
         local_input = (input - offset).clamp(0, self.weight.shape[0] - 1)

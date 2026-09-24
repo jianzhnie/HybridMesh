@@ -54,11 +54,11 @@ from concurrent.futures import Future
 from typing import Any, Protocol, runtime_checkable
 
 import torch
-import torch.distributed as dist
 import torch.nn as nn
 from torch.distributed.checkpoint.stateful import Stateful
 from torch.distributed.tensor import DTensor
 
+from ...accelerator import dist_utils
 from ...utils import filesystem
 from ...utils.checkpoint_keys import (
     DATALOADER,
@@ -501,11 +501,7 @@ class BaseCheckpointManager(ABC):
         """
         return (
             self.keep_latest_k > 0
-            and (
-                not dist.is_available()
-                or not dist.is_initialized()
-                or dist.get_rank() == 0
-            )
+            and dist_utils.is_main_process()
             and self._storage.isdir(self.folder)
         )
 

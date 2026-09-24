@@ -76,6 +76,7 @@ import torch
 import torch.distributed as dist
 import torch.nn as nn
 
+from ...accelerator import dist_utils
 from ...models.common.grouped_experts import GroupedExperts
 from ...models.common.moe import (
     MOE_LAYER_ATTRS,
@@ -412,8 +413,8 @@ def _convert_block(
     load_balance_coeff: float | None,
 ) -> MoE:
     """Build the hpmesh MoE for one HF block and move its weights over."""
-    ep_size = 1 if ep_group is None else dist.get_world_size(ep_group)
-    ep_rank = 0 if ep_group is None else dist.get_rank(ep_group)
+    ep_size = 1 if ep_group is None else dist_utils.get_world_size(ep_group)
+    ep_rank = 0 if ep_group is None else dist_utils.get_rank(ep_group)
 
     router_gate = _router_of(block)
     assert router_gate is not None  # the probe established this

@@ -48,6 +48,7 @@ import torch
 import torch.distributed as dist
 from torch.distributed._functional_collectives import all_to_all_single
 
+from ...accelerator import dist_utils
 from .scatter_add import deterministic_scatter_add
 
 __all__ = [
@@ -281,7 +282,7 @@ class AllToAllTokenDispatcher(BaseEPTokenDispatcher):
         blocks are all ``(ep_size, e)`` and therefore already aligned.
         """
         assert self.ep_group is not None
-        ep_size = dist.get_world_size(self.ep_group)
+        ep_size = dist_utils.get_world_size(self.ep_group)
         return all_to_all_single(
             num_local_tokens_per_expert_E.view(ep_size, -1),
             None,
@@ -386,7 +387,7 @@ class AllToAllTokenDispatcher(BaseEPTokenDispatcher):
                 num_local_tokens_per_expert_E,
             )
 
-        ep_size = dist.get_world_size(self.ep_group)
+        ep_size = dist_utils.get_world_size(self.ep_group)
         # _local_reorder yields (N, D), N = T*K; the all-to-all below yields
         # (R, D) with R != N, since each rank ends up with only its own experts'
         # tokens.
@@ -450,7 +451,7 @@ class AllToAllTokenDispatcher(BaseEPTokenDispatcher):
         matrix; this builds the index map that regroups it by local expert.
         """
         assert self.ep_group is not None
-        ep_size = dist.get_world_size(self.ep_group)
+        ep_size = dist_utils.get_world_size(self.ep_group)
         e = num_global_tokens_per_local_expert_E.shape[0] // ep_size
         device = num_global_tokens_per_local_expert_E.device
         total = routed_input_RD.shape[0]

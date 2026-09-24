@@ -57,6 +57,12 @@ def init_dist(launcher,
               **kwargs) -> None:
     """Initialize distributed environment.
 
+    Note:
+        This is the standalone, multi-launcher entry kept for scripts that
+        used ``mmengine.dist``. The hpmesh trainer does not come through
+        here -- it uses ``accelerator.mesh.init_distributed()``, which derives
+        the backend from the device layer instead of taking one.
+
     Args:
         launcher (str): Way to launcher multi processes. Supported launchers
             are 'pytorch', 'mpi' and 'slurm'.

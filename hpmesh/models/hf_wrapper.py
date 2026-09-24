@@ -35,7 +35,6 @@ import os
 from typing import Any
 
 import torch
-import torch.distributed as dist
 from torch import nn
 from torch.nn.attention.flex_attention import and_masks
 from transformers import AutoConfig
@@ -43,6 +42,7 @@ from transformers.configuration_utils import PretrainedConfig
 from transformers.integrations.flex_attention import flex_attention_forward
 from transformers.modeling_utils import AttentionInterface
 
+from ..accelerator import dist_utils
 from ..components.loss import next_token_targets
 from ..datasets.random_data import Batch
 from ..parallel.context_parallel import (
@@ -953,7 +953,7 @@ class HFTransformerModel(nn.Module):
 
     def _maybe_dump_logits(self, dump_dir: str, logits: torch.Tensor) -> None:
         """Append this rank's logits (one entry per forward) for numerical tests."""
-        rank = dist.get_rank() if dist.is_initialized() else 0
+        rank = dist_utils.get_rank()
         cp_coord = self.cp_mesh.get_local_rank() if self.cp_mesh is not None else 0
         recs = getattr(self, "_logit_dump_recs", None)
         if recs is None:

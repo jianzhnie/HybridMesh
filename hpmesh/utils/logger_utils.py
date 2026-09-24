@@ -9,7 +9,6 @@ from logging import Formatter, LogRecord
 from pathlib import Path
 from typing import ClassVar
 
-import torch.distributed as dist
 from colorama import Fore, Style
 
 logger_initialized: dict[str, bool] = {}
@@ -126,8 +125,10 @@ def get_distributed_rank() -> int:
     separate things, and it needs the first to decide the second.
     """
     try:
-        if dist.is_available() and dist.is_initialized():
-            return dist.get_rank()
+        from ..accelerator import dist_utils
+
+        if dist_utils.is_distributed():
+            return dist_utils.get_rank()
     except Exception:
         import logging as _logging
 
