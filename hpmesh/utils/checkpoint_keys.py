@@ -13,9 +13,11 @@ OPTIMIZER = "optimizer"
 LR_SCHEDULER = "lr_scheduler"
 DATALOADER = "dataloader"
 TRAIN_STATE = "train_state"
+EMA = "ema"
 
 __all__ = [
     "DATALOADER",
+    "EMA",
     "LR_SCHEDULER",
     "MODEL",
     "OPTIMIZER",

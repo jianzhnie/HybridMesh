@@ -12,6 +12,8 @@ from .input_shard import (
     shard_attention_mask_for_cp,
     shard_batch_for_cp,
     shard_batch_for_tp,
+    shard_padding_mask_for_cp,
+    shard_padding_mask_for_tp,
 )
 
 __all__ = [
@@ -20,4 +22,6 @@ __all__ = [
     "shard_attention_mask_for_cp",
     "shard_batch_for_cp",
     "shard_batch_for_tp",
+    "shard_padding_mask_for_cp",
+    "shard_padding_mask_for_tp",
 ]

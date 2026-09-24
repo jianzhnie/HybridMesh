@@ -38,6 +38,7 @@ schedule, deterministic seeding. Add knobs only when a learning step needs them.
 
 from __future__ import annotations
 
+import math
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Any, Literal
@@ -54,6 +55,7 @@ logger = get_logger(__name__)
 __all__ = [
     "CheckpointConfig",
     "DataloaderConfig",
+    "EMAConfig",
     "HybridMeshConfig",
     "LRSchedulerConfig",
     "MetricsConfig",
@@ -333,6 +335,17 @@ class ParallelConfig:
     (DeepSeek-V3 Sec 2.1.2, the sequence-wise complementary loss) would never be
     instantiated. ``None`` keeps the HF config's value, or no loss when it has
     none; setting it overrides for every MoE layer.
+    """
+
+    moe_quantile_balancing: bool = False
+    """
+    Replace the sign-based load-balancing bias with quantile-balanced routing
+    (Kimi K3 Sec 2.3.3): the router observes a biased Top-(K+1) cutoff per
+    token, accumulates a required-bias histogram, and an optimizer pre-hook
+    re-solves ``expert_bias_E`` as the ``top_k / num_experts`` quantile once
+    per step. Mutually exclusive with the sign-based update -- the swap forces
+    ``load_balance_coeff`` off. Requires sigmoid router scores, no
+    group-limited routing, and ep > 1 (the swap is what installs the router).
     """
 
     def non_dp_sizes(self) -> int:
@@ -706,6 +719,77 @@ class OptimizerConfig:
         ``TrainingConfig.checkpoint`` for the same shape.
         """
         return self.lr_scheduler_config
+
+
+@dataclass(kw_only=True)
+class EMAConfig:
+    """Online EMA of model weights (see ``components/optimizer/ema.py``).
+
+    Set ``training.ema_config`` to one of these to turn EMA on; the default
+    ``None`` means no EMA is built and the run pays nothing for it -- there is
+    no CLI flag (a nested dataclass does not survive ``HfArgumentParser``;
+    ``ParamGroupConfig`` is programmatic-only for the same reason). The field
+    names and semantics are upstream's.
+    """
+
+    decay: float | None = None
+    """Fixed decay per firing: ``ema = decay * ema + (1 - decay) * param``.
+    If None (default), computed dynamically from ``half_life_fraction``."""
+
+    half_life_fraction: float = 0.05
+    """Used when ``decay`` is None:
+    ``decay = 2 ** (-1 / (half_life_fraction * num_updates))``. Keeps roughly
+    the most recent ``half_life_fraction`` share of updates dominant."""
+
+    start_step: int = 0
+    """Last trainer step before EMA tracking begins, so the first update fires
+    at ``start_step + update_every_n_steps``."""
+
+    step_bias: int = 0
+    """Offset added to the firing count when computing ``num_updates``, for
+    renumbering a new training phase without resetting EMA aging. Measured in
+    EMA firings, not raw steps. A normal resume needs no bias."""
+
+    update_every_n_steps: int = 1
+    """Only fire the EMA update every N real optimizer steps."""
+
+    buffer_patterns: list[str] = field(default_factory=list)
+    """Regex patterns (``re.search``, against buffer FQNs) selecting which
+    buffers also get an EMA tracked -- e.g. an MoE's ``expert_bias_E``. Empty
+    (default): no buffers tracked."""
+
+    def __post_init__(self) -> None:
+        if self.update_every_n_steps < 1:
+            raise ValueError("ema.update_every_n_steps must be greater than 0.")
+        if not math.isfinite(self.half_life_fraction):
+            raise ValueError("ema.half_life_fraction must be finite.")
+        if self.half_life_fraction <= 0:
+            raise ValueError("ema.half_life_fraction must be greater than 0.")
+        if self.step_bias < 0:
+            raise ValueError(
+                "ema.step_bias must not be negative; it is added to the firing "
+                "count, and a non-positive count has no decay."
+            )
+        if self.decay is not None and not (
+            math.isfinite(self.decay) and 0 <= self.decay < 1
+        ):
+            raise ValueError(
+                "ema.decay must be finite and in [0, 1); "
+                "decay=1 never updates the EMA."
+            )
+        # A fixed decay replaces the half-life schedule outright, so a
+        # half_life_fraction set alongside it would do nothing.
+        default_half_life = (
+            type(self).__dataclass_fields__["half_life_fraction"].default
+        )
+        if self.decay is not None and self.half_life_fraction != default_half_life:
+            logger.warning(
+                "ema.half_life_fraction=%s is ignored because ema.decay=%s is "
+                "set; the decay is then fixed and the half-life schedule is "
+                "never used. Leave decay unset to use half_life_fraction.",
+                self.half_life_fraction,
+                self.decay,
+            )
 
 
 @dataclass(kw_only=True)
@@ -1289,6 +1373,14 @@ class TrainingConfig:
         default_factory=ProfilerConfig,
         metadata={"help": "Profiling (see components/profiler)."},
     )
+    ema_config: EMAConfig | None = field(
+        default=None,
+        metadata={
+            "help": "Online EMA of model weights (see components/optimizer). "
+            "None (the default) disables it. No CLI flag -- set it from code, "
+            "like optimizer.param_groups."
+        },
+    )
 
     @property
     def checkpoint(self) -> CheckpointConfig:
@@ -1315,6 +1407,16 @@ class TrainingConfig:
     def profiler(self) -> ProfilerConfig:
         """The profiler's config. See ``checkpoint`` for the shape."""
         return self.profiler_config
+
+    @property
+    def ema(self) -> EMAConfig | None:
+        """The weight EMA's config, or None when EMA is off.
+
+        Unlike the other nested configs there is no always-on default: an EMA
+        doubles the weight memory a run carries, so it exists only when the
+        run asks for it.
+        """
+        return self.ema_config
 
     def __post_init__(self) -> None:
         if self.global_batch_size < 1:

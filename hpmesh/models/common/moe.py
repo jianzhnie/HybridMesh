@@ -28,6 +28,17 @@ changed:
   nudge, and the counter is drained there.
 * the ``_debug_force_load_balance`` switch is kept: a constructor argument
   here rather than a Config field, with the same round-robin semantics.
+* quantile-balanced routing (Kimi K3 Sec 2.3.3 / Appendix D) is ported as
+  ``QuantileBalancedTopKRouter`` + ``QuantileBalancer``, with the per-step
+  bias solve in ``register_moe_quantile_balancing_hook`` next to the
+  sign-based one. It keeps the parameterized-constructor style of this file:
+  the sigmoid score function, no group restriction and no debug round-robin
+  are enforced structurally, by not taking those parameters.
+* every router takes an optional ``padding_mask_T`` (true for padding). It never
+  changes the routing decision, the dispatch, or the expert compute -- those run
+  on the full token stream. It filters only the load-balancing *statistics*:
+  ``tokens_per_expert_E``, the aux loss's f/p terms, and the quantile
+  histogram all count valid tokens only, while the no-mask path is unchanged.
 * node-limited routing (DeepSeek-V3's ``n_group``/``topk_group``) lives in
   ``_select_experts_within_groups``, reached by passing
   ``num_expert_groups``/``num_limited_groups``. One deliberate difference from
@@ -38,7 +49,7 @@ changed:
 Shape legend, scoped to this file: ``T`` = tokens, ``D`` = model dimension,
 ``E`` = experts, ``K`` = experts per token (top-k), ``e`` = local experts under
 EP, ``R`` = routed tokens landing on this rank's experts, ``F`` = expert hidden
-dimension.
+dimension, ``B`` = quantile-histogram bins.
 """
 
 from __future__ import annotations
@@ -65,9 +76,12 @@ __all__ = [
     "MOE_LAYER_ATTRS",
     "MoE",
     "MicrobatchWiseLoadBalanceLoss",
+    "QuantileBalancedTopKRouter",
+    "QuantileBalancer",
     "RoutedExperts",
     "TokenChoiceTopKRouter",
     "register_moe_load_balancing_hook",
+    "register_moe_quantile_balancing_hook",
 ]
 
 # The decoder-layer attributes that may hold a MoE block. Every model family
@@ -187,12 +201,19 @@ class TokenChoiceTopKRouter(nn.Module):
         self,
         scores_TE: torch.Tensor,
         expert_bias_E: torch.Tensor | None = None,
+        *,
+        padding_mask_T: torch.Tensor | None = None,
     ) -> torch.Tensor:
         """Top-k expert ids, using the load-balancing bias on top of the scores.
 
         ``sorted=False`` matches upstream: the ids come back in top-k order but
         the scores are gathered separately, so no ordering is relied on.
+
+        ``padding_mask_T`` is accepted so subclasses (the quantile router) can
+        filter their observations to valid tokens; the choice itself never
+        depends on it -- padding tokens route like any other token.
         """
+        del padding_mask_T
         scores_for_choice_TE = (
             scores_TE if expert_bias_E is None else scores_TE + expert_bias_E
         )
@@ -253,17 +274,26 @@ class TokenChoiceTopKRouter(nn.Module):
         self,
         x_TD: torch.Tensor,
         expert_bias_E: torch.Tensor | None = None,
+        *,
+        padding_mask_T: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """
         Args:
             x_TD: input tokens ``(T, D)``.
             expert_bias_E: optional load-balancing bias ``(E,)``. It shifts which
                 experts win but not the score a token carries to them.
+            padding_mask_T: optional boolean ``(T,)`` mask, true for padding.
+                Padding tokens are routed, dispatched and computed like any
+                other token; the mask filters only the load-balancing
+                statistics (the aux loss's f/p terms and, for the quantile
+                router, the histogram observation).
 
         Returns:
             topk_scores_TK: routing scores ``(T, K)``.
             topk_expert_ids_TK: expert indices ``(T, K)``.
-            routing_map_TE: one-hot boolean map ``(T, E)``.
+            routing_map_TE: one-hot boolean map ``(T, E)``, over ALL tokens --
+                the dispatch contract. The masked view used for statistics is
+                built inside and never leaves the router.
         """
         scores_TE = self.gate(x_TD)
 
@@ -278,6 +308,19 @@ class TokenChoiceTopKRouter(nn.Module):
         else:
             raise NotImplementedError(f"Unknown score function {self.score_func}")
 
+        if padding_mask_T is not None:
+            if padding_mask_T.dtype != torch.bool:
+                raise ValueError(
+                    "padding_mask_T must have dtype bool, "
+                    f"got {padding_mask_T.dtype}."
+                )
+            if padding_mask_T.shape != scores_TE.shape[:-1]:
+                raise ValueError(
+                    "padding_mask_T must have shape matching the routing-map "
+                    f"token axis, got {tuple(padding_mask_T.shape)} for scores "
+                    f"{tuple(scores_TE.shape)}."
+                )
+
         if self._debug_force_load_balance:
             # The bias and the group restriction are both bypassed: the point
             # of the flag is a routing decision nothing downstream can skew.
@@ -286,7 +329,9 @@ class TokenChoiceTopKRouter(nn.Module):
                 topk_scores_TK,
             ) = self._debug_force_load_balance_routing(scores_TE)
         else:
-            topk_expert_ids_TK = self._select_experts(scores_TE, expert_bias_E)
+            topk_expert_ids_TK = self._select_experts(
+                scores_TE, expert_bias_E, padding_mask_T=padding_mask_T
+            )
             # The bias only picks experts; the weight a token carries is the
             # score of the expert it actually landed on, bias excluded.
             topk_scores_TK = scores_TE.gather(dim=-1, index=topk_expert_ids_TK)
@@ -305,18 +350,212 @@ class TokenChoiceTopKRouter(nn.Module):
             True,
         )
 
-        # The aux loss reads the pre-topk scores and the routing map; its
-        # gradient rides back on the top-k scores (identity forward, so the
-        # routing arithmetic is unchanged). Training only: an eval forward has
-        # no backward to inject into, and no step denominator is set there.
+        # The aux loss reads the pre-topk scores and a padding-filtered view
+        # of the routing map; its gradient rides back on the top-k scores
+        # (identity forward, so the routing arithmetic is unchanged). Training
+        # only: an eval forward has no backward to inject into, and no step
+        # denominator is set there. The full map is what is returned: dispatch
+        # counts every token, statistics count valid ones.
         if self.training and self.aux_loss is not None:
+            masked_routing_map_TE = (
+                routing_map_TE
+                if padding_mask_T is None
+                else routing_map_TE & ~padding_mask_T.unsqueeze(-1)
+            )
             topk_scores_TK = self.aux_loss(
                 scores_TE,
-                routing_map_TE,
+                masked_routing_map_TE,
                 carrier=topk_scores_TK,
+                padding_mask_T=padding_mask_T,
             )
 
         return topk_scores_TK, topk_expert_ids_TK, routing_map_TE
+
+
+class QuantileBalancedTopKRouter(TokenChoiceTopKRouter):
+    """Top-k router balanced by a histogram-estimated quantile bias.
+
+    Ported from torchtitan's quantile-balanced routing (Kimi K3 technical
+    report, Sec 2.3.3 and Appendix D). Each training forward computes a biased
+    Top-(K+1) once: the first K experts route the token, and the (K+1)-th
+    biased score is the cutoff a *required* expert bias is measured against.
+    ``QuantileBalancer`` accumulates those required biases into a histogram,
+    and ``register_moe_quantile_balancing_hook`` turns the histogram into the
+    next mean-centred ``expert_bias_E`` once per optimizer step.
+
+    The routing *weight* still comes from the original unbiased scores --
+    the bias only shifts which experts win, as in the base router.
+
+    The scheme is defined over sigmoid scores in ``[0, 1]`` (the histogram
+    range derives from that bound), so the score function is pinned to
+    sigmoid and the constructor takes no ``score_func``. Node-limited routing
+    and ``_debug_force_load_balance`` are likewise not offered: the quantile
+    update assumes a free Top-(K+1) over all experts, and a forced round-robin
+    would make the cutoff meaningless.
+
+    Args:
+        num_bins: histogram resolution for the quantile estimate. The report
+            uses 1000, which is the default.
+    """
+
+    def __init__(
+        self,
+        num_experts: int,
+        dim: int,
+        top_k: int = 1,
+        *,
+        num_bins: int = 1000,
+        route_norm: bool = False,
+        route_scale: float = 1.0,
+        aux_loss: AuxLoss | None = None,
+    ) -> None:
+        super().__init__(
+            num_experts,
+            dim,
+            top_k,
+            score_func="sigmoid",
+            route_norm=route_norm,
+            route_scale=route_scale,
+            aux_loss=aux_loss,
+        )
+        self.quantile_balancer = QuantileBalancer(num_experts, top_k, num_bins)
+
+    def _select_experts(
+        self,
+        scores_TE: torch.Tensor,
+        expert_bias_E: torch.Tensor | None = None,
+        *,
+        padding_mask_T: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        """Biased Top-(K+1): route on the first K, observe the cutoff."""
+        if expert_bias_E is None:
+            raise ValueError(
+                "Quantile-balanced routing requires an expert bias; the MoE "
+                "owning this router must register expert_bias_E."
+            )
+        if not self.training:
+            # Eval routes with the plain biased top-k: no histogram is being
+            # accumulated, so the cutoff is not needed and the base path is
+            # the same decision.
+            return super()._select_experts(scores_TE, expert_bias_E)
+
+        biased_scores_TE = scores_TE + expert_bias_E
+        topk_plus_one_scores_TK1, topk_plus_one_expert_ids_TK1 = torch.topk(
+            biased_scores_TE,
+            k=self.top_k + 1,
+            dim=-1,
+            sorted=True,
+        )
+        self.quantile_balancer.observe(
+            scores_TE,
+            topk_plus_one_scores_TK1[:, self.top_k :],
+            expert_bias_E,
+            padding_mask_T=padding_mask_T,
+        )
+        return topk_plus_one_expert_ids_TK1[:, : self.top_k].contiguous()
+
+
+class QuantileBalancer(nn.Module):
+    """Accumulate and recover histogram-based quantile bias updates.
+
+    For sigmoid scores bounded in ``[0, 1]``, the bias an expert needs to win
+    a token lies between the current minimum bias minus one and the maximum
+    bias plus one. Each training micro-batch's required biases
+    (``cutoff - score``, for every token and expert) are accumulated into
+    uniform bins over that interval; ``estimate_expert_bias`` then reads the
+    ``top_k / num_experts`` quantile back out, interpolated within its
+    crossing bin.
+
+    The histogram is non-persistent: scratch state that follows the module's
+    device moves but never lands in a checkpoint.
+    """
+
+    def __init__(self, num_experts: int, top_k: int, num_bins: int) -> None:
+        super().__init__()
+        if not 0 < top_k < num_experts:
+            raise ValueError(
+                f"top_k ({top_k}) must be between zero and num_experts "
+                f"({num_experts})"
+            )
+        self.num_experts = num_experts
+        self.top_k = top_k
+        self.num_bins = num_bins
+        self.register_buffer(
+            "required_bias_histogram_EB",
+            torch.zeros(num_experts, num_bins, dtype=torch.int32),
+            persistent=False,
+        )
+
+    @torch.no_grad()
+    def observe(
+        self,
+        scores_TE: torch.Tensor,
+        cutoff_T1: torch.Tensor,
+        expert_bias_E: torch.Tensor,
+        *,
+        padding_mask_T: torch.Tensor | None = None,
+    ) -> None:
+        """Accumulate one local micro-batch's required-bias histogram.
+
+        Padding tokens are filtered out first: a bias estimated from tokens
+        that carry no loss would balance the wrong distribution.
+        """
+        if not self.training:
+            return
+        if padding_mask_T is not None:
+            valid_mask_T = ~padding_mask_T
+            scores_TE = scores_TE[valid_mask_T]
+            cutoff_T1 = cutoff_T1[valid_mask_T]
+        lower_bound = expert_bias_E.min() - 1.0
+        bin_width = (
+            expert_bias_E.max() - expert_bias_E.min() + 2.0
+        ) / self.num_bins
+        required_bias_TE = cutoff_T1 - scores_TE
+        bin_indices_TE = torch.floor(
+            (required_bias_TE - lower_bound) / bin_width
+        ).to(torch.int64)
+        bin_indices_ET = bin_indices_TE.clamp_(0, self.num_bins - 1).transpose(0, 1)
+        self.required_bias_histogram_EB.scatter_add_(
+            1,
+            bin_indices_ET,
+            torch.ones_like(
+                bin_indices_ET,
+                dtype=self.required_bias_histogram_EB.dtype,
+            ),
+        )
+
+    def estimate_expert_bias(
+        self,
+        histogram_EB: torch.Tensor,
+        expert_bias_E: torch.Tensor,
+    ) -> torch.Tensor:
+        """Estimate the next mean-centred expert bias from the histogram.
+
+        The target is the ``top_k / num_experts`` quantile of each expert's
+        required-bias distribution: the bias at which the expert would win
+        exactly its uniform share of the observed tokens. The result is
+        mean-centred so ``sum(expert_bias_E) == 0`` and the bias shifts which
+        experts win without shifting the routed output as a whole -- the same
+        invariant the sign-based update keeps.
+        """
+        counts_E = histogram_EB.sum(dim=-1, dtype=torch.int64)
+        target_count_E = counts_E.float() * (self.top_k / self.num_experts)
+        cumulative_counts_EB = histogram_EB.cumsum(dim=-1, dtype=torch.int64)
+        target_rank_E = target_count_E.ceil().to(torch.int64)
+        target_bin_E = (cumulative_counts_EB < target_rank_E.unsqueeze(-1)).sum(dim=-1)
+
+        target_bin_E1 = target_bin_E.unsqueeze(-1)
+        counts_in_bin_E = histogram_EB.gather(-1, target_bin_E1).squeeze(-1)
+        counts_before_E = (
+            cumulative_counts_EB.gather(-1, target_bin_E1).squeeze(-1) - counts_in_bin_E
+        )
+        fraction_E = (
+            target_count_E - counts_before_E.float()
+        ) / counts_in_bin_E.float()
+
+        bin_width = (expert_bias_E.max() - expert_bias_E.min() + 2.0) / self.num_bins
+        quantile_position_E = target_bin_E.float() + fraction_E
+        return (quantile_position_E - quantile_position_E.mean()) * bin_width
 
 
 class RoutedExperts(nn.Module):
@@ -380,7 +619,11 @@ class MoE(nn.Module):
         router: decides each token's experts.
         load_balance_coeff: strength of the auxiliary-loss-free bias update, or
             ``None`` to disable it. The bias is updated outside the model, by an
-            optimizer hook, so it survives gradient accumulation.
+            optimizer hook, so it survives gradient accumulation. Must be
+            ``None`` when ``router`` is a ``QuantileBalancedTopKRouter``: the
+            quantile update replaces the sign-based one (the two schemes
+            writing the same buffer would fight), and the bias buffer is then
+            registered unconditionally.
         shared_experts: an optional dense FFN every token passes through.
     """
 
@@ -403,11 +646,28 @@ class MoE(nn.Module):
         # a per-expert bias nudged by observed load, updated once per optimizer
         # step (``update_expert_bias``) so it sees a whole accumulation cycle
         # rather than one microbatch.
+        quantile_balanced = isinstance(router, QuantileBalancedTopKRouter)
+        if quantile_balanced and load_balance_coeff is not None:
+            raise ValueError(
+                "A QuantileBalancedTopKRouter is balanced by the quantile "
+                "update, so load_balance_coeff must be None -- the sign-based "
+                "and quantile updates cannot both own expert_bias_E."
+            )
         if load_balance_coeff is not None:
             if load_balance_coeff <= 0.0:
                 raise ValueError(
                     f"load_balance_coeff must be positive, got {load_balance_coeff}"
                 )
+            self.register_buffer(
+                "expert_bias_E",
+                torch.zeros(num_experts, dtype=torch.float32),
+                persistent=True,
+            )
+        elif quantile_balanced:
+            # The quantile scheme routes on the bias too, so the buffer exists
+            # even with no sign-based update to drive it; the quantile hook
+            # overwrites it once per step. Persistent for the same reason the
+            # sign-based one is: a resumed run keeps the reached balance.
             self.register_buffer(
                 "expert_bias_E",
                 torch.zeros(num_experts, dtype=torch.float32),
@@ -422,6 +682,10 @@ class MoE(nn.Module):
             torch.zeros(num_experts, dtype=torch.float32),
             persistent=False,
         )
+        # Staged padding mask for the next forward (see ``set_padding_mask``).
+        # A plain attribute, not a buffer: it is per-microbatch input, never
+        # module state, and must stay out of the state_dict.
+        self._pending_padding_mask: torch.Tensor | None = None
 
     @torch.no_grad()
     def update_expert_bias(self) -> None:
@@ -451,28 +715,65 @@ class MoE(nn.Module):
         self.expert_bias_E.add_(delta_E - delta_E.mean())
         self.tokens_per_expert_E.zero_()
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
+    def set_padding_mask(self, padding_mask: torch.Tensor | None) -> None:
+        """Stage the padding mask for the NEXT forward of this block.
+
+        The HF decoder layer calls its MoE as ``self.mlp(hidden_states)`` --
+        its fixed signature has no slot for a mask, so the wrapper
+        (``HFTransformerModel.forward``) stages the microbatch's mask on every
+        swapped MoE block just before the decoder runs. The mask is consumed
+        by the next ``forward`` and cleared, so a stale mask can never leak
+        into a later microbatch that carried none: a forward entered without
+        any staging is exactly the no-mask path.
+
+        An explicit ``padding_mask`` passed to ``forward`` takes precedence
+        over (and still consumes) a staged one.
+        """
+        self._pending_padding_mask = padding_mask
+
+    def forward(
+        self, x: torch.Tensor, *, padding_mask: torch.Tensor | None = None
+    ) -> torch.Tensor:
         """Route, run the experts, and sum the routed and shared outputs.
 
         Accepts ``(T, D)`` or any leading-dimension form ``(..., T, D)``. The
         HF decoder layer calls its MoE as ``self.mlp(hidden_states)`` with a
         ``(batch, seq, D)`` tensor, so a swapped-in block has to take that shape
         and give it back; the routing itself works on flattened tokens.
+
+        ``padding_mask`` (true for padding) follows the same flattening; it
+        filters only the load-balancing statistics -- the routing decision,
+        dispatch and expert compute always see the full token stream, so the
+        block's output is unaffected by it. ``None`` falls back to a mask
+        staged via ``set_padding_mask``.
         """
+        if padding_mask is None:
+            padding_mask = self._pending_padding_mask
+        self._pending_padding_mask = None
         if x.dim() > 2:
             lead = x.shape[:-1]
-            out = self._forward_tokens(x.reshape(-1, x.shape[-1]))
+            out = self._forward_tokens(
+                x.reshape(-1, x.shape[-1]),
+                padding_mask_T=(
+                    None if padding_mask is None else padding_mask.reshape(-1)
+                ),
+            )
             return out.reshape(*lead, out.shape[-1])
-        return self._forward_tokens(x)
+        return self._forward_tokens(x, padding_mask_T=padding_mask)
 
-    def _forward_tokens(self, x_TD: torch.Tensor) -> torch.Tensor:
+    def _forward_tokens(
+        self,
+        x_TD: torch.Tensor,
+        *,
+        padding_mask_T: torch.Tensor | None = None,
+    ) -> torch.Tensor:
         """The MoE computation over a flat ``(T, D)`` token stream."""
         # (T, K) scores and ids; (T, E) map of which experts each token picked.
         (
             topk_scores_TK,
             topk_expert_ids_TK,
             routing_map_TE,
-        ) = self.router(x_TD, self.expert_bias_E)
+        ) = self.router(x_TD, self.expert_bias_E, padding_mask_T=padding_mask_T)
         num_local_tokens_per_expert_E = routing_map_TE.sum(dim=0)
 
         if self.training:
@@ -480,7 +781,15 @@ class MoE(nn.Module):
                 # NOTE: activation checkpointing runs the forward twice, so this
                 # counts a token twice on recompute. The bias update uses
                 # sign(), so the doubled count does not change its direction.
-                self.tokens_per_expert_E.add_(num_local_tokens_per_expert_E)
+                # The padding-filtered map is what is counted: padding tokens
+                # are dispatched and computed, but they carry no loss, so they
+                # must not steer the bias.
+                counts_map_TE = (
+                    routing_map_TE
+                    if padding_mask_T is None
+                    else routing_map_TE & ~padding_mask_T.unsqueeze(-1)
+                )
+                self.tokens_per_expert_E.add_(counts_map_TE.sum(dim=0))
 
         out_TD = self.routed_experts(
             x_TD,
@@ -617,6 +926,92 @@ def register_moe_load_balancing_hook(
     )
 
 
+@torch.no_grad()
+def _update_quantile_expert_bias(
+    moe_layers: list[MoE],
+    parallel_dims: ParallelDims | None,
+) -> None:
+    """Reduce the quantile histograms and write the next expert biases.
+
+    The histograms count the same tokens ``tokens_per_expert_E`` counts, so
+    they are summed over exactly the same axes (dp, cp, and tp only when EP
+    shards the token stream over it) -- see ``_update_expert_bias`` for why
+    those axes and no others. Every rank then holds the identical global
+    histogram, computes the identical estimate, and ``expert_bias_E`` stays
+    replicated, which is what the forward assumes.
+
+    After the update each layer's histogram and token counter are drained:
+    both are per-step scratch, and the counter is otherwise never consumed
+    (the sign-based ``update_expert_bias`` that drains it is disabled for
+    these layers).
+    """
+    histograms = [
+        moe.router.quantile_balancer.required_bias_histogram_EB
+        for moe in moe_layers
+    ]
+    stacked_LEB = torch.stack(histograms)
+
+    axes = ["dp", "cp"] + (["tp"] if parallel_dims and parallel_dims.ep_enabled else [])
+    for axis in axes:
+        mesh = None if parallel_dims is None else parallel_dims.get_optional_mesh(axis)
+        if mesh is None:
+            continue
+        all_reduce(stacked_LEB, group=mesh.get_group())
+
+    for moe, histogram_EB in zip(moe_layers, stacked_LEB.unbind(), strict=True):
+        quantile_balancer = moe.router.quantile_balancer
+        moe.expert_bias_E.copy_(
+            quantile_balancer.estimate_expert_bias(histogram_EB, moe.expert_bias_E)
+        )
+        quantile_balancer.required_bias_histogram_EB.zero_()
+        moe.tokens_per_expert_E.zero_()
+
+
+def register_moe_quantile_balancing_hook(
+    optimizer: torch.optim.Optimizer,
+    model_parts: Sequence[nn.Module],
+    parallel_dims: ParallelDims | None,
+) -> None:
+    """Register the step pre-hook that updates quantile-balanced expert biases.
+
+    Same placement as ``register_moe_load_balancing_hook``: a pre-hook, so the
+    bias the next forward reads is earned by the whole accumulation window
+    that just finished. A no-op when no MoE layer carries a
+    ``QuantileBalancedTopKRouter``.
+
+    The two balancing schemes are mutually exclusive, matching the upstream
+    wiring where a model registers exactly one of the two hooks. A single
+    MoE already refuses to combine them (``MoE.__init__`` raises on a
+    quantile router with a coeff); a *mixed* model -- quantile routers on
+    some layers, sign-based coeff on others -- is rejected here, because
+    silently balancing different layers by different rules would look like a
+    working setup while the load-balance hook either no-ops or raises on the
+    inconsistent coeff configuration.
+    """
+    all_layers = [moe for part in model_parts for moe in _iter_moe_layers(part)]
+    quantile_layers = [
+        moe
+        for moe in all_layers
+        if isinstance(moe.router, QuantileBalancedTopKRouter)
+    ]
+    if not quantile_layers:
+        return
+    if len(quantile_layers) != len(all_layers) or any(
+        moe.load_balance_coeff is not None for moe in all_layers
+    ):
+        raise ValueError(
+            "Quantile-balanced routing is mutually exclusive with the "
+            "sign-based load-balancing bias: every MoE layer must use a "
+            "QuantileBalancedTopKRouter with load_balance_coeff=None, or "
+            "none may."
+        )
+    optimizer.register_step_pre_hook(
+        lambda *args, **kwargs: _update_quantile_expert_bias(
+            quantile_layers, parallel_dims
+        )
+    )
+
+
 class _PartialToInvariantAllReduce(torch.autograd.Function):
     """All-reduce in forward, identity in backward (Partial -> Invariant).
 
@@ -648,7 +1043,7 @@ class MicrobatchWiseLoadBalanceLoss(AuxLoss):
     discourages extreme load imbalance within individual forwards (samples),
     per the DeepSeek-V3 design ("Complementary Sequence-Wise Auxiliary Loss").
 
-    With ``E`` experts, top-``K`` selection and ``T`` tokens per forward:
+    With ``E`` experts, top-``K`` selection and ``T`` valid tokens per forward:
 
     Eq. 18: ``f_i = (E / (K T)) * sum_t 1[token t routes to expert i]``
     Eq. 19: ``p_i = (1 / T) * sum_t s'_t,i``, where
@@ -712,15 +1107,20 @@ class MicrobatchWiseLoadBalanceLoss(AuxLoss):
         routing_map_TE: torch.Tensor,
         *,
         carrier: torch.Tensor,
+        padding_mask_T: torch.Tensor | None = None,
     ) -> torch.Tensor:
         """Compute the per-forward balance loss and inject its gradient.
 
         Args:
             scores_TE: router scores ``(T, E)`` for the forward's tokens.
             routing_map_TE: one-hot routing map ``(T, E)`` for the same tokens,
-                as counted by the router.
+                as counted by the router -- padding-filtered when the router
+                was given a mask.
             carrier: tensor whose backward path carries the injected gradient
                 (the router's top-k scores).
+            padding_mask_T: optional boolean ``(T,)`` mask, true for padding.
+                Padding rows contribute nothing to the normalized-score sum
+                (Eq. 19), so ``T`` in both equations is the VALID token count.
 
         Returns:
             ``carrier`` unchanged (identity forward).
@@ -747,8 +1147,11 @@ class MicrobatchWiseLoadBalanceLoss(AuxLoss):
 
         # Eq. 19: p_i = (1/T) sum_t s'_t,i, the per-token L1-normalized scores.
         # F.normalize's eps clamp only guards an all-zero score row: the scores
-        # are non-negative, so the norm is a plain sum.
+        # are non-negative, so the norm is a plain sum. Padding rows are zeroed
+        # after the per-token normalization, dropping them from the sum.
         probs_TE = F.normalize(scores_TE, p=1, dim=-1)
+        if padding_mask_T is not None:
+            probs_TE = probs_TE * ~padding_mask_T.unsqueeze(-1)
         p_E = self._reduce_token_partials(probs_TE.sum(dim=0), axes)
 
         # Eq. 17: L_bal = sum_i f_i * p_i

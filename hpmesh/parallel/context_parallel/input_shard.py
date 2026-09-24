@@ -37,6 +37,8 @@ __all__ = [
     "shard_attention_mask_for_cp",
     "shard_batch_for_cp",
     "shard_batch_for_tp",
+    "shard_padding_mask_for_cp",
+    "shard_padding_mask_for_tp",
 ]
 
 # BlockMask is (B, H, Q, KV); only the Q axis is sequence-sharded. The KV axis
@@ -131,6 +133,54 @@ def shard_batch_for_cp(
         load_balancer=balancer,
     )
     return tuple(sharded)
+
+
+def shard_padding_mask_for_cp(
+    padding_mask: torch.Tensor,
+    cp_mesh: DeviceMesh,
+    load_balancer: str | None = None,
+) -> torch.Tensor:
+    """Shard a flat ``(T,)`` padding mask exactly as ``shard_batch_for_cp``.
+
+    Kept a separate entry point rather than another buffer in
+    ``shard_batch_for_cp`` so that function's triple return -- unpacked at
+    every call site -- stays stable. The rearrangement still agrees with the
+    batch shard: the load balancers are deterministic in
+    ``(seq_len, cp_size, device)`` (see ``_resolve_load_balancer``), so
+    constructing one here for the same sequence lands the same tokens on this
+    rank.
+    """
+    balancer = _resolve_load_balancer(load_balancer, padding_mask.shape[0], cp_mesh)
+    return _context_parallel_shard(
+        mesh=cp_mesh,
+        buffers=[padding_mask],
+        seq_dims=[0],
+        load_balancer=balancer,
+    )[0]
+
+
+def shard_padding_mask_for_tp(
+    padding_mask: torch.Tensor,
+    tp_mesh: DeviceMesh,
+) -> torch.Tensor:
+    """Shard a flat ``(T,)`` padding mask exactly as ``shard_batch_for_tp``.
+
+    The same contiguous cut, for the same reason: the mask must follow the
+    token stream it describes into this rank's ``T / tp`` slice.
+    """
+    _require_torch_cp()
+    if padding_mask.shape[0] % tp_mesh.size() != 0:
+        raise ValueError(
+            f"sequence length {padding_mask.shape[0]} is not divisible by "
+            f"tp={tp_mesh.size()}; seq_len must be a multiple of the TP degree."
+        )
+    return _context_parallel_shard(
+        mesh=tp_mesh,
+        buffers=[padding_mask],
+        seq_dims=[0],
+        load_balancer=None,
+    )[0]
+
 
 
 def shard_batch_for_tp(

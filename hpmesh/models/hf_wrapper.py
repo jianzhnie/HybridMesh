@@ -48,6 +48,8 @@ from ..parallel.context_parallel import (
     shard_attention_mask_for_cp,
     shard_batch_for_cp,
     shard_batch_for_tp,
+    shard_padding_mask_for_cp,
+    shard_padding_mask_for_tp,
 )
 from ..parallel.parallel_dims import ParallelDims
 from ..utils.batch_invariant import is_in_batch_invariant_mode
@@ -58,6 +60,7 @@ from .common.masks import (
     get_causal_mask_mod,
     get_document_mask_mod,
 )
+from .common.moe import _iter_moe_layers
 
 logger = get_logger(__name__)
 
@@ -709,7 +712,8 @@ class HFTransformerModel(nn.Module):
            (CP outer, TP inner) split.
         5. **Return the leftover dict as ``extra_kwargs``.** Those are splatted
            into ``forward``, so anything left here must be one of its keyword
-           parameters -- ``positions`` and ``attention_masks``, and nothing else.
+           parameters -- ``positions``, ``attention_masks`` and
+           ``padding_mask``, and nothing else.
 
         ``positions`` is optional: the synthetic source has none and the forward
         falls back to its own ``arange``, which is right for a single document
@@ -732,6 +736,7 @@ class HFTransformerModel(nn.Module):
         del parallelism
         extra_kwargs: dict[str, Any] = {}
         positions = None
+        padding_mask = None
 
         if isinstance(input_dict, Batch):
             # Rows are independent documents of length T.
@@ -744,10 +749,15 @@ class HFTransformerModel(nn.Module):
             # at every document boundary, so for this path the shift is a read.
             inputs, labels = input_dict["input"], input_dict["labels"]
             positions = input_dict.get("positions")
+            # True-for-padding, from the collator; consumed by the MoE blocks'
+            # load-balancing statistics (see forward's ``padding_mask``).
+            padding_mask = input_dict.get("padding_mask")
 
         inputs, labels = _collapse_batch_dims(inputs, labels)
         if positions is not None:
             positions = positions.reshape(-1)
+        if padding_mask is not None:
+            padding_mask = padding_mask.reshape(-1).to(torch.bool)
 
         # Whether the mask must be prebuilt full-length: a packed corpus
         # (``block_causal``) carries a document structure that is not
@@ -807,6 +817,12 @@ class HFTransformerModel(nn.Module):
                 cp_mesh,
                 load_balancer=self._cp_load_balancer,
             )
+            if padding_mask is not None:
+                # The mask describes the same token stream, so it takes the
+                # same shard (load-balancer rearrangement included).
+                padding_mask = shard_padding_mask_for_cp(
+                    padding_mask, cp_mesh, self._cp_load_balancer
+                )
 
         tp_mesh = (
             None if parallel_dims is None else parallel_dims.get_optional_mesh("tp")
@@ -821,10 +837,17 @@ class HFTransformerModel(nn.Module):
             # the TP-sharded input and restart at 0 on every rank.
             if positions is None:
                 positions = torch.arange(inputs.numel(), device=inputs.device)
+            if padding_mask is not None:
+                # Cut BEFORE the batch tensors: the mask's length still matches
+                # the pre-shard ``inputs``, which is what the divisibility
+                # check must measure.
+                padding_mask = shard_padding_mask_for_tp(padding_mask, tp_mesh)
             inputs, labels = shard_batch_for_tp(inputs, labels, tp_mesh)
 
         if positions is not None:
             extra_kwargs["positions"] = positions
+        if padding_mask is not None:
+            extra_kwargs["padding_mask"] = padding_mask
         return inputs, labels, extra_kwargs
 
     def get_attention_masks(self, positions: torch.Tensor):
@@ -895,6 +918,7 @@ class HFTransformerModel(nn.Module):
         *,
         positions: torch.Tensor | None = None,
         attention_masks=None,
+        padding_mask: torch.Tensor | None = None,
         skip_lm_head: bool = False,
     ) -> torch.Tensor:
         """Run the decoder over one packed sequence and return logits.
@@ -913,6 +937,13 @@ class HFTransformerModel(nn.Module):
                 it (see ``_apply_attention``); with sdpa the decoder is left to
                 its own causal default. Under CP, a full-length mask already
                 Q-sharded by ``shard_attention_mask_for_cp``.
+            padding_mask: ``(T,)`` boolean, true for padding, sharded exactly
+                like ``input_ids``. Staged onto every swapped-in MoE block
+                (``MoE.set_padding_mask``) so the blocks' load-balancing
+                statistics skip padding tokens; the decoder's arithmetic is
+                unaffected. The HF decoder layer's fixed
+                ``self.mlp(hidden_states)`` call signature is why this is a
+                staged side channel rather than a threaded argument.
             skip_lm_head: return the ``(T, H)`` hidden states instead of logits.
                 The chunked-loss path uses this so the trainer can run lm_head +
                 cross-entropy per sequence chunk (see
@@ -933,6 +964,12 @@ class HFTransformerModel(nn.Module):
             positions = torch.arange(local_seq_len, device=input_ids.device)
 
         kwargs = self._apply_attention(positions, attention_masks)
+
+        # Stage the padding mask on every MoE block -- including ``None``, so
+        # a mask from a previous microbatch can never survive into this one.
+        # Each block consumes its staged mask on its forward, once.
+        for moe in _iter_moe_layers(self):
+            moe.set_padding_mask(padding_mask)
 
         # A HF decoder expects a batch dim; the wrapper's contract is flat.
         hidden_states = self._decoder(

@@ -112,6 +112,7 @@ from ..components.loss import (
 )
 from ..components.metrics import MetricsProcessor
 from ..components.optimizer import (
+    EMA,
     LRSchedulersContainer,
     OptimizersContainer,
     build_lr_scheduler,
@@ -125,7 +126,11 @@ from ..models.common.aux_loss import (
     collect_aux_loss_metrics,
     register_aux_loss_zero_hook,
 )
-from ..models.common.moe import MoE, register_moe_load_balancing_hook
+from ..models.common.moe import (
+    MoE,
+    register_moe_load_balancing_hook,
+    register_moe_quantile_balancing_hook,
+)
 from ..models.hf_state_dict_adapter import HFTransformerStateDictAdapter
 from ..models.hf_wrapper import (
     HFTransformerModel,
@@ -180,6 +185,7 @@ class Trainer:
     # states), so ``None`` is only the not-built state of such a test double.
     dataloader: BaseDataLoader | None = None
     lr_scheduler: LRSchedulersContainer | None
+    ema: EMA | None
     checkpointer: CheckpointManager | None
     metrics: MetricsProcessor | None
     gc_handler: GarbageCollection | None
@@ -342,6 +348,25 @@ class Trainer:
             training_steps=cfg.steps,
         )
 
+        # The weight EMA, a sibling of the optimizer rather than part of it:
+        # stepped explicitly in ``train_step`` after the real update, and
+        # registered with the checkpointer under its own ``ema`` key. Built
+        # only when configured -- None costs nothing.
+        ema_config = cfg.training.ema
+        self.ema = (
+            EMA(
+                model_parts=self.model_parts,
+                decay=ema_config.decay,
+                half_life_fraction=ema_config.half_life_fraction,
+                start_step=ema_config.start_step,
+                step_bias=ema_config.step_bias,
+                update_every_n_steps=ema_config.update_every_n_steps,
+                buffer_patterns=ema_config.buffer_patterns,
+            )
+            if ema_config is not None
+            else None
+        )
+
         # Aux losses (the MoE load-balance loss a swapped-in MoE carries)
         # accumulate per forward; this pre-hook rolls the per-instance sums
         # into the step registers at each optimizer step. Harmless when no
@@ -357,6 +382,13 @@ class Trainer:
         # a model without MoE layers, which is every model except a swapped-in
         # one (the swap is what installs ``load_balance_coeff``).
         register_moe_load_balancing_hook(
+            self.optimizer, self.model_parts, self.parallel_dims
+        )
+        # The quantile counterpart, registered alongside: the two schemes are
+        # mutually exclusive per model, so exactly one of the two hooks ever
+        # fires -- this one no-ops unless the swap installed quantile routers
+        # (``moe_quantile_balancing``).
+        register_moe_quantile_balancing_hook(
             self.optimizer, self.model_parts, self.parallel_dims
         )
 
@@ -393,6 +425,7 @@ class Trainer:
             model_parts=self.model_parts,
             optimizer=self.optimizer,
             lr_scheduler=self.lr_scheduler,
+            ema=self.ema,
             states=states,
             folder=cfg.dump_folder,
             sd_adapter=HFTransformerStateDictAdapter(
@@ -1189,6 +1222,10 @@ class Trainer:
         # run at ``lambda(0)`` rather than ``lambda(1)``. The snapshot taken at
         # the top of this function is the value handed to the optimizer.
         self.lr_scheduler.step()
+        if self.ema is not None:
+            # ``self.step`` is the step just optimized, which is what the EMA
+            # schedule's start_step/update_every_n_steps are defined against.
+            self.ema.step(self.step)
 
         if not should_log:
             return None

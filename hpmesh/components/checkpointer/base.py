@@ -61,6 +61,7 @@ from ...accelerator import dist_utils
 from ...utils import filesystem
 from ...utils.checkpoint_keys import (
     DATALOADER,
+    EMA,
     LR_SCHEDULER,
     MODEL,
     OPTIMIZER,
@@ -76,6 +77,7 @@ logger = get_logger(__name__)
 # import above re-exports them under their long-standing names.
 __all__ = [
     "DATALOADER",
+    "EMA",
     "LR_SCHEDULER",
     "MODEL",
     "OPTIMIZER",
@@ -526,11 +528,12 @@ class BaseCheckpointManager(ABC):
     def _is_resumable_checkpoint(self, checkpoint_dir: str) -> bool:
         """Whether automatic loading may select ``checkpoint_dir``."""
 
-    def _find_load_step(self, folder: str = "") -> int:
+    def _find_load_step(self, folder: str = "", max_step: int | None = None) -> int:
         """The highest step in ``folder`` that can actually be loaded.
 
         Args:
             folder: directory to scan. Defaults to ``self.folder``.
+            max_step: ignore checkpoints after this step when provided.
 
         Returns:
             The step number, or -1 when the folder holds no loadable checkpoint.
@@ -549,6 +552,8 @@ class BaseCheckpointManager(ABC):
         for dirname in self._storage.listdir(folder):
             step = self._parse_step(dirname)
             if step is None:
+                continue
+            if max_step is not None and step > max_step:
                 continue
             if self._is_resumable_checkpoint(filesystem.join(folder, dirname)):
                 resumable_steps.append(step)

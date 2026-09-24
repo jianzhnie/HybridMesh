@@ -61,6 +61,7 @@ if TYPE_CHECKING:
 
 from ...utils.logger_utils import get_logger
 from .base import (
+    EMA,
     LR_SCHEDULER,
     MODEL,
     OPTIMIZER,
@@ -334,6 +335,7 @@ class TorchCheckpointingManager(BaseCheckpointManager):
         model_parts: list[Any],
         optimizer: Any,
         lr_scheduler: Any,
+        ema: Any | None = None,
         states: dict[str, Any],
         folder: str,
         sd_adapter: Any | None = None,
@@ -378,6 +380,8 @@ class TorchCheckpointingManager(BaseCheckpointManager):
                 LR_SCHEDULER: lr_scheduler,
             }
         )
+        if ema is not None:
+            self.states[EMA] = ema
 
         self.load_only = config.load_only
         self.exclude_from_loading = config.exclude_from_loading
