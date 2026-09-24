@@ -56,6 +56,7 @@ __all__ = [
     "CheckpointConfig",
     "DataloaderConfig",
     "EMAConfig",
+    "ValidationConfig",
     "HybridMeshConfig",
     "LRSchedulerConfig",
     "MetricsConfig",
@@ -1271,6 +1272,45 @@ class SelectiveACConfig:
     )
 
 
+@dataclass(kw_only=True)
+class ValidationConfig:
+    """The validation (eval) loop's knobs (see ``Trainer.validate``).
+
+    Set ``training.validation_config`` to one of these to turn validation on;
+    the default ``None`` means no validation runs and the training loop is
+    bit-identical to before. Programmatic-only, like ``ema_config``: a nested
+    dataclass does not survive ``HfArgumentParser``.
+
+    Validation replays the training loss forward-only: summed next-token
+    cross-entropy over the whole pass, divided by the global valid-token count
+    reduced across DP, so the number is independent of how the batches were
+    split across ranks. It updates no parameters and touches no checkpoint
+    state.
+    """
+
+    freq: int = 10
+    """Validate every this many steps (step 1 always validates)."""
+
+    steps: int = -1
+    """Batches per validation pass. -1 consumes the finite dataset once
+    (the loader is built with repeat=False). Ranks then stop independently,
+    so -1 requires data-parallel degree 1 and a finite (non-random) dataset;
+    both are rejected at trainer build time rather than hanging the pass."""
+
+    dataset: str | None = None
+    """Corpus override for validation, same vocabulary as
+    ``dataloader.dataset``. None (the default) validates on the training
+    corpus."""
+
+    def __post_init__(self) -> None:
+        if self.freq <= 0:
+            raise ValueError(f"validation.freq must be positive, got {self.freq}")
+        if not (self.steps > 0 or self.steps == -1):
+            raise ValueError(
+                f"validation.steps must be positive or -1, got {self.steps}"
+            )
+
+
 @dataclass
 class TrainingConfig:
     """Training loop hyperparameters and reproducibility."""
@@ -1381,6 +1421,14 @@ class TrainingConfig:
             "like optimizer.param_groups."
         },
     )
+    validation_config: ValidationConfig | None = field(
+        default=None,
+        metadata={
+            "help": "Periodic validation pass (see Trainer.validate). None "
+            "(the default) disables it. No CLI flag -- set it from code, like "
+            "ema_config."
+        },
+    )
 
     @property
     def checkpoint(self) -> CheckpointConfig:
@@ -1417,6 +1465,15 @@ class TrainingConfig:
         run asks for it.
         """
         return self.ema_config
+
+    @property
+    def validation(self) -> ValidationConfig | None:
+        """The validation loop's config, or None when validation is off.
+
+        Opt-in like ``ema``: a validation pass re-reads the corpus and runs a
+        full forward over it, so it exists only when the run asks for it.
+        """
+        return self.validation_config
 
     def __post_init__(self) -> None:
         if self.global_batch_size < 1:
@@ -1585,6 +1642,10 @@ class HybridMeshConfig:
     @property
     def profiler(self) -> ProfilerConfig:
         return self.training.profiler
+
+    @property
+    def validation(self) -> ValidationConfig | None:
+        return self.training.validation
 
     def derive_dp(self, world_size: int) -> int:
         """Flat passthrough so callers use cfg.derive_dp(world_size) uniformly."""
