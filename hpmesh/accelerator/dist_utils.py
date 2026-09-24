@@ -12,7 +12,7 @@ from torch import Tensor
 from torch import distributed as torch_dist
 from torch.distributed import ProcessGroup
 
-from .device import is_mlu_available, is_musa_available, is_npu_available
+from .device import device_type, get_distributed_backend, set_device
 
 _LOCAL_PROCESS_GROUP = None
 
@@ -100,30 +100,25 @@ def _init_dist_pytorch(backend, init_backend='torch', **kwargs) -> None:
     rank = int(os.environ['RANK'])
     # LOCAL_RANK is set by `torch.distributed.launch` since PyTorch 1.1
     local_rank = int(os.environ['LOCAL_RANK'])
-    if is_mlu_available():
-        import torch_mlu  # noqa: F401
-        torch.mlu.set_device(local_rank)
+    if device_type not in ('cpu', 'cuda'):
+        # Vendor accelerators (npu / mlu / musa / xpu): one generic path --
+        # the backend string is owned by ``device.py``'s map rather than a
+        # second hardcoded table here, and every vendor takes LOCAL_RANK
+        # (the vendored musa branch used the global rank, which misplaces
+        # ranks on multi-node runs).
+        set_device(torch.device(device_type, local_rank))
         torch_dist.init_process_group(
-            backend='cncl',
+            backend=get_distributed_backend(),
             rank=rank,
             world_size=int(os.environ['WORLD_SIZE']),
             **kwargs)
-    elif is_npu_available():
-        import torch_npu  # noqa: F401
-        torch.npu.set_device(local_rank)
-        torch_dist.init_process_group(
-            backend='hccl',
-            rank=rank,
-            world_size=int(os.environ['WORLD_SIZE']),
-            **kwargs)
-    elif is_musa_available():
-        import torch_musa  # noqa: F401
-        torch.musa.set_device(rank)
-        torch_dist.init_process_group(
-            backend='mccl',
-            rank=rank,
-            world_size=int(os.environ['WORLD_SIZE']),
-            **kwargs)
+    elif device_type == 'cpu':
+        # gloo/mpi runs have no device to set.
+        if init_backend == 'torch':
+            torch_dist.init_process_group(backend=backend, **kwargs)
+        else:
+            raise ValueError(
+                f'init_backend={init_backend!r} is not supported on CPU')
     else:
         torch.cuda.set_device(local_rank)
 
@@ -211,10 +206,10 @@ def _init_dist_slurm(backend,
     os.environ['LOCAL_RANK'] = str(local_rank)
     os.environ['RANK'] = str(proc_id)
 
-    if is_mlu_available():
-        import torch_mlu  # noqa: F401
-        torch.mlu.set_device(local_rank)
-        torch_dist.init_process_group(backend='cncl', **kwargs)
+    if device_type not in ('cpu', 'cuda'):
+        set_device(torch.device(device_type, local_rank))
+        torch_dist.init_process_group(
+            backend=get_distributed_backend(), **kwargs)
     else:
         torch.cuda.set_device(local_rank)
 

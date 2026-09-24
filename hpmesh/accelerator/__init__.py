@@ -10,14 +10,17 @@ Members:
 * ``collectives.py`` -- reductions (``dist_sum``/``dist_max``), PG timeouts,
   and EP-aware ``clip_grad_norm_``.
 * ``monitoring.py`` -- device memory monitors/snapshots and ``get_peak_flops``.
-* ``dist.py`` + ``utils.py`` -- vendored from OpenMMLab's ``mmengine.dist``,
+* ``spmd_context.py`` -- the ambient SPMD mesh context (TLS mesh stack and
+  by-name process-group queries) that trainer and ``models/common`` read.
+* ``dist.py`` + ``dist_utils.py`` -- vendored from OpenMMLab's ``mmengine.dist``,
   de-mmengine'd to depend only on torch and ``.device``; a standalone toolbox
   (multi-launcher ``init_dist``, object collectives, ``cast_data_device``).
 
 Only the vendored toolbox is re-exported here. ``mesh`` / ``collectives`` /
-``monitoring`` are imported as submodules (``hpmesh.accelerator.mesh`` ...):
-re-exporting them would make ``import hpmesh.accelerator`` pull in the
-parallel and trainer layers and close an import cycle.
+``monitoring`` / ``spmd_context`` are imported as submodules
+(``hpmesh.accelerator.mesh`` ...): re-exporting them would make
+``import hpmesh.accelerator`` pull in the parallel and trainer layers and
+close an import cycle.
 """
 
 from .dist import (
@@ -35,7 +38,7 @@ from .dist import (
     gather_object,
     sync_random_seed,
 )
-from .utils import (
+from .dist_utils import (
     barrier,
     cast_data_device,
     get_backend,

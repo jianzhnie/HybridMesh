@@ -52,7 +52,7 @@ import torch.nn.functional as F
 if TYPE_CHECKING:
     from ...parallel.parallel_dims import ParallelDims
 
-from hpmesh.utils.spmd_context import spmd_mesh_group, spmd_sparse_mesh
+from hpmesh.accelerator.spmd_context import spmd_mesh_group, spmd_sparse_mesh
 
 from .aux_loss import AuxLoss
 from .grouped_experts import GroupedExperts

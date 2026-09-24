@@ -50,7 +50,7 @@ _BACKENDS = {
     "cuda": "nccl",
     "xpu": "ccl",
     "mlu": "cncl",
-    "musa": "musa",
+    "musa": "mccl",
     "cpu": "gloo",
 }
 
@@ -91,8 +91,13 @@ def get_device_info() -> tuple[str, Any]:
     return kind, torch if kind == "cpu" else getattr(torch, kind)
 
 
-def get_dist_info() -> tuple[int, int, int]:
-    """Return ``(rank, world size, local rank)`` from torchrun's environment."""
+def get_env_dist_info() -> tuple[int, int, int]:
+    """Return ``(rank, world size, local rank)`` from torchrun's environment.
+
+    Named ``get_env_dist_info`` to stay distinct from
+    ``dist_utils.get_dist_info(group)``, which queries the live process
+    group and returns only ``(rank, world size)``.
+    """
     return (
         int(os.environ.get("RANK", 0)),
         int(os.environ.get("WORLD_SIZE", 1)),
@@ -104,7 +109,7 @@ def get_current_device(*, use_cpu: bool = False) -> torch.device:
     """Return this process's device using ``LOCAL_RANK``."""
     if use_cpu or device_type == "cpu":
         return torch.device("cpu")
-    return torch.device(device_type, get_dist_info()[2])
+    return torch.device(device_type, get_env_dist_info()[2])
 
 
 def get_distributed_backend() -> str:
