@@ -5,10 +5,11 @@ Members:
 
 * ``device.py`` -- hpmesh's backend-neutral device module (NPU/CUDA/MLU/MUSA
   discovery, distributed-backend selection, per-vendor predicates).
-* ``mesh.py`` -- ``init_distributed`` / ``build_parallel_dims`` /
-  ``build_mesh``: process-group bootstrap and topology construction.
-* ``collectives.py`` -- reductions (``dist_sum``/``dist_max``), PG timeouts,
-  and EP-aware ``clip_grad_norm_``.
+* ``mesh.py`` -- ``build_parallel_dims`` / ``build_mesh``: topology
+  construction (the trainer bootstraps its PG via
+  ``dist_utils._init_dist_pytorch``).
+* ``collectives.py`` -- PG timeouts (``set_pg_timeouts``) and EP-aware
+  ``clip_grad_norm_``.
 * ``monitoring.py`` -- device memory monitors/snapshots and ``get_peak_flops``.
 * ``spmd_context.py`` -- the ambient SPMD mesh context (TLS mesh stack and
   by-name process-group queries) that trainer and ``models/common`` read.
@@ -16,75 +17,57 @@ Members:
   de-mmengine'd to depend only on torch and ``.device``; a standalone toolbox
   (multi-launcher ``init_dist``, object collectives, ``cast_data_device``).
 
-Only the vendored toolbox is re-exported here. ``mesh`` / ``collectives`` /
-``monitoring`` / ``spmd_context`` are imported as submodules
-(``hpmesh.accelerator.mesh`` ...): re-exporting them would make
-``import hpmesh.accelerator`` pull in the parallel and trainer layers and
-close an import cycle.
+The vendored toolbox is re-exported here lazily (PEP 562): importing this
+package or a sibling submodule (``hpmesh.accelerator.mesh`` ...) does not pay
+for ``dist.py`` unless a toolbox name is actually touched. ``mesh`` /
+``collectives`` / ``monitoring`` / ``spmd_context`` are imported as
+submodules -- re-exporting them would make ``import hpmesh.accelerator``
+pull in the parallel and trainer layers and close an import cycle.
 """
 
-from .dist import (
-    all_gather,
-    all_gather_object,
-    all_reduce,
-    all_reduce_dict,
-    all_reduce_params,
-    broadcast,
-    broadcast_object_list,
-    collect_results,
-    collect_results_cpu,
-    collect_results_gpu,
-    gather,
-    gather_object,
-    sync_random_seed,
-)
-from .dist_utils import (
-    barrier,
-    cast_data_device,
-    get_backend,
-    get_comm_device,
-    get_data_device,
-    get_dist_info,
-    get_local_rank,
-    get_local_size,
-    get_rank,
-    get_world_size,
-    infer_launcher,
-    init_dist,
-    init_local_group,
-    is_distributed,
-    is_main_process,
-    master_only,
-)
+_EXPORT_SOURCES = {
+    # dist.py
+    "all_gather": "dist",
+    "all_gather_object": "dist",
+    "all_reduce": "dist",
+    "all_reduce_dict": "dist",
+    "all_reduce_params": "dist",
+    "broadcast": "dist",
+    "broadcast_object_list": "dist",
+    "collect_results": "dist",
+    "collect_results_cpu": "dist",
+    "collect_results_gpu": "dist",
+    "gather": "dist",
+    "gather_object": "dist",
+    "sync_random_seed": "dist",
+    # dist_utils.py
+    "barrier": "dist_utils",
+    "cast_data_device": "dist_utils",
+    "get_backend": "dist_utils",
+    "get_comm_device": "dist_utils",
+    "get_data_device": "dist_utils",
+    "get_dist_info": "dist_utils",
+    "get_rank": "dist_utils",
+    "get_world_size": "dist_utils",
+    "infer_launcher": "dist_utils",
+    "init_dist": "dist_utils",
+    "is_distributed": "dist_utils",
+    "is_main_process": "dist_utils",
+    "master_only": "dist_utils",
+}
 
-__all__ = [
-    "all_gather",
-    "all_gather_object",
-    "all_reduce",
-    "all_reduce_dict",
-    "all_reduce_params",
-    "barrier",
-    "broadcast",
-    "broadcast_object_list",
-    "cast_data_device",
-    "collect_results",
-    "collect_results_cpu",
-    "collect_results_gpu",
-    "gather",
-    "gather_object",
-    "get_backend",
-    "get_comm_device",
-    "get_data_device",
-    "get_dist_info",
-    "get_local_rank",
-    "get_local_size",
-    "get_rank",
-    "get_world_size",
-    "infer_launcher",
-    "init_dist",
-    "init_local_group",
-    "is_distributed",
-    "is_main_process",
-    "master_only",
-    "sync_random_seed",
-]
+__all__ = sorted(_EXPORT_SOURCES)
+
+
+def __getattr__(name: str):
+    """Resolve toolbox names on first touch (PEP 562 lazy re-export)."""
+    source = _EXPORT_SOURCES.get(name)
+    if source is None:
+        raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+    import importlib
+
+    return getattr(importlib.import_module(f".{source}", __name__), name)
+
+
+def __dir__() -> list[str]:
+    return sorted(__all__)

@@ -63,7 +63,7 @@ def _get_reduce_op(name: str) -> torch_dist.ReduceOp:
 
     if name.lower() not in op_mappings:
         raise ValueError(
-            f'reduce op should be one of {op_mappings.keys()}, bug got {name}')
+            f'reduce op should be one of {op_mappings.keys()}, but got {name}')
 
     return op_mappings[name.lower()]
 
@@ -84,7 +84,7 @@ def all_reduce(data: Tensor,
         data (Tensor): Input and output of the collective. The function
             operates in-place.
         op (str): Operation to reduce data. Defaults to 'sum'. Optional values
-            are 'sum', 'mean' and 'produce', 'min', 'max', 'band', 'bor' and
+            are 'sum', 'mean' and 'product', 'min', 'max', 'band', 'bor' and
             'bxor'.
         group (ProcessGroup, optional): The process group to work on. If None,
             the default process group will be used. Defaults to None.
@@ -471,7 +471,12 @@ def _broadcast_object_list(object_list: list[Any],
             dtype=torch.uint8,
         )
 
-    if is_nccl_backend or is_hccl_backend or is_cncl_backend:
+    if (
+        is_nccl_backend
+        or is_hccl_backend
+        or is_cncl_backend
+        or is_mccl_backend
+    ):
         object_tensor = object_tensor.to(current_device)
     torch_dist.broadcast(object_tensor, src=src, group=group)
     # Deserialize objects using their stored sizes.
@@ -564,7 +569,7 @@ def all_reduce_dict(data: dict[str, Tensor],
     Args:
         data (dict[str, Tensor]): Data to be reduced.
         op (str): Operation to reduce data. Defaults to 'sum'. Optional values
-            are 'sum', 'mean' and 'produce', 'min', 'max', 'band', 'bor' and
+            are 'sum', 'mean' and 'product', 'min', 'max', 'band', 'bor' and
             'bxor'.
         group (ProcessGroup, optional): The process group to work on. If None,
             the default process group will be used. Defaults to None.
@@ -1136,7 +1141,7 @@ def _all_reduce_coalesced(tensors: list[torch.Tensor],
         bucket_size_mb (int): The limit of each chunk in megabytes
             for grouping tensors into chunks. Defaults to -1.
         op (str): Operation to reduce data. Defaults to 'sum'. Optional values
-            are 'sum', 'mean' and 'produce', 'min', 'max', 'band', 'bor' and
+            are 'sum', 'mean' and 'product', 'min', 'max', 'band', 'bor' and
             'bxor'.
         group (ProcessGroup, optional): The process group to work on. If None,
             the default process group will be used. Defaults to None.
@@ -1178,7 +1183,7 @@ def all_reduce_params(params: list | Generator[torch.Tensor, None, None],
         bucket_size_mb (int, optional): Size of bucket, the unit is MB.
             Defaults to -1.
         op (str): Operation to reduce data. Defaults to 'sum'. Optional values
-            are 'sum', 'mean' and 'produce', 'min', 'max', 'band', 'bor' and
+            are 'sum', 'mean' and 'product', 'min', 'max', 'band', 'bor' and
             'bxor'.
         group (ProcessGroup, optional): The process group to work on. If None,
             the default process group will be used. Defaults to None.

@@ -109,8 +109,8 @@ def spmd_mesh_group(axis_name: str) -> torch.distributed.ProcessGroup | None:
 def set_current_spmd_mesh(mesh: DeviceMesh | None) -> Iterator[None]:
     """Set TorchTitan and spmd_types current mesh state for one runtime region."""
     stack = _spmd_mesh_stack()
-    stack.append(mesh)
     if mesh is None:
+        stack.append(mesh)
         try:
             yield
         finally:
@@ -119,6 +119,9 @@ def set_current_spmd_mesh(mesh: DeviceMesh | None) -> Iterator[None]:
         return
 
     with spmd.set_current_mesh(mesh):
+        # Append only after the enter succeeds, so a raise there cannot
+        # leave a stale entry on the stack.
+        stack.append(mesh)
         try:
             yield
         finally:
@@ -161,9 +164,16 @@ def spmd_context(parallel_dims: Any) -> Iterator[None]:
         yield
         return
 
+    previous_dense = getattr(_MESH_TLS, "dense_mesh", None)
+    previous_sparse = getattr(_MESH_TLS, "sparse_mesh", None)
     set_spmd_meshes(
         dense_mesh=parallel_dims.spmd_dense_mesh(),
         sparse_mesh=parallel_dims.spmd_sparse_mesh(),
     )
-    with set_current_spmd_mesh(spmd_dense_mesh()):
-        yield
+    try:
+        with set_current_spmd_mesh(spmd_dense_mesh()):
+            yield
+    finally:
+        # Restore whatever an outer context registered, so nested or
+        # re-entered regions never see this run's meshes after exit.
+        set_spmd_meshes(dense_mesh=previous_dense, sparse_mesh=previous_sparse)

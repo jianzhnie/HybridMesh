@@ -15,6 +15,7 @@ from typing import Any, TypeAlias
 
 import torch
 
+from ..accelerator.device import should_use_pin_memory
 from ..components.loss import IGNORE_INDEX
 from .dataset import TextSequence
 from .types import DatasetBuildContext
@@ -33,7 +34,7 @@ TrainerBatch: TypeAlias = dict[str, Any]
 # out of pageable memory is synchronous whatever ``non_blocking`` says. There has
 # to be an accelerator to pin for -- allocating with ``pin_memory=True`` raises
 # without one -- so CPU-only runs fall back to ordinary pageable memory.
-HAS_PIN_MEMORY = torch.accelerator.is_available()
+HAS_PIN_MEMORY = should_use_pin_memory()
 
 
 class Collator(ABC):

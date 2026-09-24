@@ -79,6 +79,7 @@ calls into, not loop logic, and hpmesh has no counterparts to call.
 
 from __future__ import annotations
 
+import os
 from collections.abc import Iterable, Iterator
 from contextlib import nullcontext
 from datetime import timedelta
@@ -92,16 +93,16 @@ from torch.distributed.device_mesh import DeviceMesh
 from torch.distributed.tensor import DTensor
 
 from .. import parallel
-from ..accelerator import dist_utils
-from ..accelerator.collectives import (
-    clip_grad_norm_,
-    dist_max,
-    dist_sum,
-    dist_sum_tensor,
-    set_pg_timeouts,
+from ..accelerator.collectives import clip_grad_norm_, set_pg_timeouts
+from ..accelerator.device import (
+    device_module,
+    device_type,
+    get_distributed_backend,
+    get_env_dist_info,
 )
-from ..accelerator.device import device_module, device_type
-from ..accelerator.mesh import build_mesh, build_parallel_dims, init_distributed
+from ..accelerator.dist import all_reduce
+from ..accelerator.dist_utils import _init_dist_pytorch, is_distributed
+from ..accelerator.mesh import build_mesh, build_parallel_dims
 from ..accelerator.spmd_context import spmd_context
 from ..components.checkpointer import DATALOADER, TRAIN_STATE, CheckpointManager
 from ..components.loss import (
@@ -188,7 +189,13 @@ class Trainer:
 
     def __init__(self, cfg: HybridMeshConfig):
         self.cfg = cfg
-        self.rank, self.local_rank, self.world_size = init_distributed()
+        if (
+            not is_distributed()
+            and "RANK" in os.environ
+            and "WORLD_SIZE" in os.environ
+        ):
+            _init_dist_pytorch(get_distributed_backend())
+        self.rank, self.world_size, self.local_rank = get_env_dist_info()
 
         # Deterministic seeding BEFORE model build so all ranks build identical
         # initial weights -- the precondition for bit-exact DP comparisons.
@@ -941,9 +948,9 @@ class Trainer:
                 # shard in place is the reduction, since every rank of a TP
                 # group holds the same shard of the same parameter.
                 if isinstance(grad, DTensor):
-                    dist_utils.all_reduce(grad.to_local(), group=group)
+                    all_reduce(grad.to_local(), group=group)
                 else:
-                    dist_utils.all_reduce(grad, group=group)
+                    all_reduce(grad, group=group)
 
     def _param_context(self):
         """The context a forward/backward runs inside.
@@ -1060,7 +1067,12 @@ class Trainer:
         local_valid_tokens_tensor = torch.tensor(
             local_valid_tokens, dtype=torch.int64, device=self.device
         )
-        global_valid_tokens = dist_sum_tensor(local_valid_tokens_tensor, dp_mesh)
+        global_valid_tokens = local_valid_tokens_tensor
+        if dp_mesh is not None:
+            # Clone before the in-place collective: the local count is read
+            # again below for this rank's own per-rank average.
+            global_valid_tokens = global_valid_tokens.clone()
+            all_reduce(global_valid_tokens, group=dp_mesh.get_group())
 
         # Auxiliary losses normalize by the same per-step token count as the
         # main loss, so their scale is independent of parallelism degrees.
@@ -1133,13 +1145,13 @@ class Trainer:
         # the flag still crosses stages through the pp reduction below.
         if pp_mesh is None or self.pp_has_last_stage:
             if loss_mesh is not None:
-                dist_utils.all_reduce(
+                all_reduce(
                     step_is_finite,
                     op="min",
                     group=loss_mesh.get_group(),
                 )
         if pp_mesh is not None:
-            dist_utils.all_reduce(
+            all_reduce(
                 step_is_finite, op="min", group=pp_mesh.get_group()
             )
         # grad_norm arrives already world-reduced (clip_grad_norm_ materializes
@@ -1188,8 +1200,12 @@ class Trainer:
                 if local_valid_tokens > 0
                 else torch.zeros_like(accumulated_loss)
             )
-            global_avg_loss = float(dist_sum(loss, loss_mesh))
-            global_max_loss = float(dist_max(local_avg, loss_mesh))
+            loss_sum = loss.clone()
+            local_max = local_avg.clone()
+            all_reduce(loss_sum, group=loss_mesh.get_group())
+            all_reduce(local_max, op="max", group=loss_mesh.get_group())
+            global_avg_loss = float(loss_sum)
+            global_max_loss = float(local_max)
             # Cumulative tokens seen, summed over the ranks holding *distinct*
             # tokens: ``ntokens_seen`` is a count of labels this rank actually
             # fed a step, and CP and TP each take their own slice of that
@@ -1207,10 +1223,11 @@ class Trainer:
             #
             # One host sync per logging step, not per step: the tensor is int64
             # and nothing downstream needs it on the device.
-            global_ntokens_seen = dist_sum(
-                torch.tensor(self.ntokens_seen, dtype=torch.int64, device=self.device),
-                loss_mesh,
+            ntokens_seen_tensor = torch.tensor(
+                self.ntokens_seen, dtype=torch.int64, device=self.device
             )
+            all_reduce(ntokens_seen_tensor, group=loss_mesh.get_group())
+            global_ntokens_seen = float(ntokens_seen_tensor)
         else:
             # Single rank: the two reported losses are the same number by
             # construction.
