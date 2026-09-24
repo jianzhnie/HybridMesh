@@ -242,6 +242,29 @@ def split_model_into_stages(
             elif module_name not in modules_to_keep:
                 setattr(model, module_name, nn.Identity())
 
+        # Extra top-level modules the model's ``named_children`` override does
+        # not present (e.g. a multimodal encoder registered beside the decoder
+        # on ``HFTransformerModel``, whose child iteration shows only the five
+        # decoder parts). The loop above cannot see them, so keep-or-blank is
+        # applied here against the real ``_modules`` children: a non-owner
+        # gets an Identity, exactly like the decoder parts above. Without
+        # this, the deep copy would leave a live copy on every stage and two
+        # stages' state-dict keys would collide in one checkpoint. A module
+        # listed in NO stage's FQN list is blanked everywhere -- the model's
+        # ``forward`` must tolerate that (the same contract the decoder parts
+        # already impose).
+        presented = dict(model.named_children())
+        presented_ids = {id(module) for module in presented.values()}
+        for module_name, module_value in nn.Module.named_children(model):
+            if module_name in presented or module_name in modules_to_keep:
+                continue
+            # A container that holds the presented parts (the wrapper's inner
+            # HF model) is what the parts live in, not an extra module --
+            # never blank it.
+            if presented_ids & {id(m) for m in module_value.modules()}:
+                continue
+            setattr(model, module_name, nn.Identity())
+
         stage_kwargs = {"group": pp_mesh.get_group()}
         # ``get_mesh`` was added after PyTorch 2.10. hpmesh passes None because
         # its stages exchange plain tensors, so omitting it on older releases

@@ -6,7 +6,10 @@ driver around it, vendored in shape from torchtitan's
 
 * ``apply_pp`` -- decides the stage count from the schedule class, splits the
   model, and runs each chunk through the same per-model parallelisms the
-  unsplit path applies (TP, then FSDP, in ``parallelize_hf``'s order).
+  unsplit path applies (TP, then FSDP, in ``parallelize_hf``'s order). Its
+  ``first_stage_module_fqns`` option is torchtitan's
+  ``pipeline_with_first_stage_modules``: extra top-level modules co-located
+  with stage 0 (see ``_prepend_first_stage_modules``).
 * ``build_pipeline_schedule`` -- instantiates the torch pipelining schedule
   over this rank's stages, with the summed next-token CE the trainer
   normalizes, wrapped down to the bare scalar a schedule requires.
@@ -19,6 +22,7 @@ runtime schedules, which are rejected rather than honored.
 from __future__ import annotations
 
 import math
+from collections.abc import Sequence
 from dataclasses import dataclass
 
 import torch
@@ -136,6 +140,53 @@ def _get_pipeline_metadata(
     return num_stages, input_weight, output_weight
 
 
+def _prepend_first_stage_modules(
+    module_names_per_stage: list[list[str]],
+    model: nn.Module,
+    first_stage_module_fqns: Sequence[str],
+) -> None:
+    """Co-locate extra top-level modules with pipeline stage 0, in place.
+
+    The generated LLM split only knows the decoder parts (``tok_embeddings``,
+    ``layers.*``, ``norm``, ``lm_head``, ``rotary_emb``). This prepends each
+    present module from ``first_stage_module_fqns`` to stage 0's FQN list, in
+    the given order; ``split_model_into_stages`` then keeps the real module on
+    stage 0 and blanks it to ``nn.Identity`` everywhere else, so the model's
+    ``forward`` must tolerate the blanked version.
+
+    Invariants:
+
+    * FQN stability: the modules stay top-level children under their original
+      names, so every stage's state-dict keys for them match the unsplit
+      model's -- optimizer and checkpoint keys do not move.
+    * No cross-stage ownership: an FQN the split already assigned (e.g. a
+      decoder part, or a duplicate in ``first_stage_module_fqns``) would put a
+      live copy on two stages and collide their keys in one checkpoint, so it
+      is rejected rather than merged.
+    * Absent modules (``getattr(model, fqn, None) is None``) are skipped, so a
+      caller may list modules that only some model variants carry.
+    """
+    owned = {name for stage in module_names_per_stage for name in stage}
+    seen: set[str] = set()
+    present = []
+    for fqn in first_stage_module_fqns:
+        if getattr(model, fqn, None) is None:
+            continue
+        if fqn in owned:
+            raise ValueError(
+                f"first-stage module {fqn!r} is already assigned to a pipeline "
+                "stage by the split; co-locating it with stage 0 would give "
+                "two stages a live copy of the same parameter."
+            )
+        if fqn in seen:
+            raise ValueError(
+                f"first-stage module {fqn!r} is listed more than once."
+            )
+        seen.add(fqn)
+        present.append(fqn)
+    module_names_per_stage[0][:0] = present
+
+
 def _validate_microbatches(
     parallel_dims: ParallelDims, cfg: ParallelConfig, global_batch_size: int
 ) -> None:
@@ -177,6 +228,7 @@ def apply_pp(
     global_batch_size: int,
     dataset: str = "random",
     compile: bool = False,
+    first_stage_module_fqns: Sequence[str] | None = None,
 ) -> tuple[list[PipelineStage], list[nn.Module], bool, bool]:
     """Split ``model`` into this rank's pipeline stages and parallelize them.
 
@@ -189,6 +241,17 @@ def apply_pp(
     ``global_batch_size`` and ``dataset`` are training-side values the PP
     guards need; they are explicit parameters rather than reads off a
     run-wide config so this layer never sees ``HybridMeshConfig``.
+
+    ``first_stage_module_fqns`` names extra top-level modules (e.g. a
+    multimodal encoder) to co-locate with stage 0; see
+    ``_prepend_first_stage_modules`` for the invariants. It only applies to
+    the auto-generated split -- an explicit ``module_fqns_per_model_part``
+    already places modules by hand, so the two are not merged (a warning is
+    logged and the explicit split wins). The default ``None`` leaves the
+    split, and every stage's state-dict keys, bitwise unchanged. Note the
+    auto split does not model the added load (``input_weight`` only accounts
+    for ``tok_embeddings``); rebalance with
+    ``pipeline_parallel_first_stage_less_layers``.
 
     Returns ``(stages, model_parts, has_first_stage, has_last_stage)``; the
     schedule over the stages is built separately (``build_pipeline_schedule``).
@@ -225,7 +288,17 @@ def apply_pp(
         module_names_per_stage = generate_llm_fqn_per_model_part(
             num_stages, num_layers, input_weight, output_weight
         )
+        if first_stage_module_fqns:
+            _prepend_first_stage_modules(
+                module_names_per_stage, model, first_stage_module_fqns
+            )
     else:
+        if first_stage_module_fqns:
+            logger.warning(
+                "first_stage_module_fqns is ignored because "
+                "module_fqns_per_model_part already defines the split; "
+                "place the extra modules in the explicit split instead."
+            )
         # An explicit split still has to land a whole number of stages per
         # rank; the per-schedule-kind check happens in _get_pipeline_metadata
         # for the generated path, so assert the divisibility here.
