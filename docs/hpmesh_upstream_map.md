@@ -168,7 +168,7 @@ C 类上会把项目**故意删掉**的抽象又拽回来。
 | --- | --- |
 | `distributed/compile.py` | **被裁剪成整体 `torch.compile(model)`**（PP 则每 chunk 一次）。裁掉的是四件互相独立的事：逐 block 编译、async TP `_micro_pipeline_tp`、`regional_inductor`、`capture_scalar_outputs`（后者是 token-choice MoE dispatch 的动态 shape 所需的） |
 | `models/common/moe_sharding.py` | **比"缺一个文件"更深**。旧的未接线 `parallel/sharding.py` 形式已删除；hpmesh 没有 MoE 的 TP 声明或读取声明的运行引擎。它真正的载荷是 **MoE-under-TP**（routed 专家在 TP 轴分片、router 保持 Replicate），而 hpmesh 的 TP 对 `moe_tp_experts` 明确 raise。所以这是 **TP×MoE 组合维度整体没有**，不是漏文件 |
-| `components/optimizer/ema.py`（2026-09 新增，515 行） | 在线 EMA 模型平均；需 config/trainer/checkpointer 三侧接线，hpmesh 无任何消费者 |
+| `components/optimizer/ema.py`（2026-09 新增，515 行） | **已移植**（2026-09-24，`hpmesh/components/optimizer/ema.py`）：在线 EMA 模型平均，config/trainer/checkpointer 三侧接线完成，见下"已从 D 移除" |
 | Ulysses CP × varlen/packed（baff3c681） | redistribution 原语 hpmesh 已有，缺 varlen 内层 attention 路径；`apply_cp` 对该组合保持 fail-fast |
 | 多轮对话 SFT 的 renderer 路径（4a0d8dab3） | 依赖 `renderers==0.1.11` 与上游 `components/renderer.py`（Configurable 系） |
 | `models/common/token_dispatcher.py` 的 TorchAO/DeepEP/HybridEP 三个 dispatcher | 环境依赖型不移植：torchao 非依赖、DeepEP/HybridEP 为 CUDA-only，本机无法验证；`AllToAllTokenDispatcher` 满足同一 dispatch/combine 契约，理由见文件 docstring |
@@ -183,6 +183,16 @@ moe_quantile_balancing` 启用；MoE padding-mask 负载均衡——`MoE.set_pad
 一次性暂存通道（HF layer 签名穿不了 mask），mask 只过滤负载均衡统计
 （tokens_per_expert、aux loss f/p、quantile 直方图），不动 routing 执行，无 mask
 逐位不变；CP/TP 由 `shard_padding_mask_for_cp/tp` 与 token 流同序切分。
+
+**已从 D 移除**（2026-09-24 批 3a 移植）：在线 EMA——`hpmesh/components/optimizer/ema.py`
+（515 行上游 `components/optimizer/ema.py` 的语义移植）：`EMA` 复用
+`OptimizersContainer` 的 flat FQN state-dict 契约，`decay = 2**(-1/(half_life_fraction*num_updates))`
+动态计划或固定 decay，firing count 由 trainer step 推导（resume 不重置 decay），
+`step_bias` 支持阶段重编号，`start_step`/`update_every_n_steps` 门控，可选
+`buffer_patterns` 浮点 buffer 跟踪（整型 buffer 拒绝）；checkpointer 增加 `ema`
+state 键与 `_find_load_step(max_step=)`，trainer/config 完成三侧接线。上游
+DTensor unwrap/rewrap 与 CUDA `torch._foreach_lerp_` 专项未移植（hpmesh 的 FSDP2
+张量本身就是 DTensor，容器 state dict 直接交给 DCP）。
 
 **已从 D 移除**（2026-09-24 批 1 移植）：`CastLinear`——lm_head compute-dtype
 变换，落 `models/common/cast_linear.py`（`nn.Linear` 子类，state-dict FQN 不变），

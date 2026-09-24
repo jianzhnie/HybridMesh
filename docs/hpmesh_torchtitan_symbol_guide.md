@@ -257,8 +257,9 @@ step 1 恢复 optimizer、scheduler、dataloader 和 train state 后完成并保
   `apply_tp` 会拒绝 `moe_tp_experts`，这是正确的 fail-fast。
 - RegionAC/MemoryBudgetAC：分别依赖 `torch_remat`/compile；当前明确不支持。
 - 2026-09-23 审计新增登记（上游 `c6e416bbd..b64103072` 引入）：
-  - `components/optimizer/ema.py`：在线 EMA 模型平均（1b9eef3bd，515 行），需
-    config/trainer/checkpointer 三侧接线，hpmesh 无任何 EMA 消费者。
+  - `components/optimizer/ema.py`：在线 EMA 模型平均（1b9eef3bd，515 行）——**已移植**
+    （批 3a，`hpmesh/components/optimizer/ema.py` + config/trainer/checkpointer
+    三侧接线，checkpoint `ema` 键，见 §4 与 upstream map"已从 D 移除"）。
   - Quantile-balanced MoE routing（f8bb599a7）：**已移植**（批 2，
     `QuantileBalancedTopKRouter` + `QuantileBalancer` + quantile hook；与
     sign-based bias 互斥，`ParallelConfig.moe_quantile_balancing` 启用，见 §4.3）。

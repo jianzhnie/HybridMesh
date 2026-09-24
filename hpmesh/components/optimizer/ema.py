@@ -247,7 +247,10 @@ class EMA(OptimizersContainer):
             ]
             self._update_group(ema_opt, params, decay)
         for ema_opt, model in zip(
-            self._buffer_optimizers, self.model_parts, strict=True
+            # Empty when buffer_patterns is unset: shorter than model_parts.
+            self._buffer_optimizers,
+            self.model_parts,
+            strict=False,
         ):
             buffers: list[torch.Tensor] = [
                 b
@@ -315,7 +318,10 @@ class EMA(OptimizersContainer):
             for p in (p for p in model.parameters() if p.requires_grad):
                 ema_opt.state[p]["ema_params"].copy_(p.detach())
         for ema_opt, model in zip(
-            self._buffer_optimizers, self.model_parts, strict=True
+            # Empty when buffer_patterns is unset: shorter than model_parts.
+            self._buffer_optimizers,
+            self.model_parts,
+            strict=False,
         ):
             for name, b in model.named_buffers():
                 if any(p.search(name) for p in self._buffer_patterns):
