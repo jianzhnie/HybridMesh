@@ -262,6 +262,11 @@ trainer 做 replicated-TP gradient SUM、grad norm/clipping、有限性检查、
 optimizer/scheduler step，并用全局有效 token 数归一化 loss。PP 路径则由 schedule 接管
 microbatch forward/backward，只有末 stage 计算 loss。
 
+可选的 validation 循环（`training.validation_config`，默认关闭）在同一 trainer 上：
+eval 模式 + `no_grad` 跑一次临时 dataloader，loss 按全局有效 token 归一化（与训练
+同一对归约 mesh），不更新参数、不进 checkpoint、不动 `ntokens_seen`；零 batch /
+零有效 token 与 dp>1 的 `steps=-1` 均 loud-raise，PP 组合构造期拒绝。
+
 ### 5.2 mesh 与 ParallelDims
 
 `accelerator/mesh.py` 只提供 `build_parallel_dims` / `build_mesh` 两个入口（trainer 的 PG 引导直接调 `accelerator/dist_utils._init_dist_pytorch`；多 launcher 门面 `init_dist` 保留给独立脚本）；
@@ -401,7 +406,8 @@ vocab-parallel embedding 的全局 `padding_idx` 越界/梯度抑制（上游 #4
 剩余边界（均为 loud-raise，不静默错）：
 
 1. pp+cp / pp+ep 组合未接线；PP+activation checkpoint、PP+chunked loss 与 tied
-   embeddings 的 PP 均明确拒绝。
+   embeddings 的 PP 均明确拒绝；PP × validation 同样构造期拒绝（无 eval-only
+   管线通路，见 §5.1）。
 2. ptrr load balancer 未实现；Ulysses 不支持 packed（BlockMask Q 分片与全长 attention
    冲突，attach 时拒绝）且不与 load balancer 组合。
 3. looped PP schedule 已覆盖 Interleaved1F1B；V 风格（DualPipeV/ZBV）未测，

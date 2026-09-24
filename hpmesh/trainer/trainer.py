@@ -63,6 +63,17 @@ What the migration added, and why each earned its place:
   around the loop and stepped once per iteration, so Kineto traces land on a
   schedule and allocator memory snapshots are written periodically -- plus one
   more if the run dies of an OOM, which is the one that is usually wanted.
+* **Periodic validation**, ported from torchtitan's validator: an eval-mode,
+  gradient-free pass over a fresh dataloader every ``validation.freq`` steps,
+  reporting the summed loss over the *global* valid-token count reduced across
+  DP -- the same normalization the training loss uses, so the two numbers are
+  comparable. Opt-in via ``training.validation_config``; when it is ``None``
+  the loop below is bit-identical to not having the feature. The pass updates
+  no parameters and touches no checkpoint state. Zero batches and zero valid
+  tokens are loud errors, not a silently skipped report, and the two
+  configurations that cannot terminate cleanly (``steps=-1`` with DP > 1, and
+  pipeline parallelism, whose schedule hpmesh drives through a train-shaped
+  seam) are rejected at build time rather than hanging mid-pass.
 
 ``train_step``'s execution order follows torchtitan's and is load-bearing:
 zero the gradients, snapshot the learning rate, read *every* batch the step
@@ -73,7 +84,7 @@ value must be identical across all the batches of a step -- the denominator and
 the reported lr -- are taken before any of them is consumed.
 
 What was NOT ported: torchtitan's component system (``model_spec``,
-``sdc_replayer``, validator, CUDA graphs). Those are infrastructure the loop
+``sdc_replayer``, CUDA graphs). Those are infrastructure the loop
 calls into, not loop logic, and hpmesh has no counterparts to call.
 """
 
@@ -148,7 +159,7 @@ from ..parallel.tensor_parallel.tp import (
 from ..utils.gc import GarbageCollection
 from ..utils.logger_utils import get_logger
 from ..utils.seed import derive_distinct_seed
-from .config import HybridMeshConfig
+from .config import HybridMeshConfig, ValidationConfig
 
 # Rank-aware: the helper installs a handler on rank 0 only, so a torchrun run
 # logs one line per step instead of one per rank.
@@ -208,6 +219,24 @@ class Trainer:
         # stage coordinate, and degree resolution draws no random numbers, so
         # seeding after it leaves every non-PP run bit-identical.
         self.parallel_dims = build_parallel_dims(cfg, self.world_size)
+
+        # Validation's infeasible combinations are rejected here, before the
+        # model and dataloader exist: a ``steps=-1`` pass that cannot terminate
+        # cleanly would otherwise hang on its collectives mid-run, and a
+        # pipeline-parallel pass has no eval seam to run through at all.
+        if cfg.validation is not None:
+            self._check_validation_feasibility(
+                cfg.validation,
+                pp_enabled=(
+                    self.parallel_dims is not None and self.parallel_dims.pp_enabled
+                ),
+                dp_world_size=(
+                    1
+                    if self.parallel_dims is None
+                    else self.parallel_dims.dp_replicate * self.parallel_dims.dp_shard
+                ),
+                training_dataset=cfg.dataloader.dataset,
+            )
 
         # Deterministic seeding BEFORE model build so ranks sharing an SPMD
         # group build identical initial weights -- the precondition for
@@ -1328,6 +1357,221 @@ class Trainer:
             "would be garbage.",
         )
 
+    # -- validation ---------------------------------------------------------------
+
+    @staticmethod
+    def _check_validation_feasibility(
+        validation: ValidationConfig,
+        *,
+        pp_enabled: bool,
+        dp_world_size: int,
+        training_dataset: str,
+    ) -> None:
+        """Reject the validation configurations that cannot terminate cleanly.
+
+        Runs at trainer build time, where the real parallel degrees are known
+        (config-level ``__post_init__`` cannot see them: ``dp_shard`` defaults
+        to the derive-me marker ``-1``). Each rejected combination would
+        otherwise fail later and worse:
+
+        * ``steps=-1`` consumes the finite dataset once, so every rank stops
+          when its own shard is exhausted. With DP > 1 the ranks can exhaust at
+          different iterations and hang on the pass's collectives (the token
+          and loss reductions every rank must enter together).
+        * ``steps=-1`` against the synthetic corpus has no exhaustion at all:
+          the random source is infinite, so "one finite pass" never ends.
+        * Pipeline parallelism drives the schedule through a train-shaped seam
+          (the loss is computed and backwarded *inside* the schedule step);
+          there is no eval-only pipeline path to run a validation pass
+          through, so the combination loud-raises rather than silently
+          skipping validation or training on the pass.
+        """
+        if pp_enabled:
+            raise NotImplementedError(
+                "validation with pipeline parallelism is not supported: "
+                "hpmesh drives the pipeline schedule through its training "
+                "seam, where the last stage's loss is computed and backwarded "
+                "inside the schedule step. There is no eval-only pipeline "
+                "path; run validation with pipeline_parallel_size=1."
+            )
+        if validation.steps != -1:
+            return
+        if dp_world_size > 1:
+            raise ValueError(
+                "validation.steps=-1 runs one finite pass over the dataset "
+                "(the loader is built with repeat=False). With data-parallel "
+                f"degree > 1 ({dp_world_size}), ranks can exhaust at different "
+                "iterations and hang on the validation collectives. Set "
+                "validation.steps to a positive count so every rank runs the "
+                "same number of batches, or run with data-parallel degree 1."
+            )
+        dataset = (
+            training_dataset if validation.dataset is None else validation.dataset
+        )
+        if dataset == "random":
+            raise ValueError(
+                "validation.steps=-1 consumes the dataset once, but the "
+                "'random' corpus is an infinite synthetic source that never "
+                "exhausts. Set validation.steps to a positive count, or name a "
+                "finite validation dataset."
+            )
+
+    def should_validate(self, step: int) -> bool:
+        """Whether a validation pass runs at the end of ``step``.
+
+        Step 1 always validates (a run sees its first eval number immediately,
+        which is the cheap sanity check that the eval path works at all);
+        after that, every ``validation.freq`` steps.
+        """
+        validation = self.cfg.validation
+        return validation is not None and (
+            step == 1 or step % validation.freq == 0
+        )
+
+    @torch.no_grad()
+    def validate(self, step: int) -> None:
+        """Run one eval-mode, gradient-free pass and log its loss.
+
+        The reported number is the pass's summed next-token cross-entropy
+        divided by the *global* valid-token count -- the same normalization as
+        the training loss, over the same two meshes (tokens reduced across DP,
+        the loss sum across the dp*cp*tp ``loss`` view), so the eval and train
+        numbers are directly comparable and identical on every rank.
+
+        The pass is a pure observer: the model runs in eval mode (restored to
+        train mode afterwards, even on error), no gradients are computed, no
+        optimizer or scheduler state moves, and ``ntokens_seen`` -- the
+        checkpointed training counter -- is not touched.
+
+        The dataloader is built fresh per pass and closed when the pass ends:
+        it is a temporary read over the corpus, not training state, so it is
+        neither checkpointed nor shared with the training loader. ``steps=-1``
+        reads it to exhaustion (built with repeat=False); a positive ``steps``
+        bounds the pass (built repeating, so the bound is always reachable).
+
+        Two outcomes are loud errors rather than a silently skipped report: a
+        pass that read zero batches (the dataset supplied less than one batch
+        of tokens on this rank, which concat-then-split packing turns into no
+        rows at all), and a pass over zero valid tokens (every label masked),
+        which has no average to report.
+        """
+        validation = self.cfg.validation
+        assert validation is not None, "validate() is gated by should_validate"
+
+        for part in self.model_parts:
+            part.eval()
+        try:
+            self._validate_body(validation, step)
+        finally:
+            for part in self.model_parts:
+                part.train()
+
+    def _validate_body(self, validation: ValidationConfig, step: int) -> None:
+        parallel_dims = self.parallel_dims
+        # The same mesh split as ``train_step``: the token count is taken from
+        # the unsharded batch, so it is summed over the dp axis alone; the loss
+        # is summed over each rank's own slice of the batch, so it is reduced
+        # over the dp*cp*tp ``loss`` view when the sequence is sharded at all.
+        dp_mesh = (
+            None if parallel_dims is None else parallel_dims.get_optional_mesh("dp")
+        )
+        loss_sharded = parallel_dims is not None and (
+            parallel_dims.dp_cp_enabled or parallel_dims.tp_enabled
+        )
+        loss_mesh = (
+            None
+            if parallel_dims is None
+            else (
+                parallel_dims.get_optional_mesh("loss") if loss_sharded else dp_mesh
+            )
+        )
+
+        dp_rank, dp_world_size = self._dp_rank_world_size()
+        batch_size_per_rank = self._batch_size_per_rank(dp_world_size)
+        validation_dataloader = build_dataloader(
+            self.cfg,
+            dp_rank=dp_rank,
+            dp_world_size=dp_world_size,
+            num_tokens_per_batch=batch_size_per_rank * self.cfg.max_seq_len,
+            repeat=validation.steps != -1,
+            dataset=validation.dataset,
+        )
+
+        accumulated_loss: torch.Tensor | None = None
+        total_global_valid_tokens = torch.zeros(
+            (), dtype=torch.int64, device=self.device
+        )
+        num_steps = 0
+        try:
+            data_iterator = iter(validation_dataloader)
+            while validation.steps == -1 or num_steps < validation.steps:
+                try:
+                    batch = next(data_iterator)
+                except (DataLoaderExhausted, StopIteration):
+                    break
+                labels = batch.labels if isinstance(batch, Batch) else batch["labels"]
+                # Throughput accounting only, mirroring ``batch_generator``:
+                # every label the loader produced counts, whether or not it is
+                # predictable. ``ntokens_seen`` is deliberately not touched --
+                # it is the checkpointed *training* counter.
+                self.metrics.add_tokens(labels.numel())
+                # Counted from the unsharded batch, exactly as in training, so
+                # the dp-axis reduction below counts the whole batch once even
+                # when CP later slices the sequence.
+                local_valid_tokens = self._count_valid_tokens(batch)
+                global_valid_tokens = torch.tensor(
+                    local_valid_tokens, dtype=torch.int64, device=self.device
+                )
+                if dp_mesh is not None:
+                    all_reduce(global_valid_tokens, group=dp_mesh.get_group())
+                if isinstance(batch, dict):
+                    # ``num_valid_tokens`` is the trainer's bookkeeping; a
+                    # plain int among tensors would be splatted into the model
+                    # forward as a kwarg.
+                    batch.pop("num_valid_tokens", None)
+                inputs, labels, extra_kwargs = self._example_model.preprocess_inputs(
+                    self._to_device(batch),
+                    parallel_dims=self.parallel_dims,
+                    parallelism=self.cfg.parallel,
+                    max_context_length=self.cfg.max_seq_len,
+                )
+                with self._param_context(), spmd_context(self.parallel_dims):
+                    logits = self._example_model(inputs, **extra_kwargs)
+                    loss_sum = self._loss_sum(logits, labels)
+                if accumulated_loss is None:
+                    accumulated_loss = loss_sum.clone()
+                else:
+                    accumulated_loss.add_(loss_sum)
+                total_global_valid_tokens.add_(global_valid_tokens)
+                num_steps += 1
+        finally:
+            # Releases the Grain prefetch thread; a no-op for loaders without
+            # one. The loader is temporary, so nothing else holds it open.
+            validation_dataloader.close()
+
+        if accumulated_loss is None:
+            raise ValueError(
+                "Validation ran zero batches on this rank. This happens when "
+                "the validation dataset supplies fewer than one batch of "
+                "tokens on this rank, because concat-then-split packing drops "
+                "partially filled batches. Decrease the per-rank batch size or "
+                "use a larger validation dataset."
+            )
+        num_global_valid_tokens = int(total_global_valid_tokens.item())
+        if num_global_valid_tokens == 0:
+            raise ValueError(
+                "Validation ran on zero valid tokens; cannot compute an "
+                "average validation loss. Ensure the validation batches "
+                "contain unmasked labels."
+            )
+        if loss_mesh is not None:
+            global_loss_sum = accumulated_loss.clone()
+            all_reduce(global_loss_sum, group=loss_mesh.get_group())
+        else:
+            global_loss_sum = accumulated_loss
+        global_avg_loss = float(global_loss_sum) / num_global_valid_tokens
+        self.metrics.log_validation(loss=global_avg_loss, step=step)
+
     # -- the loop ---------------------------------------------------------------
 
     def should_log(self) -> bool:
@@ -1423,6 +1667,13 @@ class Trainer:
                     last_step = self.step == self.cfg.steps
                     if self.checkpointer.save(self.step, last_step=last_step):
                         logger.info(f"Saved checkpoint for step {self.step}")
+
+                    # Validation, after the checkpoint save and before the
+                    # profiler advances -- the reference's order. The pass is
+                    # eval-only and leaves no state behind, so its position in
+                    # the step affects only which step's weights it scores.
+                    if self.should_validate(self.step):
+                        self.validate(self.step)
 
                     # Advances the schedule. After the save, so the profiler's
                     # active iteration covers an ordinary step rather than one

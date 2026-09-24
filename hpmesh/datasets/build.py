@@ -46,26 +46,34 @@ def build_dataloader(
     dp_rank: int,
     dp_world_size: int,
     num_tokens_per_batch: int,
+    repeat: bool = True,
+    dataset: str | None = None,
 ) -> BaseDataLoader:
     """Build the loader a :class:`~hpmesh.trainer.config.HybridMeshConfig` names.
 
-    The config answers everything that describes the *run*; the three keyword
-    arguments answer the two things it cannot. ``config.dataloader`` (a
+    The config answers everything that describes the *run*; the keyword
+    arguments answer the things it cannot. ``config.dataloader`` (a
     ``DataloaderConfig``) names the corpus and how to shuffle, tokenize and pack
     it, while the flat view on the same object supplies the scalars that go with
     it -- ``seed``, ``vocab_size``, ``global_batch_size``, ``max_seq_len``.
 
-    The keywords are all per-rank: ``dp_rank``/``dp_world_size`` say which slice
-    of the corpus this process reads, and ``num_tokens_per_batch`` is the
-    per-rank token count, matching torchtitan's
-    ``num_tokens_per_microbatch_per_dp_rank``. The Grain loader divides every
-    dataset's rows among ``dp_world_size`` ranks and hands each one exactly that
-    many tokens, so the DP slice the trainer used to perform no longer exists on
-    this path.
+    ``dp_rank``/``dp_world_size`` say which slice of the corpus this process
+    reads, and ``num_tokens_per_batch`` is the per-rank token count, matching
+    torchtitan's ``num_tokens_per_microbatch_per_dp_rank``. The Grain loader
+    divides every dataset's rows among ``dp_world_size`` ranks and hands each
+    one exactly that many tokens, so the DP slice the trainer used to perform
+    no longer exists on this path.
+
+    ``repeat=False`` builds a finite, single-pass loader -- the validation
+    loop's shape: a bounded pass sets it so exhaustion (not a step count) ends
+    the pass. ``dataset`` overrides ``config.dataloader.dataset`` for that same
+    caller, so validation can score a held-out corpus without forking the
+    config. Both default to the training behaviour.
     """
     dataloader_config = config.dataloader
     max_context_length = config.max_seq_len
-    if dataloader_config.dataset == "random":
+    dataset_name = dataloader_config.dataset if dataset is None else dataset
+    if dataset_name == "random":
         return RandomTokenDataLoader(
             seed=config.seed,
             vocab_size=config.vocab_size,
@@ -84,8 +92,8 @@ def build_dataloader(
     # and the config layer must not import them. Checked before the tokenizer
     # is built so a bad name fails fast without loading tokenizer assets.
     is_multimodal = (
-        dataloader_config.dataset not in {"local_jsonl", "local_jsonl_sft"}
-        and dataloader_config.dataset not in DATASETS
+        dataset_name not in {"local_jsonl", "local_jsonl_sft"}
+        and dataset_name not in DATASETS
     )
     if is_multimodal:
         try:
@@ -96,16 +104,16 @@ def build_dataloader(
             )
         except ImportError as exc:
             raise ImportError(
-                f"dataset {dataloader_config.dataset!r} is not one of the text "
+                f"dataset {dataset_name!r} is not one of the text "
                 f"recipes {sorted(DATASETS)}, so it was looked up in the "
                 "multimodal registry -- which failed to import. Multimodal "
                 "recipes need the optional dependencies torchvision and Pillow "
                 "(and av for video): install them with `pip install torchvision "
                 "pillow av`, or name a text recipe instead."
             ) from exc
-        if dataloader_config.dataset not in MM_DATASETS:
+        if dataset_name not in MM_DATASETS:
             raise ValueError(
-                f"unknown dataset {dataloader_config.dataset!r}. Expected 'random', "
+                f"unknown dataset {dataset_name!r}. Expected 'random', "
                 f"'local_jsonl', a text recipe {sorted(DATASETS)}, or a "
                 f"multimodal recipe {sorted(MM_DATASETS)}"
             )
@@ -126,7 +134,7 @@ def build_dataloader(
             vision_end_token=dataloader_config.mm_vision_end_token,
             pad_token=dataloader_config.mm_pad_token,
         )
-        recipe = MM_DATASETS[dataloader_config.dataset]
+        recipe = MM_DATASETS[dataset_name]
         # Multimodal samples carry media lists alongside their token fields,
         # so they pack by whole documents (FirstFit) rather than concat-then-
         # split, and the collator reshapes the media into patches. This is not
@@ -139,16 +147,16 @@ def build_dataloader(
         tokenizer = HuggingFaceTokenizer(
             tokenizer_path=dataloader_config.tokenizer_path
         )
-        if dataloader_config.dataset == "local_jsonl":
+        if dataset_name == "local_jsonl":
             recipe = make_local_jsonl(path=dataloader_config.dataset_path)
-        elif dataloader_config.dataset == "local_jsonl_sft":
+        elif dataset_name == "local_jsonl_sft":
             recipe = make_local_jsonl_sft(
                 path=dataloader_config.dataset_path,
                 prompt_field=dataloader_config.prompt_field,
                 response_field=dataloader_config.response_field,
             )
         else:
-            recipe = DATASETS[dataloader_config.dataset]
+            recipe = DATASETS[dataset_name]
         # Both recipes are built the same way and differ only in kind: the
         # discriminating work is in the packing node, never in the collator,
         # which is why the trainer needs no way to tell them apart.
@@ -180,7 +188,7 @@ def build_dataloader(
         dataset_iteration_policy=DatasetIterationPolicy(
             seed=config.seed,
             shuffle=dataloader_config.shuffle,
-            repeat=True,
+            repeat=repeat,
             dp_rank=dp_rank,
             dp_world_size=dp_world_size,
             streaming_shuffle_buffer_size=dataloader_config.streaming_shuffle_buffer_size,

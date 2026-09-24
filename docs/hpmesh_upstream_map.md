@@ -175,6 +175,22 @@ C 类上会把项目**故意删掉**的抽象又拽回来。
 | `distributed/pipeline_parallel.py` 的 `pipeline_with_first_stage_modules` | 多模态 first-stage 模块并入 stage 0；hpmesh PP 当前限 decoder 五部件，无消费者 |
 | DSA（DeepSeek sparse attention）的稠密 additive mask 路径 | 上游 `model.py` 的 `_build_dense_attention_mask` + indexer 支持；**2026-09-24 起 hpmesh wrapper 构造期对 `index_topk` fail-fast**（静默走 flex BlockMask 的错误语义已消除），稠密 mask 执行路径本身仍未移植，无消费者 |
 
+**已从 D 移除**（2026-09-24 批 4 移植）：validation 循环——上游
+`components/validate.py::Validator` 落 `trainer/trainer.py` 的
+`Trainer.validate`/`should_validate`/`_check_validation_feasibility` +
+`trainer/config.py::ValidationConfig`（`training.validation_config`，默认
+None 关闭，关闭时训练循环逐位不变；programmatic-only，同 `ema_config`）。
+语义对齐：eval 模式 + `no_grad`、结束恢复 train；loss 按全局有效 token 数
+归一化，token 计数走 dp mesh、loss 和走 dp×cp×tp loss mesh（与训练 loss 同一
+对 mesh、同一归一化）；每次 pass 新建并关闭临时 dataloader（`repeat=False`
+对应 `steps=-1`），不进 checkpoint、不动 `ntokens_seen`；训练循环内调用点在
+checkpoint save 之后、profiler.step 之前，与上游同序。两条上游 bug fix 一并
+移植：零 batch / 零有效 token 报 `ValueError`（上游 6c2dadbb3），dp>1 拒绝
+`steps=-1`（上游 90b25912f，在 trainer 构造期、真实 dp degree 已知后检查）；
+另对 random 无限语料的 `steps=-1` 同样 fail-fast。PP × validation 未支持：
+hpmesh 的 PP loss 计算内嵌在 schedule 的训练步里，无 `pp_schedule.eval`
+对应的 eval 通路，构造期 `NotImplementedError`（loud-raise，不静默跳过）。
+
 **已从 D 移除**（2026-09-24 批 2 移植）：quantile-balanced MoE routing——
 `QuantileBalancedTopKRouter` + `QuantileBalancer` + `register_moe_quantile_balancing_hook`
 （biased top-(K+1) cutoff、1000-bin 直方图、分位数 mean-centred 覆写 bias），与
