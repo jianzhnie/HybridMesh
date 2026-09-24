@@ -164,9 +164,14 @@ def test_state_dict_round_trip_and_continued_updates() -> None:
         torch.testing.assert_close(_ema_params(restored)[fqn], _ema_params(ema)[fqn])
 
     # A resumed EMA keeps aging from the step number, not from zero: driving
-    # both through the same later steps leaves them identical.
-    _drive(ema, model, range(6, 11))
-    _drive(restored, model, range(6, 11))
+    # both through the same later steps leaves them identical. Bump the model
+    # once per step and fire both EMAs against that single trajectory.
+    for s in range(6, 11):
+        with torch.no_grad():
+            for p in model.parameters():
+                p.add_(0.1 * s)
+        ema.step(s)
+        restored.step(s)
     for fqn in _ema_params(ema):
         torch.testing.assert_close(_ema_params(restored)[fqn], _ema_params(ema)[fqn])
 
@@ -183,6 +188,12 @@ def test_a_resume_reproduces_the_uninterrupted_average() -> None:
 
     torch.manual_seed(0)
     resumed_model = nn.Sequential(nn.Linear(4, 4), nn.Linear(4, 2))
+    # Replay the pre-checkpoint weight trajectory: the resume also reloads the
+    # model checkpoint at step 5, so the weights start from init + sum of the
+    # step 1..5 bumps, not from init.
+    with torch.no_grad():
+        for p in resumed_model.parameters():
+            p.add_(0.1 * sum(range(1, 6)))
     resumed = EMA(model_parts=[resumed_model])
     resumed.load_state_dict(saved)
     _drive(resumed, resumed_model, range(6, 11))
