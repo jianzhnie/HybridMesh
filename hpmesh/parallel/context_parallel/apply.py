@@ -88,12 +88,15 @@ def apply_cp(
                 "sharded in, so the rearrangement lands in the mask and cancels."
             )
         if getattr(model_config, "attn_mask_type", "causal") == "block_causal":
-            raise ValueError(
-                "Ulysses CP does not support packed sequences "
-                "(attn_mask_type='block_causal'): the wrapper hands every CP "
-                "kernel a Q-sharded BlockMask, but ulysses attends the full "
-                "sequence and cannot recover the unsharded document mask. "
-                "Use strategy='kv_allgather' for packed runs."
+            # Packed sequences ARE supported: the all-to-all reassembles the
+            # full token stream on every rank before attention, so the
+            # full-length document mask applies unsharded (upstream's varlen
+            # ulysses semantics). What makes it work is the wrapper passing
+            # that mask FULL-LENGTH rather than Q-sharded -- latched through
+            # ``set_cp_mesh`` below, and consumed in the kernel by mask length.
+            logger.info(
+                "Ulysses CP with packed sequences: the document mask is passed "
+                "full-length (unsharded) to every rank."
             )
         # TP shards heads first, so what ulysses must divide evenly is each
         # rank's local head count -- equivalently, the global count must divide
@@ -130,6 +133,6 @@ def apply_cp(
             )
         attn_mod._titan_flex_kernel = CPFlexKernel(cp_mesh=cp_mesh, strategy=strategy)
 
-    model.set_cp_mesh(cp_mesh, load_balancer=load_balancer)
+    model.set_cp_mesh(cp_mesh, load_balancer=load_balancer, strategy=strategy)
     logger.info("Applied CP (%s) with degree %d", strategy, cfg.cp)
     return model

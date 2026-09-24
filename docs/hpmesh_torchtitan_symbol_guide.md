@@ -167,9 +167,9 @@ step 1 恢复 optimizer、scheduler、dataloader 和 train state 后完成并保
 
 | hpmesh 符号 | TorchTitan 对应符号 | 差异与正确性 |
 |---|---|---|
-| `apply_cp` | `distributed/context_parallel/api.py` + 模型 parallelize | 给 HF attention 注入 kernel；校验 backend、mesh 和 Ulysses heads，**通过（适配）** |
+| `apply_cp` | `distributed/context_parallel/api.py` + 模型 parallelize | 给 HF attention 注入 kernel；校验 backend、mesh 和 Ulysses heads；2026-09-25 起 ulysses×packed 不再 fail-fast（经 `set_cp_mesh(strategy=...)` 闩锁策略），**通过（适配）** |
 | `shard_batch_for_cp/tp` | 上游 input sharding/post-dataloading | hpmesh 显式切 token tensors，保持 mask/positions 契约，**通过** |
-| `CPFlexKernel`（KV all-gather / Ulysses 两条路径） | `models/common/cp_attention.py` 同名意图 | 剥掉上游 CPInnerAttention/FlexInnerAttention 类层，redistribution 与 kernel 合在 `context_parallel/cp_kernel.py`；KV all-gather 的 backward reduce-scatter dtype 可配（默认 fp32），Ulysses 为 seq↔head all-to-all，均与上游一致。2026-09-23 起独立的 `primitives.py` 已删除（零调用者的重复实现）；2026-09-24 起 ulysses 的 `_full_length_causal_mask` 复用 `masks.create_attention_mask`（与 wrapper 同 builder、同参数），本地 inspect 兼容副本已删 | **通过（适配）** |
+| `CPFlexKernel`（KV all-gather / Ulysses 两条路径） | `models/common/cp_attention.py` 同名意图 | 剥掉上游 CPInnerAttention/FlexInnerAttention 类层，redistribution 与 kernel 合在 `context_parallel/cp_kernel.py`；KV all-gather 的 backward reduce-scatter dtype 可配（默认 fp32），Ulysses 为 seq↔head all-to-all，均与上游一致。2026-09-23 起独立的 `primitives.py` 已删除（零调用者的重复实现）；2026-09-24 起 ulysses 的 `_full_length_causal_mask` 复用 `masks.create_attention_mask`（与 wrapper 同 builder、同参数），本地 inspect 兼容副本已删；2026-09-25 起 ulysses 支持 packed/varlen——wrapper 全长透传文档 mask，kernel 按 mask Q 长度分派（上游 `UlyssesCPVarlenInnerAttention` 语义，varlen 元数据不随 token 分片） | **通过（适配）** |
 | `swap_hf_moe_blocks` | transformers backend `moe_replacement.py` | 上游重新初始化，hpmesh 搬运 HF 权重；不是共享实现，等价性测试覆盖，**通过（适配）** |
 | `apply_ep` | 上游模型 EP parallelize | 先 swap 再建立 dispatcher/组，**通过（适配）** |
 | `generate_llm_fqn_per_model_part` | transformers backend `pipeline.py` | 加权切层公式一致，**通过** |
@@ -278,9 +278,12 @@ step 1 恢复 optimizer、scheduler、dataloader 和 train state 后完成并保
     `MoE.set_padding_mask` 通道；mask 只过滤统计不动执行，无 mask 逐位不变，
     见 §4.3）。
   - `CastLinear`（lm_head compute-dtype 变换，150c4f73a 配套）。
-  - Ulysses CP × varlen/packed（baff3c681）：上游 `UlyssesCPVarlenInnerAttention`
-    已支持；hpmesh redistribution 原语已具备，缺 varlen 内层路径，`apply.py` 对该
-    组合保持 fail-fast。
+  - Ulysses CP × varlen/packed（baff3c681）：**已移植**（2026-09-25，批 5）。B 类
+    适配：不复制 `UlyssesCPVarlenInnerAttention` 类层次；wrapper 在 ulysses 策略下
+    全长透传文档 mask（`set_cp_mesh(strategy=...)`），kernel 按 mask Q 长度分派；
+    `apply_cp` 对该组合的 fail-fast 移除。2-rank 等价性测试
+    `cp_ulysses_varlen_equivalence.py` 已写，本机 torch 2.2.2 无 flex，环境未覆盖
+    待复跑。详见 upstream map"已从 D 移除"。
   - 多轮对话 SFT 的 renderer 路径（4a0d8dab3）：依赖 `renderers==0.1.11` 与上游
     `components/renderer.py`；`datasets/text/text.py` 的 `TODO(data-sft-multiturn)`
     仍有效。

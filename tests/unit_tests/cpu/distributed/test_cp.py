@@ -127,9 +127,10 @@ class _StubModel(torch.nn.Module):
             )
         )
         self.layers = torch.nn.ModuleList()
+        self.cp_strategy = None
 
-    def set_cp_mesh(self, cp_mesh, load_balancer=None) -> None:
-        pass
+    def set_cp_mesh(self, cp_mesh, load_balancer=None, strategy="kv_allgather") -> None:
+        self.cp_strategy = strategy
 
 
 @pytest.fixture
@@ -172,6 +173,28 @@ def test_ulysses_kv_heads_use_the_local_count_too(tp_cp_mesh) -> None:
     model = _StubModel(num_attention_heads=8, num_key_value_heads=2)
     with pytest.raises(ValueError, match="num_key_value_heads"):
         apply_cp(model, tp_cp_mesh, _ulysses_cfg(tp=2))
+
+
+def test_ulysses_packed_is_accepted_and_the_strategy_is_latched(tp_cp_mesh) -> None:
+    """Ulysses x packed is a supported combination, and the wrapper must be
+    told the strategy -- its mask handling branches on it (a packed document
+    mask goes to the kernel full-length under ulysses, Q-sharded otherwise).
+
+    Non-vacuity: the same attach under the default strategy must NOT latch
+    'ulysses', so a stub that recorded a constant cannot pass both halves.
+    """
+    model = _StubModel(num_attention_heads=4, num_key_value_heads=4)
+    model.model.config.attn_mask_type = "block_causal"
+    apply_cp(model, tp_cp_mesh, _ulysses_cfg(tp=2))
+    assert model.cp_strategy == "ulysses"
+
+    model = _StubModel(num_attention_heads=4, num_key_value_heads=4)
+    apply_cp(
+        model,
+        tp_cp_mesh,
+        ParallelConfig(tensor_parallel_size=2, context_parallel_size=2),
+    )
+    assert model.cp_strategy == "kv_allgather"
 
 
 # -- the ulysses full-length mask ----------------------------------------------

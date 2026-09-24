@@ -301,7 +301,11 @@ MoE-under-TP 同样明确拒绝。不要把这些 loud-raise/复制退化写成�
 `apply_cp`（cp>1）walk 每层 attention module 并 attach `CPFlexKernel`
 （`context_parallel/cp_kernel.py`），支持两条真实路径：默认 KV all-gather（K/V 收成
 全长，Q 保持 token 分片），以及 Ulysses（token↔head all-to-all）。Ulysses 要求 heads
-可被 TP×CP 整除，并拒绝 load balancer 与 packed BlockMask 组合。输入分片由 wrapper 的
+可被 TP×CP 整除，并拒绝 load balancer 组合；packed（block_causal）语料自 2026-09-25
+起受支持——all-to-all 在 attention 前把全长 token 流重组到每个 rank，因此 wrapper 把
+文档 mask 以全长（不分片）形式交给 kernel（varlen 语义：文档结构是全局元数据，token
+分片不得切割），kernel 按 mask 的 Q 长度区分全长文档 mask 与 Q 分片 causal mask。输入
+分片由 wrapper 的
 preprocessing 路径调用：`context_parallel/input_shard.py` 的 `shard_batch_for_cp`
 （封装 torch 私有 `_context_parallel_shard`，支持 headtail load balancer）把
 input_ids/labels/positions 同步切片；BlockMask 只沿 Q 维分片
@@ -423,8 +427,9 @@ vocab-parallel embedding 的全局 `padding_idx` 越界/梯度抑制（上游 #4
 1. pp+cp / pp+ep 组合未接线；PP+activation checkpoint、PP+chunked loss 与 tied
    embeddings 的 PP 均明确拒绝；PP × validation 同样构造期拒绝（无 eval-only
    管线通路，见 §5.1）。
-2. ptrr load balancer 未实现；Ulysses 不支持 packed（BlockMask Q 分片与全长 attention
-   冲突，attach 时拒绝）且不与 load balancer 组合。
+2. ptrr load balancer 未实现；Ulysses 不与 load balancer 组合（packed/varlen 自
+   2026-09-25 起支持，文档 mask 全长透传，见 §CP 与
+   `tests/integration_tests/cp_ulysses_varlen_equivalence.py`）。
 3. looped PP schedule 已覆盖 Interleaved1F1B；V 风格（DualPipeV/ZBV）未测，
    `pipeline_parallel_schedule_csv` 拒绝。
 4. EP 支持 Qwen3Moe、OLMoE、Mixtral、DeepSeek-V2/V3、GLM4 的共同可表示布局；GPT-OSS

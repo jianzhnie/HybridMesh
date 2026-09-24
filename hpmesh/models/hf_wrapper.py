@@ -538,6 +538,7 @@ class HFTransformerModel(nn.Module):
 
         self.cp_mesh = None
         self._cp_load_balancer = None
+        self._cp_strategy = "kv_allgather"
 
         # The decoder is the text stack; lm_head is its sibling on the CausalLM.
         # Stored with object.__setattr__ on purpose: a plain ``self._decoder = ...``
@@ -632,15 +633,20 @@ class HFTransformerModel(nn.Module):
 
     # -- HF integration hooks --------------------------------------------------
 
-    def set_cp_mesh(self, mesh, *, load_balancer: str | None = None) -> None:
+    def set_cp_mesh(
+        self, mesh, *, load_balancer: str | None = None, strategy: str = "kv_allgather"
+    ) -> None:
         """Record the CP mesh so logit dumps can tag their CP coordinate.
 
-        Also records the CP load-balancer type: the trainer shards the batch
-        with it, and the forward's BlockMask Q-shard must rearrange Q the same
-        way or the mask indexes the wrong queries.
+        Also records the CP load-balancer type and strategy: the trainer shards
+        the batch with the balancer, and the forward's BlockMask handling must
+        match the strategy -- kv_allgather attends gathered K/V against a
+        Q-sharded mask, while ulysses reassembles the full sequence in the
+        all-to-all and needs a packed corpus's document mask full-length.
         """
         self.cp_mesh = mesh
         self._cp_load_balancer = load_balancer
+        self._cp_strategy = strategy
 
     @property
     def tp_plan(self) -> dict[str, str]:
@@ -817,15 +823,23 @@ class HFTransformerModel(nn.Module):
             # rank's positions shard, which is what ``_get_cp_attention_masks``
             # does. Packed cannot: ``positions`` is about to be sharded and the
             # document structure is not recoverable from a shard of it, so the
-            # full-length mask is built first and Q-sharded to match. The GQA
+            # full-length mask is built first. What happens to it next depends
+            # on the strategy: kv_allgather attends gathered full-length K/V
+            # against local queries, so the mask is Q-sharded to match (the GQA
             # head count still divides by cp -- sharding Q does not change how
-            # many Q heads a rank owns.
+            # many Q heads a rank owns); ulysses all-to-all's the FULL sequence
+            # onto every rank before attention, so the document mask stays
+            # full-length and unsharded -- the varlen semantics, where the
+            # document structure is global metadata that the token shard must
+            # not cut. Both decisions are config-keyed, hence rank-symmetric.
             if packed:
-                attention_masks = shard_attention_mask_for_cp(
-                    self.get_attention_masks(positions=positions),
-                    cp_mesh,
-                    self._cp_load_balancer,
-                )
+                attention_masks = self.get_attention_masks(positions=positions)
+                if self._cp_strategy != "ulysses":
+                    attention_masks = shard_attention_mask_for_cp(
+                        attention_masks,
+                        cp_mesh,
+                        self._cp_load_balancer,
+                    )
                 if self.model.config._attn_implementation == _ATTN_IMPLEMENTATION:
                     extra_kwargs["attention_masks"] = attention_masks
             inputs, labels, positions = shard_batch_for_cp(
@@ -898,34 +912,41 @@ class HFTransformerModel(nn.Module):
         )
 
     def _get_cp_attention_masks(self, positions: torch.Tensor):
-        """Build the BlockMask for a CP forward: full-length, then Q-sharded.
+        """Build the BlockMask for a CP forward: full-length, strategy-shaped.
 
         Under CP, ``positions`` is this rank's shard of the sequence (possibly
         load-balancer-rearranged), so it cannot describe the full document
-        structure: the mask is built over the FULL sequence and then sharded
-        along its Q axis, matching how the CP kernel's gathered K/V stay
-        full-length. ``get_attention_masks`` builds the full mask from an
-        arange -- valid because only the causal mod is taken here.
+        structure: the mask is built over the FULL sequence. kv_allgather then
+        needs it sharded along its Q axis, matching how the CP kernel's
+        gathered K/V stay full-length. Ulysses needs it as built: its
+        all-to-all reassembles the full sequence before attention, and the
+        kernel would only discard a Q-sharded mask and rebuild this very one.
+        ``get_attention_masks`` builds the full mask from an arange -- valid
+        because only the causal mod is taken here.
 
         Packed batches (``block_causal``) cannot take this path: the document
         mask needs the full positions, which only the caller has. Build the
-        full-length mask with ``get_attention_masks(full_positions)``, Q-shard
-        it with ``shard_attention_mask_for_cp``, and pass it as
-        ``attention_masks``.
+        full-length mask with ``get_attention_masks(full_positions)`` and pass
+        it as ``attention_masks`` -- Q-sharded by ``shard_attention_mask_for_cp``
+        for kv_allgather, full-length and unsharded for ulysses.
         """
         if getattr(self.model.config, "attn_mask_type", "causal") == "block_causal":
             raise ValueError(
                 "Context parallel with packed sequences needs a prebuilt mask: "
                 "build the full-length BlockMask with get_attention_masks from "
-                "the FULL positions, Q-shard it with shard_attention_mask_for_cp, "
-                "and pass it to forward as attention_masks. The positions this "
-                "forward receives are already CP-sharded and cannot describe the "
-                "full document structure."
+                "the FULL positions and pass it to forward as attention_masks "
+                "-- Q-sharded with shard_attention_mask_for_cp under "
+                "'kv_allgather', or full-length (unsharded) under 'ulysses', "
+                "whose all-to-all reassembles the full sequence on every rank. "
+                "The positions this forward receives are already CP-sharded and "
+                "cannot describe the full document structure."
             )
         cp_size = self.cp_mesh.size()
         full_len = positions.shape[0] * cp_size
         full_positions = torch.arange(full_len, device=positions.device)
         mask = self.get_attention_masks(positions=full_positions)
+        if self._cp_strategy == "ulysses":
+            return mask
         return shard_attention_mask_for_cp(mask, self.cp_mesh, self._cp_load_balancer)
 
     # -- forward ---------------------------------------------------------------

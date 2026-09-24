@@ -169,10 +169,30 @@ C 类上会把项目**故意删掉**的抽象又拽回来。
 | `distributed/compile.py` | **已移植**（2026-09-24，批 8）：逐 block compile、async TP `_micro_pipeline_tp`、`regional_inductor`、`capture_scalar_outputs` 四件全部落 `hpmesh/parallel/compile.py` + `CompileConfig`，见下"已从 D 移除" |
 | `models/common/moe_sharding.py` | **比"缺一个文件"更深**。旧的未接线 `parallel/sharding.py` 形式已删除；hpmesh 没有 MoE 的 TP 声明或读取声明的运行引擎。它真正的载荷是 **MoE-under-TP**（routed 专家在 TP 轴分片、router 保持 Replicate），而 hpmesh 的 TP 对 `moe_tp_experts` 明确 raise。所以这是 **TP×MoE 组合维度整体没有**，不是漏文件 |
 | `components/optimizer/ema.py`（2026-09 新增，515 行） | **已移植**（2026-09-24，`hpmesh/components/optimizer/ema.py`）：在线 EMA 模型平均，config/trainer/checkpointer 三侧接线完成，见下"已从 D 移除" |
-| Ulysses CP × varlen/packed（baff3c681） | redistribution 原语 hpmesh 已有，缺 varlen 内层 attention 路径；`apply_cp` 对该组合保持 fail-fast |
+| Ulysses CP × varlen/packed（baff3c681） | **已移植**（2026-09-25，批 5）：`apply_cp` 不再 fail-fast，wrapper 全长透传文档 mask、kernel 按 mask Q 长度分派，见下"已从 D 移除" |
 | 多轮对话 SFT 的 renderer 路径（4a0d8dab3） | 依赖 `renderers==0.1.11` 与上游 `components/renderer.py`（Configurable 系） |
 | `models/common/token_dispatcher.py` 的 TorchAO/DeepEP/HybridEP 三个 dispatcher | 环境依赖型不移植：torchao 非依赖、DeepEP/HybridEP 为 CUDA-only，本机无法验证；`AllToAllTokenDispatcher` 满足同一 dispatch/combine 契约，理由见文件 docstring |
 | DSA（DeepSeek sparse attention）的稠密 additive mask 路径 | 上游 `model.py` 的 `_build_dense_attention_mask` + indexer 支持；**2026-09-24 起 hpmesh wrapper 构造期对 `index_topk` fail-fast**（静默走 flex BlockMask 的错误语义已消除），稠密 mask 执行路径本身仍未移植，无消费者 |
+
+**已从 D 移除**（2026-09-25 批 5 移植）：Ulysses CP × varlen/packed（上游
+baff3c681）——上游形态是把 Ulysses 的 token↔head resharding 提为
+`UlyssesCPInnerAttention` 共享层，`UlyssesCPVarlenInnerAttention` 借 MRO 把
+`super().forward` 派发到 `VarlenInnerAttention`；varlen 元数据（cu_seqlens）不随输入
+分片（`cp_shard` 把 `attention_masks` 摘出再原样放回），因为 all-to-all 后每个 rank
+都持有全长 token 流。hpmesh 按 B 类语义适配、不复制类层次：packed 语料的"varlen
+元数据"在 HF/flex 集成里是烘进 BlockMask 的文档结构，因此
+`hf_wrapper.preprocess_inputs` 在 `ulysses` 策略下把全长文档 mask **不 Q 分片**透传
+（`set_cp_mesh` 新增 `strategy` 闩锁），`CPFlexKernel._forward_ulysses` 按 mask 的 Q
+长度 == 全长序列 分派：全长即用传入 mask，否则照旧重建全长 causal mask。决策全部
+config/shape 驱动、rank 对称。`apply_cp` 对 ulysses×`block_causal` 的 fail-fast 移除，
+ulysses×load-balancer 拒绝与 heads÷(tp×cp) 校验不变；不启用 varlen 的稠密路径逐位不
+变（kernel 重建的 causal mask 与 wrapper 同源同参）。测试：
+`tests/integration_tests/cp_ulysses_varlen_equivalence.py`（2-rank gloo：seam 全长
+mask 契约、分片 logits/loss == 单卡稠密 block-causal 参考、SDPA 内层下前后向
+collective 对偶与 varlen mask 梯度等价、non-vacuity 反证）——本机 torch 2.2.2 无
+flex 模块，**环境未覆盖，待 torch≥2.12 + 目标设备复跑**；单测补
+`test_ulysses_packed_is_accepted_and_the_strategy_is_latched`。上游 GPT-OSS 的
+Ulysses 拒绝（per-head sinks 只走 TP 分片）不适用：hpmesh 尚无 GPT-OSS 支持。
 
 **已从 D 移除**（2026-09-24 批 8 移植）：`distributed/compile.py`——四件互相独立的
 能力全部落 `hpmesh/parallel/compile.py::apply_compile`，由
