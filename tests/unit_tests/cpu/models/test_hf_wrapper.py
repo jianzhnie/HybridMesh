@@ -498,3 +498,68 @@ def test_wrapper_forward_returns_logits_the_trainer_can_score() -> None:
     assert row_loss.ndim == 0
     # Row-final positions predict nothing, so they contribute nothing.
     assert float(row_loss) < float(loss_sum)
+
+
+# -- unsupported-model and experts-kernel guards ------------------------------
+
+
+def _qwen3_config():
+    return build_model_config(
+        "qwen3",
+        seq_len=64,
+        arch_overrides={
+            "vocab_size": _VOCAB,
+            "hidden_size": _HIDDEN,
+            "intermediate_size": 64,
+            "num_hidden_layers": 2,
+            "num_attention_heads": 4,
+            "num_key_value_heads": 2,
+        },
+    )
+
+
+def test_a_dsa_model_is_rejected_loudly() -> None:
+    """DSA needs a dense additive mask; a flex BlockMask would be silently wrong.
+
+    ``index_topk`` is the DSA-specific config attr (torchtitan's ``_uses_dsa``).
+    The guard fires before class resolution, so any architecture object works
+    for this probe.
+    """
+    config = _qwen3_config()
+    config.index_topk = 16
+
+    with pytest.raises(NotImplementedError, match="sparse attention"):
+        HFTransformerModel(config)
+
+
+def test_an_unknown_experts_implementation_is_rejected() -> None:
+    """A typo must not silently fall back to some other kernel."""
+    config = _qwen3_config()
+    config.experts_implementation = "flash_mm"
+
+    with pytest.raises(ValueError, match="experts_implementation"):
+        HFTransformerModel(config)
+
+
+def test_an_unsettable_experts_implementation_is_rejected() -> None:
+    """Honor the request or fail -- never substitute (torchtitan's semantics).
+
+    Dense Qwen3 has no ``@use_experts_implementation`` machinery, so asking it
+    for grouped_mm cannot be honored.
+    """
+    config = _qwen3_config()
+    config.experts_implementation = "grouped_mm"
+
+    with pytest.raises(ValueError, match="does not support a settable experts"):
+        HFTransformerModel(config)
+
+
+def test_native_experts_implementation_is_the_default_and_builds() -> None:
+    """The default leaves the HF model's own experts kernel untouched."""
+    config = _qwen3_config()
+    assert getattr(config, "experts_implementation", "native") == "native"
+
+    model = HFTransformerModel(config).eval()
+
+    # hpmesh never rewrites the kernel choice on the native path.
+    assert getattr(model.model.config, "_experts_implementation", None) is None

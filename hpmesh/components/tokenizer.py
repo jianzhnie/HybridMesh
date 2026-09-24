@@ -490,6 +490,24 @@ class HuggingFaceTokenizer(BaseTokenizer):
         """Convert ID to token."""
         return self.tokenizer.id_to_token(token_id)
 
+    def apply_chat_template(
+        self, messages: Sequence[Mapping[str, Any]], **kwargs
+    ) -> str:
+        """Render messages, auto-injecting the special tokens templates expect.
+
+        Some HF chat templates reference ``bos_token``/``eos_token`` as Jinja
+        variables; rendering without them fails or substitutes an empty string
+        silently. Inject them (and the generation-prompt default, matching
+        torchtitan's ``HFBackendTokenizer``) as defaults only -- any caller
+        that passes the kwargs explicitly wins. SFT full-conversation renders
+        must pass ``add_generation_prompt=False`` explicitly, as
+        ``datasets/text/text.py`` does.
+        """
+        kwargs.setdefault("bos_token", self.bos_token or "")
+        kwargs.setdefault("eos_token", self.eos_token or "")
+        kwargs.setdefault("add_generation_prompt", True)
+        return super().apply_chat_template(messages, **kwargs)
+
 
 class MultiModalTokenizer(HuggingFaceTokenizer):
     """Single source of truth for multimodal special tokens.
