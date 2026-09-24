@@ -44,6 +44,7 @@ from transformers.modeling_utils import AttentionInterface
 from ..accelerator import dist_utils
 from ..components.loss import next_token_targets
 from ..datasets.random_data import Batch
+from ..parallel.compile import maybe_regional_inductor
 from ..parallel.context_parallel import (
     shard_attention_mask_for_cp,
     shard_batch_for_cp,
@@ -111,9 +112,16 @@ def _flex_attention_hf(module, query, key, value, attention_mask, **kwargs):
     """
     kernel = getattr(module, "_titan_flex_kernel", None)
     if kernel is None:
-        return flex_attention_forward(
-            module, query, key, value, attention_mask, **kwargs
-        )
+        # Mark the flex region so that, when the enclosing model is compiled
+        # with a non-inductor backend, regional_inductor scoops just this
+        # region into an inductor sub-compile (see parallel/compile.py). A
+        # null context on the default inductor / eager paths, so no dead
+        # metadata is emitted. Empty configs: inductor defaults -- hpmesh
+        # runs HF's flex integration, not its own compiled-flex instance.
+        with maybe_regional_inductor({}):
+            return flex_attention_forward(
+                module, query, key, value, attention_mask, **kwargs
+            )
     out = kernel(query, key, value, module=module, block_mask=attention_mask, **kwargs)
     return out, None
 
@@ -594,6 +602,16 @@ class HFTransformerModel(nn.Module):
     @rotary_emb.setter
     def rotary_emb(self, value: nn.Module | None) -> None:
         self._decoder.rotary_emb = value
+
+    @property
+    def uses_flex_attention(self) -> bool:
+        """Whether the decoder routes attention through the flex kernel.
+
+        Read by the compile step: flex has only an inductor lowering, so a
+        non-inductor compile backend must either scoop the flex region
+        (``aot_eager`` + regional_inductor) or be rejected.
+        """
+        return self.model.config._attn_implementation == _ATTN_IMPLEMENTATION
 
     @property
     def enable_weight_tying(self) -> bool:

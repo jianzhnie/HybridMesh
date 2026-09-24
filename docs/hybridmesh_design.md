@@ -239,9 +239,18 @@ def apply_fsdp(model, mesh, cfg, parallel_dims) -> nn.Module # fully_shard/
 ```
 pp>1 时转入 pipeline_parallel.apply_pp（切 stage -> 每 part 过 tp/compile/fsdp
 -> 建 schedule），返回 PipelineParallelSetup；pp=1 时保持：
-apply_tp -> apply_ep -> apply_cp -> apply_ac -> torch.compile(可选) -> apply_fsdp
+apply_tp -> apply_ep -> apply_cp -> apply_ac -> compile(可选) -> apply_fsdp
 # AC 包住已经 TP/EP/CP 改造的层；FSDP 最后，outer wraps inner
 ```
+
+compile 一步是 `parallel/compile.py::apply_compile`：默认整体
+`torch.compile(model, backend="inductor")`；`training.compile_config`（`CompileConfig`，
+默认全关）逐开关打开逐 block compile（`per_block`，`Module.compile` 就地）、async TP
+（`_micro_pipeline_tp` + symm-mem 注册，需 compile+tp>1，配置期校验，装配期对旧
+torch/无 mesh loud-raise）、regional_inductor（`backend="aot_eager"` 且模型走 flex 时
+把 flex region scoop 进 inductor，annotation 在 wrapper 的 `_flex_attention_hf`）与
+`capture_scalar_outputs`（编译的 model part 含 token-choice MoE block 时设置，dense
+不动该全局量）。PP 下每 chunk 过同一函数，顺序与 pp=1 一致。
 
 模型内部组件（`models/common/*`）不接收 cfg、不 import trainer，需要的分布式状态全部
 走线程局部上下文：`spmd_context(parallel_dims)` 是唯一的 ambient 状态入口（trainer 在

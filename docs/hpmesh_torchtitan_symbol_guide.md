@@ -177,6 +177,7 @@ step 1 恢复 optimizer、scheduler、dataloader 和 train state 后完成并保
 | `apply_pp`, `build_pipeline_schedule` | `distributed/pipeline_parallel.py` | hpmesh 直接消费 HF 五部件契约，**通过（适配）** |
 | `apply_pp(first_stage_module_fqns=...)`, `_prepend_first_stage_modules` | 同文件 `pipeline_with_first_stage_modules` | 额外顶层模块并入 stage 0：仅作用自动切分，存在的 FQN 按序前插，已占有/重复 FQN raise、缺失跳过，显式 `module_fqns_per_model_part` 给定时忽略并告警（同上游委托语义）；`split_model_into_stages` 配套把 wrapper `named_children()` 不呈现的额外顶层模块在非属主 stage 置 `Identity`（上游 "pruned on other stages" 语义），装五部件的容器经"包含已呈现部件"判定跳过。stage FQN 稳定、默认 None 逐位不变，**通过（适配）** |
 | `apply_ac`, selective helpers, `_apply_memory_budget` | `distributed/activation_checkpoint.py` | FullAC/SelectiveAC 已移植，**通过**；MemoryBudgetAC 已移植为 `mode='memory_budget'` + `MemoryBudgetACConfig`（设 `torch._functorch.config.activation_memory_budget`，需 compile，torch 无 knob 时 loud-raise），见 §9.1；RegionAC 未移植（配置即 `NotImplementedError`）。FullAC 的 `determinism_check`/`debug` 旋钮未暴露（固定默认值），登记于此 |
+| `apply_compile`, `_maybe_enable_async_tp`, `_maybe_regional_inductor_backend`, `maybe_regional_inductor` | `distributed/compile.py` 同名函数 | 四件全移植为 `parallel/compile.py` + `CompileConfig`（`training.compile_config`，默认全关 = 旧整体 compile 逐位不变）：逐 block compile 用 `Module.compile` 就地（`per_block=True`）；async TP 设 `_micro_pipeline_tp` + symm-mem 注册（按 group 名去重），配置期拒无 compile/tp=1，装配期对无 mesh/旧 torch loud-raise；regional_inductor 仅 `aot_eager`×flex 触发（wrapper `uses_flex_attention` 判定，annotation 在 `_flex_attention_hf`，inductor_configs 传空），flex×其他 backend `ValueError`、torch 无该模块 `NotImplementedError`；`capture_scalar_outputs` 按上游条件（`_iter_moe_layers` 非空）设置，dense 不动。上游的 `skip_fwd_side_effects_in_bwd_under_checkpoint` 与 FakeTensorMode monkeypatch 未移植（登记于 upstream map），**通过（适配）** |
 
 ## 6. 数据系统
 
@@ -253,8 +254,13 @@ step 1 恢复 optimizer、scheduler、dataloader 和 train state 后完成并保
 
 ### 9.1 真缺口
 
-- `distributed/compile.py`：hpmesh 只有整体 `torch.compile`；没有逐 block compile、async
-  TP micro-pipeline、regional inductor 和 token-choice 动态 scalar capture。
+- `distributed/compile.py`：**已移植**（2026-09-24 批 8，`parallel/compile.py::apply_compile`
+  + `CompileConfig`）。逐 block compile（`per_block`）、async TP（`_micro_pipeline_tp`
+  + symm-mem，配置期/装配期双层 loud-raise）、regional_inductor（`aot_eager`×flex
+  才 scoop，annotation 在 `_flex_attention_hf`）、`capture_scalar_outputs`（含
+  token-choice MoE block 时设置，dense 不动）四件各自独立开关，默认全关即旧整体
+  compile 逐位不变。未移植登记：`skip_fwd_side_effects_in_bwd_under_checkpoint`、
+  FakeTensorMode monkeypatch、`components` 列表。见 §5 符号行与 upstream map。
 - `models/common/moe_sharding.py`：缺少的是 **TP×MoE 整个组合能力**，不是一个文件。
   `apply_tp` 会拒绝 `moe_tp_experts`，这是正确的 fail-fast。
 - RegionAC：依赖 `torch_remat` 包与上游 `Module.configure_remat_regions` 协议，hpmesh
