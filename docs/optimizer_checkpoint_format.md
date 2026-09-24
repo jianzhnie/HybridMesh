@@ -1,84 +1,74 @@
-# Optimizer checkpoint format migration
+# Optimizer checkpoint 格式迁移
 
-This note records the one breaking change in the `OptimizersContainer` change
-(commit `0fd6cbe`): **optimizer state on disk has a new layout.**
+本文记录 `OptimizersContainer` 改动（commit `0fd6cbe`）中唯一的破坏性变更：
+**磁盘上的 optimizer state 采用了新布局。**
 
-## Why
+## 原因
 
-The old layout keyed optimizer state by *positional* parameter index. Under
-pipeline parallelism every stage's optimizer numbers its own parameters from 0,
-so two stages wrote the same key into one shared checkpoint and one of them was
-lost. The old `OptimizerWrapper` worked around this by re-keying to FQNs, but
-only when explicitly asked (`fqn_keying=True`), and the non-FFN path kept the
-positional layout that cannot be safe there at all.
+旧布局按*位置索引*（positional parameter index）给 optimizer state 编键。在 pipeline
+并行下，每个 stage 的 optimizer 都从 0 开始给自己的参数编号，于是两个 stage 把同一个
+键写进了同一个共享 checkpoint，其中一个被覆盖丢失。旧的 `OptimizerWrapper` 用
+re-keying 到 FQN 的方式绕过，但只在显式要求时（`fqn_keying=True`），而非 FFN 路径仍
+保留在那里根本不安全的 positional 布局。
 
-`OptimizersContainer` spans every model part by construction, so it has no
-positional layout to fall back to. Its state dict is always flat and FQN-keyed.
+`OptimizersContainer` 按构造就横跨所有 model part，没有可以回退的 positional 布局，
+它的 state dict 永远是扁平的 FQN 键。
 
-## What changed
+## 变更内容
 
-| | before | after |
+| | 变更前 | 变更后 |
 |---|---|---|
-| state key | `state/weight` -> nested `{exp_avg, exp_avg_sq, step}` | `state/weight/exp_avg`, `state/weight/exp_avg_sq`, `state/weight/step` |
-| param group key | `param_groups/0/lr` (one shared group) | `param_groups/weight/lr` (what `state_dict()` reports for each group) |
+| state 键 | `state/weight` → 嵌套 `{exp_avg, exp_avg_sq, step}` | `state/weight/exp_avg`、`state/weight/exp_avg_sq`、`state/weight/step` |
+| param group 键 | `param_groups/0/lr`（一个共享 group） | `param_groups/weight/lr`（`state_dict()` 对每个 group 实际报告的形式） |
 
-The second row is a genuine improvement for checkpoint portability: an FQN-keyed
-param group is unambiguous per parameter, where a positional `0` is not.
+第二行对 checkpoint 可移植性是真实改进：FQN 键的 param group 对参数无歧义，而位置
+索引 `0` 不是。
 
-## Impact
+## 影响
 
-**Checkpoints written before `0fd6cbe` will not load into a build after it.**
-There is no conversion script, and none is planned: the mapping is only
-recoverable from the *old* checkpoint's own metadata, and this is a
-pre-1.0 research framework.
+**`0fd6cbe` 之前写出的 checkpoint 无法载入其后的构建。** 没有也不计划提供转换脚本：
+映射只能从*旧* checkpoint 自己的 metadata 恢复，而这是一个 pre-1.0 研究框架。
 
-A run resumed from an old checkpoint will fail loudly rather than silently
-training with a cold optimizer, because DCP cannot match the nonexistent keys.
-Delete or re-export old checkpoints.
+从旧 checkpoint 恢复的运行会响亮失败（DCP 匹配不到不存在的键），而不是带着冷启动
+optimizer 静默训练。删除或重新导出旧 checkpoint。
 
-## Model weights are unaffected
+## 模型权重不受影响
 
-Only the optimizer subtree moved. `model/...` keys, the trainer's
-`train_state` counters, and the dataloader cursor are unchanged, so model
-weights export and reload exactly as before.
+只有 optimizer 子树移动了。`model/...` 键、trainer 的 `train_state` 计数器和
+dataloader cursor 均未变化，模型权重的导出和重载与之前完全一致。
 
-## Verified
+## 验证
 
-- Default run reproduces the pre-change baseline bitwise (`loss` 4.85817 /
-  4.85671 / 4.85931 / 4.85672, `grad_norm` 0.5583 / 0.5612 / 0.5572 / 0.5487)
-  at `--steps 4 --seed 42 --deterministic`. The `fused` default was confirmed
-  bit-identical to the for-loop kernel on CPU; on CUDA the fused kernel is a
-  different implementation and is expected to differ in the last bits.
-- PP checkpoint round-trip is bitwise exact: `tests/integration_tests/pp_checkpoint_equivalence.py`
-  reports `max abs diff = 0.000e+00`.
-- `tests/integration_tests/pp_equivalence.py` (1F1B and Interleaved1F1B) both pass.
-- `tests/integration_tests/cp_wiring_equivalence.py` passes, including the
-  `preprocess_inputs` seam.
+- 默认运行逐位复现变更前基线（`loss` 4.85817 / 4.85671 / 4.85931 / 4.85672，
+  `grad_norm` 0.5583 / 0.5612 / 0.5572 / 0.5487），参数为 `--steps 4 --seed 42
+  --deterministic`。`fused` 默认值在 CPU 上与 for-loop kernel 逐位一致；在 CUDA 上
+  fused kernel 是不同实现，末位预期有差异。
+- PP checkpoint 往返逐位精确：`tests/integration_tests/pp_checkpoint_equivalence.py`
+  报告 `max abs diff = 0.000e+00`。
+- `tests/integration_tests/pp_equivalence.py`（1F1B 与 Interleaved1F1B）均通过。
+- `tests/integration_tests/cp_wiring_equivalence.py` 通过，包括 `preprocess_inputs`
+  seam。
 
-## A bug this change exposed
+## 这次改动暴露的一个 bug
 
-While re-checking the CP path, a separate defect surfaced:
-**`attn_mask_type` had no config path.** Nothing in `trainer/config.py` set it,
-and only two equivalence tests assigned it by hand. It falls back to
-`"causal"` at the mask site (`hf_wrapper.py`, `context_parallel/apply.py`).
+复查 CP 路径时发现一个独立缺陷：**`attn_mask_type` 没有配置通路。**
+`trainer/config.py` 里没有任何地方设置它，只有两个等价性测试手工赋值。它在 mask 处
+（`hf_wrapper.py`、`context_parallel/apply.py`）回退到 `"causal"`。
 
-That matters because every non-random corpus is packed: `datasets/build.py`
-always runs samples through `ConcatThenSplitPackingConfig`, so a row holds
-several documents and attention must not cross a boundary. The consequences:
+这很要紧，因为每个非 random 语料都是 packed 的：`datasets/build.py` 总是把样本送进
+`ConcatThenSplitPackingConfig`，一行里装多个文档，attention 不得跨越文档边界。后果：
 
-- on **flex** (the CUDA path) an unset flag silently builds a causal-only mask
-  and attends across document boundaries -- no error, wrong model;
-- on **sdpa** (CPU) the wrapper's packed-sequence guard raises, so the failure
-  is loud but arrives as "packing requires CUDA" rather than naming the cause.
+- 在 **flex**（CUDA 路径）上，未设置的 flag 会静默构造 causal-only mask，跨文档边界
+  做 attention——不报错，模型就是错的；
+- 在 **sdpa**（CPU）上，wrapper 的 packed-sequence 守卫会 raise，失败是响亮的，但
+  报出来的是"packing requires CUDA"，没有点出真正原因。
 
-`build_model_config_for` now derives the flag from the dataset selector
-(`"causal"` for the synthetic random corpus, `"block_causal"` otherwise), so it
-cannot disagree with the corpus the trainer loaded. There is deliberately no CLI
-knob: packing is not independently configurable today, and a knob that could
-contradict the data is the bug, not the fix.
+`build_model_config_for` 现在从 dataset selector 推导该 flag（合成 random 语料用
+`"causal"`，其余用 `"block_causal"`），因此它不可能与 trainer 载入的语料不一致。
+这里刻意不提供 CLI 开关：packing 今天不可独立配置，而一个可能与数据矛盾的开关本身
+就是 bug，不是修复。
 
-**Why the existing tests missed it:** `cp_wiring_equivalence.py` builds its model
-directly and sets the flag itself, so it was testing the mask machinery in
-isolation rather than the seam a real run goes through. The new
-`test_the_mask_type_follows_the_corpus_rather_than_being_configured` pins the
-seam.
+**为什么既有测试没抓到它：**`cp_wiring_equivalence.py` 直接构建模型并自己设置该
+flag，所以它测试的是孤立的 mask 机制，而不是真实运行经过的 seam。新增的
+`test_the_mask_type_follows_the_corpus_rather_than_being_configured` 钉住了这个
+seam。
