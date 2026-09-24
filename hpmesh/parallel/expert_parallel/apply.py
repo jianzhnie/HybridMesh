@@ -2,16 +2,15 @@
 
 from __future__ import annotations
 
-import logging
-
 import torch.distributed as dist
 import torch.nn as nn
 
 from hpmesh.trainer.config import ParallelConfig
 
-from .ep import swap_hf_moe_blocks
+from ...utils.logger_utils import get_logger
+from .swap import swap_hf_moe_blocks
 
-logger = logging.getLogger(__name__)
+logger = get_logger(__name__)
 
 __all__ = ["apply_ep"]
 

@@ -34,7 +34,7 @@ from hpmesh.models.common.aux_loss import AuxLoss
 from hpmesh.models.common.moe import MoE, RoutedExperts
 from hpmesh.models.hf_wrapper import HFTransformerModel
 from hpmesh.parallel.expert_parallel import swap_hf_moe_blocks
-from hpmesh.parallel.expert_parallel.ep import _restore_fp32_state_buffers
+from hpmesh.parallel.expert_parallel.swap import _restore_fp32_state_buffers
 
 TOL = 1e-6
 

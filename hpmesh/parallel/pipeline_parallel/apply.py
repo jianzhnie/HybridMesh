@@ -18,7 +18,6 @@ runtime schedules, which are rejected rather than honored.
 
 from __future__ import annotations
 
-import logging
 import math
 from dataclasses import dataclass
 
@@ -35,12 +34,13 @@ from torch.distributed.pipelining.schedules import (
 from hpmesh.trainer.config import ParallelConfig
 
 from ...components.loss import cross_entropy_loss
-from ..fully_shard.fsdp_wrap import apply_fsdp
+from ...utils.logger_utils import get_logger
+from ..fully_shard.apply import apply_fsdp
 from ..parallel_dims import ParallelDims
 from ..tensor_parallel.tp import apply_tp
 from .pipeline import generate_llm_fqn_per_model_part, split_model_into_stages
 
-logger = logging.getLogger(__name__)
+logger = get_logger(__name__)
 
 __all__ = ["PipelineParallelSetup", "apply_pp", "build_pipeline_schedule"]
 

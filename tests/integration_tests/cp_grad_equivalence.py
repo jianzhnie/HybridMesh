@@ -39,7 +39,7 @@ from torch.distributed.tensor import DTensor
 
 from hpmesh.accelerator.dist import all_reduce
 from hpmesh.parallel.context_parallel import shard_batch_for_cp
-from hpmesh.parallel.fully_shard.fsdp_wrap import apply_fsdp
+from hpmesh.parallel.fully_shard.apply import apply_fsdp
 from hpmesh.parallel.parallel_dims import ParallelDims
 from hpmesh.trainer import HybridMeshConfig, ParallelConfig, TrainingConfig
 

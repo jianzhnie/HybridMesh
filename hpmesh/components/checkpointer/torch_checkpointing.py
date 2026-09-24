@@ -59,6 +59,7 @@ from ...utils.gc import GarbageCollection
 if TYPE_CHECKING:
     from ...trainer.config import CheckpointConfig
 
+from ...utils.logger_utils import get_logger
 from .base import (
     LR_SCHEDULER,
     MODEL,
@@ -69,7 +70,7 @@ from .base import (
 )
 from .dcp import EXPORT_DTYPE_MAP
 
-logger = logging.getLogger(__name__)
+logger = get_logger(__name__)
 
 
 DEFAULT_TORCH_CHECKPOINTING_BARRIER_TCPSTORE_PORT = 43001

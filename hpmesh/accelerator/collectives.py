@@ -21,7 +21,6 @@ The single non-obvious line kept from upstream is the ``DTensor`` branch in
 
 from __future__ import annotations
 
-import logging
 import math
 from collections.abc import Iterable
 from datetime import timedelta
@@ -30,9 +29,10 @@ import torch
 import torch.distributed as dist
 from torch.distributed.tensor import DTensor
 
+from ..utils.logger_utils import get_logger
 from .device import device_module
 
-logger = logging.getLogger(__name__)
+logger = get_logger(__name__)
 
 __all__ = [
     "clip_grad_norm_",

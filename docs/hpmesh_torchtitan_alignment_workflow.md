@@ -128,8 +128,8 @@ git -C <torchtitan> log <上次-torchtitan-基线>..HEAD -- torchtitan/
 - `parallel/tensor_parallel/tp.py`
 - `parallel/expert_parallel/*`
 - `parallel/context_parallel/cp_kernel.py`（CP redistribution 与 kernel；原 `primitives.py` 已于 2026-09-23 删除）
-- `parallel/fully_shard/fsdp_wrap.py`
-- `parallel/pipeline_parallel/pp.py`
+- `parallel/fully_shard/apply.py`
+- `parallel/pipeline_parallel/apply.py`
 - `trainer/*` 与 `accelerator/mesh.py`
 
 实现前必须写明对应不变量，例如：

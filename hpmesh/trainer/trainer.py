@@ -239,7 +239,7 @@ class Trainer:
             )
         # Chunked loss + PP is rejected up front: under PP the last stage's
         # loss is computed inside the schedule
-        # (``pipeline_parallel/pp.py:_scalar_loss_fn``), which receives logits
+        # (``pipeline_parallel/apply.py:_scalar_loss_fn``), which receives logits
         # from the stage forward. Rewiring that seam for hidden states plus a
         # per-chunk backward is a PP-side change, so the combination loud-raises
         # here rather than training on a silently un-chunked (or wrong) loss.
@@ -842,7 +842,7 @@ class Trainer:
         which of the two it is looking at.
 
         The schedule's loss is the same summed next-token CE the non-PP body
-        computes (``pipeline_parallel/pp.py:_scalar_loss_fn``), so the return
+        computes (``pipeline_parallel/apply.py:_scalar_loss_fn``), so the return
         keeps the caller's normalization unchanged: the sum over the last
         stage's micro-batches. That sum is over the last stage's *own* shard of
         the sequence, which is why the caller's denominator -- counted before

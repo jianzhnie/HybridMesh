@@ -51,7 +51,7 @@ from torch.distributed._composable.fsdp import FSDPModule
 from torch.distributed.tensor import DTensor
 
 from hpmesh.accelerator.dist import all_reduce
-from hpmesh.parallel.fully_shard.fsdp_wrap import apply_fsdp
+from hpmesh.parallel.fully_shard.apply import apply_fsdp
 from hpmesh.parallel.parallel_dims import ParallelDims
 from hpmesh.trainer import ParallelConfig
 

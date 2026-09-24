@@ -30,7 +30,6 @@ from __future__ import annotations
 
 import copy
 import inspect
-import logging
 from collections.abc import Callable
 
 import torch
@@ -43,7 +42,9 @@ from torch.distributed.pipelining.schedules import (
     get_schedule_class,
 )
 
-logger = logging.getLogger(__name__)
+from ...utils.logger_utils import get_logger
+
+logger = get_logger(__name__)
 
 __all__ = ["generate_llm_fqn_per_model_part", "split_model_into_stages"]
 

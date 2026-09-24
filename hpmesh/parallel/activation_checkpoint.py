@@ -47,7 +47,6 @@ passing a mode string (the extension point its config already documents).
 
 from __future__ import annotations
 
-import logging
 from collections.abc import Callable
 from typing import TYPE_CHECKING
 
@@ -65,7 +64,9 @@ from torch.utils.checkpoint import (
 if TYPE_CHECKING:
     from hpmesh.trainer.config import SelectiveACConfig
 
-logger = logging.getLogger(__name__)
+from ..utils.logger_utils import get_logger
+
+logger = get_logger(__name__)
 
 __all__ = ["VALID_AC_MODES", "apply_ac"]
 

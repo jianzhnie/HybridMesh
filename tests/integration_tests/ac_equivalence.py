@@ -34,7 +34,7 @@ from torch.distributed.tensor import DTensor
 
 from hpmesh.accelerator.dist import all_reduce
 from hpmesh.parallel.activation_checkpoint import apply_ac
-from hpmesh.parallel.fully_shard.fsdp_wrap import apply_fsdp
+from hpmesh.parallel.fully_shard.apply import apply_fsdp
 from hpmesh.parallel.parallel_dims import ParallelDims
 from hpmesh.trainer import ParallelConfig
 from hpmesh.trainer.config import SelectiveACConfig
