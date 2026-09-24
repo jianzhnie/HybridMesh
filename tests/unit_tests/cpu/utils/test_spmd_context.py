@@ -18,7 +18,7 @@ from __future__ import annotations
 
 import pytest
 
-from hpmesh.utils.spmd_context import (
+from hpmesh.accelerator.spmd_context import (
     current_spmd_mesh,
     spmd_context,
     spmd_mesh_group,

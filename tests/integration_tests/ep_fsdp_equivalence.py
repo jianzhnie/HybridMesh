@@ -32,13 +32,13 @@ import torch.nn.functional as F
 from torch.distributed.tensor import DTensor
 from transformers import AutoConfig
 
-from hpmesh.accelerator.collectives import dist_sum
+from hpmesh.accelerator.dist import all_reduce
+from hpmesh.accelerator.spmd_context import spmd_context
 from hpmesh.models.common.moe import MoE
 from hpmesh.models.hf_wrapper import HFTransformerModel
 from hpmesh.parallel.parallel_dims import ParallelDims
 from hpmesh.parallel.parallelize_hf import parallelize_hf_transformers
 from hpmesh.trainer import ParallelConfig
-from hpmesh.utils.spmd_context import spmd_context
 
 NUM_EXPERTS = 8
 TOP_K = 2
@@ -139,7 +139,8 @@ def main() -> None:
         loss_sum = _loss_sum(model, ids_all[rank], labels_all[rank])
     loss_sum.backward()
 
-    got_loss = dist_sum(loss_sum, loss_mesh)
+    all_reduce(loss_sum, group=loss_mesh.get_group())
+    got_loss = float(loss_sum)
     if abs(got_loss - ref_loss) > TOL:
         failures.append(f"rank {rank}: loss {got_loss:.6f} vs reference {ref_loss:.6f}")
 
