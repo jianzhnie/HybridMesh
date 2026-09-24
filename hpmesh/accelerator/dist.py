@@ -17,7 +17,7 @@ from torch._utils import _flatten_dense_tensors, _take_tensors, _unflatten_dense
 from torch.distributed import ProcessGroup
 
 from .device import is_npu_available
-from .utils import (
+from .dist_utils import (
     barrier,
     cast_data_device,
     get_backend,

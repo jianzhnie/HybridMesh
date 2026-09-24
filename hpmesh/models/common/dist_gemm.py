@@ -21,7 +21,7 @@ What changed from upstream:
   ``remat.region(..., recompute=...)``, which only steers activation
   checkpointing; calling the projection directly is the same arithmetic.
 * The TP group is read per forward through
-  ``hpmesh.utils.spmd_context.spmd_mesh_group``.
+  ``hpmesh.accelerator.spmd_context.spmd_mesh_group``.
 
 The fallback matters: when TP is not active there is no collective to fuse, so
 each module runs its plain path. That keeps a TP=1 run working, but it also means
@@ -36,13 +36,13 @@ import math
 import torch
 import torch.nn as nn
 
+from hpmesh.accelerator.spmd_context import spmd_mesh_group
 from hpmesh.models.common.feed_forward import FeedForward
 from hpmesh.models.common.qkv import QKVLinear
 from hpmesh.parallel.tensor_parallel.linear import (
     AllGatherLinear,
     LinearReduceScatter,
 )
-from hpmesh.utils.spmd_context import spmd_mesh_group
 
 logger = logging.getLogger(__name__)
 

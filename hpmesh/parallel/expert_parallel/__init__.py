@@ -7,7 +7,7 @@ to its expert's rank and back. ``ep.py`` is the weight-moving swap itself;
 Both are re-exported eagerly. ``ep.py`` imports ``models/common/moe`` (the
 stack it swaps in), which used to import ``parallel/spmd_types`` back -- the
 cycle that once forced a lazy re-export here. The SPMD mesh context now lives
-in ``hpmesh/utils/spmd_context.py`` below both layers, so nothing under
+in ``hpmesh/accelerator/spmd_context.py`` below both layers, so nothing under
 ``models/common`` imports ``hpmesh.parallel`` and the cycle is gone.
 """
 

@@ -23,8 +23,8 @@ import torch.distributed as dist
 import torch.nn as nn
 import torch.nn.functional as F
 
+from ...accelerator.spmd_context import spmd_mesh_group
 from ...components.loss import vocab_shard_bounds
-from ...utils.spmd_context import spmd_mesh_group
 
 __all__ = ["Embedding"]
 
