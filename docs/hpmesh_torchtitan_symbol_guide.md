@@ -176,7 +176,7 @@ step 1 恢复 optimizer、scheduler、dataloader 和 train state 后完成并保
 | `split_model_into_stages` | 同文件 stage split | 删除模块用 `Identity`，每 stage 保留 rotary，兼容 Torch 2.10 `PipelineStage`，**通过（适配）** |
 | `apply_pp`, `build_pipeline_schedule` | `distributed/pipeline_parallel.py` | hpmesh 直接消费 HF 五部件契约，**通过（适配）** |
 | `apply_pp(first_stage_module_fqns=...)`, `_prepend_first_stage_modules` | 同文件 `pipeline_with_first_stage_modules` | 额外顶层模块并入 stage 0：仅作用自动切分，存在的 FQN 按序前插，已占有/重复 FQN raise、缺失跳过，显式 `module_fqns_per_model_part` 给定时忽略并告警（同上游委托语义）；`split_model_into_stages` 配套把 wrapper `named_children()` 不呈现的额外顶层模块在非属主 stage 置 `Identity`（上游 "pruned on other stages" 语义），装五部件的容器经"包含已呈现部件"判定跳过。stage FQN 稳定、默认 None 逐位不变，**通过（适配）** |
-| `apply_ac`, selective helpers | `distributed/activation_checkpoint.py` | FullAC/SelectiveAC 已移植，**通过**；RegionAC/MemoryBudgetAC 未移植，见 §9.1。FullAC 的 `determinism_check`/`debug` 旋钮未暴露（固定默认值），登记于此 |
+| `apply_ac`, selective helpers, `_apply_memory_budget` | `distributed/activation_checkpoint.py` | FullAC/SelectiveAC 已移植，**通过**；MemoryBudgetAC 已移植为 `mode='memory_budget'` + `MemoryBudgetACConfig`（设 `torch._functorch.config.activation_memory_budget`，需 compile，torch 无 knob 时 loud-raise），见 §9.1；RegionAC 未移植（配置即 `NotImplementedError`）。FullAC 的 `determinism_check`/`debug` 旋钮未暴露（固定默认值），登记于此 |
 
 ## 6. 数据系统
 
@@ -257,7 +257,10 @@ step 1 恢复 optimizer、scheduler、dataloader 和 train state 后完成并保
   TP micro-pipeline、regional inductor 和 token-choice 动态 scalar capture。
 - `models/common/moe_sharding.py`：缺少的是 **TP×MoE 整个组合能力**，不是一个文件。
   `apply_tp` 会拒绝 `moe_tp_experts`，这是正确的 fail-fast。
-- RegionAC/MemoryBudgetAC：分别依赖 `torch_remat`/compile；当前明确不支持。
+- RegionAC：依赖 `torch_remat` 包与上游 `Module.configure_remat_regions` 协议，hpmesh
+  两者皆无，不引入该依赖；配置 `activation_checkpoint_mode='region'` 在 config 校验与
+  `apply_ac` 两处均显式 `NotImplementedError` 并写明解锁条件。MemoryBudgetAC 已于
+  2026-09-24 移植（`mode='memory_budget'`，需 compile，语义同上游）。
 - 2026-09-23 审计新增登记（上游 `c6e416bbd..b64103072` 引入）：
   - `components/optimizer/ema.py`：在线 EMA 模型平均（1b9eef3bd，515 行）——**已移植**
     （批 3a，`hpmesh/components/optimizer/ema.py` + config/trainer/checkpointer

@@ -37,7 +37,11 @@ from __future__ import annotations
 import torch
 import torch.nn as nn
 
-from hpmesh.trainer.config import ParallelConfig, SelectiveACConfig
+from hpmesh.trainer.config import (
+    MemoryBudgetACConfig,
+    ParallelConfig,
+    SelectiveACConfig,
+)
 
 from ..utils.logger_utils import get_logger
 from .activation_checkpoint import apply_ac
@@ -62,6 +66,7 @@ def parallelize_hf_transformers(
     compile: bool = False,
     activation_checkpoint: str = "none",
     selective_ac: SelectiveACConfig | None = None,
+    memory_budget_ac: MemoryBudgetACConfig | None = None,
     global_batch_size: int | None = None,
     dataset: str = "random",
 ) -> nn.Module | PipelineParallelSetup:
@@ -73,7 +78,9 @@ def parallelize_hf_transformers(
     ``ParallelConfig`` plus the handful of scalars the guards actually need.
     ``global_batch_size`` is required only on the ``pp > 1`` path (microbatch
     validation); ``dataset`` gates the same path's corpus restriction;
-    ``selective_ac`` is read only when ``activation_checkpoint='selective'``.
+    ``selective_ac`` / ``memory_budget_ac`` are read only when
+    ``activation_checkpoint`` names their mode (``'selective'`` /
+    ``'memory_budget'``; the latter also requires ``compile=True``).
 
     Returns the (possibly wrapped) model -- or, with ``pp > 1``, a
     ``PipelineParallelSetup``: pipeline parallelism cuts the model into
@@ -138,7 +145,13 @@ def parallelize_hf_transformers(
     # AC after the sharding wrappers (it must enclose the TP/CP-modified
     # layer), before compile and FSDP -- torchtitan's order in
     # ``parallelize_llama``.
-    model = apply_ac(model, activation_checkpoint, selective=selective_ac)
+    model = apply_ac(
+        model,
+        activation_checkpoint,
+        selective=selective_ac,
+        memory_budget=memory_budget_ac,
+        compile_enabled=compile,
+    )
 
     if compile:
         # Whole-model compile -- the deliberate opposite of torchtitan's
