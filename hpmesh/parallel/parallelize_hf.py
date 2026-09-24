@@ -38,6 +38,7 @@ import torch
 import torch.nn as nn
 
 from hpmesh.trainer.config import (
+    CompileConfig,
     MemoryBudgetACConfig,
     ParallelConfig,
     SelectiveACConfig,
@@ -45,6 +46,7 @@ from hpmesh.trainer.config import (
 
 from ..utils.logger_utils import get_logger
 from .activation_checkpoint import apply_ac
+from .compile import apply_compile
 from .context_parallel import apply_cp
 from .expert_parallel import apply_ep
 from .fully_shard.apply import apply_fsdp
@@ -64,6 +66,7 @@ def parallelize_hf_transformers(
     parallel_dims,
     device: torch.device | None = None,
     compile: bool = False,
+    compile_config: CompileConfig | None = None,
     activation_checkpoint: str = "none",
     selective_ac: SelectiveACConfig | None = None,
     memory_budget_ac: MemoryBudgetACConfig | None = None,
@@ -76,6 +79,8 @@ def parallelize_hf_transformers(
     ``global_batch_size`` and ``dataset`` are training-side values, passed
     explicitly rather than read off a run-wide config: this layer's contract is
     ``ParallelConfig`` plus the handful of scalars the guards actually need.
+    ``compile_config`` tunes the compile step (per-block, backend, async TP);
+    ``None`` is the plain whole-model compile.
     ``global_batch_size`` is required only on the ``pp > 1`` path (microbatch
     validation); ``dataset`` gates the same path's corpus restriction;
     ``selective_ac`` / ``memory_budget_ac`` are read only when
@@ -112,6 +117,7 @@ def parallelize_hf_transformers(
             global_batch_size=global_batch_size,
             dataset=dataset,
             compile=compile,
+            compile_config=compile_config,
         )
         return PipelineParallelSetup(
             schedule=build_pipeline_schedule(stages, cfg=cfg),
@@ -154,19 +160,18 @@ def parallelize_hf_transformers(
     )
 
     if compile:
-        # Whole-model compile -- the deliberate opposite of torchtitan's
-        # ``apply_compile``, which compiles each TransformerBlock so the
-        # repeated structure is traced once and each block's graph is reused.
-        # torchtitan's version also does three other things hpmesh has no
-        # counterpart for: async TP (``inductor._micro_pipeline_tp``),
-        # ``regional_inductor`` for inductor-only regions under a non-inductor
-        # backend (its FlexInnerAttention needs one), and
-        # ``capture_scalar_outputs`` for token-choice MoE dispatch's
-        # data-dependent shapes. hpmesh relies on HF's flex implementation
-        # instead of its own, and its MoE runs eager, so none of the three is
-        # reachable here -- but a model whose MoE dispatch needs dynamic shapes
-        # under compile would fail on this line rather than being handled.
-        # See docs/hpmesh_upstream_map.md (D: ``distributed/compile.py``).
-        model = torch.compile(model)
+        # ``parallel/compile.py``: whole-model compile by default (the
+        # historical behavior), per-block compile and the three compile-side
+        # toggles (async TP, regional_inductor, capture_scalar_outputs)
+        # behind ``compile_config``'s switches.
+        model = apply_compile(
+            model,
+            compile_config=compile_config,
+            tp_mesh=(
+                None
+                if parallel_dims is None
+                else parallel_dims.get_optional_mesh("tp")
+            ),
+        )
 
     return apply_fsdp(model, cfg, parallel_dims)

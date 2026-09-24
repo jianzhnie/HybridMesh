@@ -166,13 +166,47 @@ C 类上会把项目**故意删掉**的抽象又拽回来。
 
 | 上游 | 影响 |
 | --- | --- |
-| `distributed/compile.py` | **被裁剪成整体 `torch.compile(model)`**（PP 则每 chunk 一次）。裁掉的是四件互相独立的事：逐 block 编译、async TP `_micro_pipeline_tp`、`regional_inductor`、`capture_scalar_outputs`（后者是 token-choice MoE dispatch 的动态 shape 所需的） |
+| `distributed/compile.py` | **已移植**（2026-09-24，批 8）：逐 block compile、async TP `_micro_pipeline_tp`、`regional_inductor`、`capture_scalar_outputs` 四件全部落 `hpmesh/parallel/compile.py` + `CompileConfig`，见下"已从 D 移除" |
 | `models/common/moe_sharding.py` | **比"缺一个文件"更深**。旧的未接线 `parallel/sharding.py` 形式已删除；hpmesh 没有 MoE 的 TP 声明或读取声明的运行引擎。它真正的载荷是 **MoE-under-TP**（routed 专家在 TP 轴分片、router 保持 Replicate），而 hpmesh 的 TP 对 `moe_tp_experts` 明确 raise。所以这是 **TP×MoE 组合维度整体没有**，不是漏文件 |
 | `components/optimizer/ema.py`（2026-09 新增，515 行） | **已移植**（2026-09-24，`hpmesh/components/optimizer/ema.py`）：在线 EMA 模型平均，config/trainer/checkpointer 三侧接线完成，见下"已从 D 移除" |
 | Ulysses CP × varlen/packed（baff3c681） | redistribution 原语 hpmesh 已有，缺 varlen 内层 attention 路径；`apply_cp` 对该组合保持 fail-fast |
 | 多轮对话 SFT 的 renderer 路径（4a0d8dab3） | 依赖 `renderers==0.1.11` 与上游 `components/renderer.py`（Configurable 系） |
 | `models/common/token_dispatcher.py` 的 TorchAO/DeepEP/HybridEP 三个 dispatcher | 环境依赖型不移植：torchao 非依赖、DeepEP/HybridEP 为 CUDA-only，本机无法验证；`AllToAllTokenDispatcher` 满足同一 dispatch/combine 契约，理由见文件 docstring |
 | DSA（DeepSeek sparse attention）的稠密 additive mask 路径 | 上游 `model.py` 的 `_build_dense_attention_mask` + indexer 支持；**2026-09-24 起 hpmesh wrapper 构造期对 `index_topk` fail-fast**（静默走 flex BlockMask 的错误语义已消除），稠密 mask 执行路径本身仍未移植，无消费者 |
+
+**已从 D 移除**（2026-09-24 批 8 移植）：`distributed/compile.py`——四件互相独立的
+能力全部落 `hpmesh/parallel/compile.py::apply_compile`，由
+`trainer/config.py::CompileConfig`（`training.compile_config`，默认全关）驱动，
+装配顺序不变（AC 之后、FSDP 之前；PP 下每 chunk 经 `apply_pp` 同一函数）：
+
+* **逐 block compile**（`per_block=True`）：每个 decoder layer `block.compile(
+  backend=..., fullgraph=True)`（`Module.compile` 就地，state-dict 键与 FSDP 包装
+  不变）；默认 False 保持整体 `torch.compile(model, backend="inductor")`，与旧
+  路径逐位一致。
+* **async TP**（`enable_async_tensor_parallel=True`）：设
+  `torch._inductor.config._micro_pipeline_tp` 并为 TP group 注册 symmetric
+  memory（按 group 名去重，PP 每 chunk 重入安全）。配置校验期（
+  `HybridMeshConfig.__post_init__`）拒绝 无 compile / tp=1 两种组合；装配期对
+  无 TP mesh、torch 无 `_micro_pipeline_tp`、无 `enable_symm_mem_for_group` 三种
+  情形 loud-raise，不静默跳过。
+* **regional_inductor**：flex 只有 inductor lowering，故非 inductor backend 下
+  flex 模型必须 scoop。`backend="aot_eager"` 且模型走 flex（wrapper 新 property
+  `uses_flex_attention`）时用 `torch.fx.passes.regional_inductor` 包
+  `aot_autograd`；annotation 落 `hf_wrapper._flex_attention_hf` 的
+  `maybe_regional_inductor({})`（默认 nullcontext，inductor/eager 路径零开销）。
+  flex 模型配其他非 inductor backend → `ValueError`；torch 无 regional_inductor
+  → `NotImplementedError`；sdpa 模型 backend 原样透传。inductor_configs 传空
+  （hpmesh 走 HF 的 flex 集成，不带上游 FlexInnerAttention 的 autotune 配置）。
+* **capture_scalar_outputs**：按上游条件在编译的 model part 含 token-choice MoE
+  block（`_iter_moe_layers` 非空，即 EP swap 后的 hpmesh MoE 栈）时设
+  `torch._dynamo.config.capture_scalar_outputs=True`；dense 模型不动该全局量
+  （逐位不变）；torch 无此 knob 时 loud-raise。
+
+未移植（登记）：上游同文件的 `skip_fwd_side_effects_in_bwd_under_checkpoint`
+（AC+compile 的 side-effect 重放分歧开关，hpmesh 未遇到其失败场景，需要时按上游
+注释补）与 `FakeTensorMode.__init__` 的 `torch.compiler.disable` monkeypatch
+（修上游 pytorch#178887，等上游修复即废弃的临时措施）。`CompileConfig.components`
+未移植（hpmesh 只编译 model，loss 无 compile 通路）。
 
 **已从 D 移除**（2026-09-24 批 4 移植）：`pipeline_with_first_stage_modules`——
 多模态 first-stage 模块并入 stage 0，落为 `apply_pp` 的可选关键字参数

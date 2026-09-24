@@ -35,10 +35,11 @@ from torch.distributed.pipelining.schedules import (
     get_schedule_class,
 )
 
-from hpmesh.trainer.config import ParallelConfig
+from hpmesh.trainer.config import CompileConfig, ParallelConfig
 
 from ...components.loss import cross_entropy_loss
 from ...utils.logger_utils import get_logger
+from ..compile import apply_compile
 from ..fully_shard.apply import apply_fsdp
 from ..parallel_dims import ParallelDims
 from ..tensor_parallel.tp import apply_tp
@@ -228,6 +229,7 @@ def apply_pp(
     global_batch_size: int,
     dataset: str = "random",
     compile: bool = False,
+    compile_config: CompileConfig | None = None,
     first_stage_module_fqns: Sequence[str] | None = None,
 ) -> tuple[list[PipelineStage], list[nn.Module], bool, bool]:
     """Split ``model`` into this rank's pipeline stages and parallelize them.
@@ -322,10 +324,11 @@ def apply_pp(
     # coordinates -- the mesh the per-part apply_* functions would have been
     # handed had the model never been split.
     dense_mesh = parallel_dims.spmd_dense_mesh()
+    tp_mesh = parallel_dims.get_optional_mesh("tp")
     for i, part in enumerate(model_parts):
         part = apply_tp(part, dense_mesh, cfg)
         if compile:
-            part = torch.compile(part)
+            part = apply_compile(part, compile_config=compile_config, tp_mesh=tp_mesh)
         part = apply_fsdp(part, cfg, parallel_dims)
         model_parts[i] = part
         # Rebind the stage's submodule in case a transform replaced the chunk.

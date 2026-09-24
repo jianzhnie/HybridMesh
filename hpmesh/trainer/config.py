@@ -54,6 +54,7 @@ logger = get_logger(__name__)
 
 __all__ = [
     "CheckpointConfig",
+    "CompileConfig",
     "DataloaderConfig",
     "EMAConfig",
     "ValidationConfig",
@@ -1306,6 +1307,55 @@ class MemoryBudgetACConfig:
 
 
 @dataclass(kw_only=True)
+class CompileConfig:
+    """Settings for ``training.compile=True`` -- how the model is compiled.
+
+    Ported from torchtitan's ``CompileConfig``, minus its ``components``
+    list (hpmesh compiles the model only; the loss has no compile path).
+    The defaults are exactly hpmesh's historical behavior -- one whole-model
+    ``torch.compile(model, backend="inductor")`` -- so an existing run that
+    never touches this config is bitwise unchanged. Each non-default knob is
+    independent of the others.
+    """
+
+    per_block: bool = field(
+        default=False,
+        metadata={
+            "help": "Compile each decoder layer separately (fullgraph=True) "
+            "instead of the model as a whole: the repeated block structure "
+            "is traced once and its graph reused, so compile time scales "
+            "with one block rather than the depth. False (default) keeps "
+            "the whole-model compile."
+        },
+    )
+    backend: str = field(
+        default="inductor",
+        metadata={
+            "help": "torch.compile backend. 'inductor' (default) or "
+            "'aot_eager'; on a flex-attention model 'aot_eager' is wrapped "
+            "in regional_inductor so the flex regions still lower to "
+            "inductor. Any other backend on a flex model is an error, "
+            "since flex has no non-inductor lowering."
+        },
+    )
+    enable_async_tensor_parallel: bool = field(
+        default=False,
+        metadata={
+            "help": "Pipeline tensor-parallel collectives with the GEMMs "
+            "inside compiled regions (Inductor's micro-pipeline pass). "
+            "Requires training.compile=True, tensor_parallel_size > 1, and "
+            "a torch carrying torch._inductor.config._micro_pipeline_tp "
+            "plus symmetric-memory registration; every missing piece is a "
+            "loud error, never a silent skip."
+        },
+    )
+
+    def __post_init__(self) -> None:
+        if not self.backend:
+            raise ValueError("compile.backend cannot be empty.")
+
+
+@dataclass(kw_only=True)
 class ValidationConfig:
     """The validation (eval) loop's knobs (see ``Trainer.validate``).
 
@@ -1365,6 +1415,14 @@ class TrainingConfig:
     steps: int = field(default=20, metadata={"help": "Number of optimizer steps"})
     seed: int = field(default=42, metadata={"help": "Base RNG seed"})
     compile: bool = field(default=False, metadata={"help": "torch.compile the model"})
+    compile_config: CompileConfig = field(
+        default_factory=CompileConfig,
+        metadata={
+            "help": "How the model is compiled (per-block vs whole-model, "
+            "backend, async TP). Read only under compile=True; its defaults "
+            "reproduce the plain whole-model compile."
+        },
+    )
     activation_checkpoint_mode: str = field(
         default="none",
         metadata={
@@ -1584,6 +1642,25 @@ class HybridMeshConfig:
                 f"max_seq_len ({self.training.max_seq_len}) must be divisible by "
                 f"cp ({self.parallel.cp})"
             )
+        # Async TP is a compiled-TP optimization: without compile there is no
+        # inductor pass to pipeline the collectives, and without TP there are
+        # no collectives. Reject both halves here so the error names the flag
+        # rather than surfacing deep inside the compile step.
+        if self.training.compile_config.enable_async_tensor_parallel:
+            if not self.training.compile:
+                raise ValueError(
+                    "training.compile_config.enable_async_tensor_parallel "
+                    "requires training.compile=True: async TP is an inductor "
+                    "pass over compiled regions, so without compile it would "
+                    "silently do nothing."
+                )
+            if self.parallel.tp < 2:
+                raise ValueError(
+                    "training.compile_config.enable_async_tensor_parallel "
+                    "requires tensor_parallel_size > 1 (got "
+                    f"{self.parallel.tp}): it pipelines the TP collectives, "
+                    "and there are none at tp=1."
+                )
 
     # -- Flat view: lets the trainer read cfg.lr / cfg.steps / ... uniformly. --
     # The parallel degrees (dp/tp/pp/cp/ep) are deliberately NOT here: the
