@@ -29,9 +29,6 @@ import torch.nn.functional as F
 
 from hpmesh.accelerator.collectives import (
     clip_grad_norm_,
-    dist_max,
-    dist_sum,
-    dist_sum_tensor,
 )
 from hpmesh.components.checkpointer import (
     DATALOADER,
@@ -201,14 +198,6 @@ def test_vocab_shard_bounds_never_exceed_the_vocabulary() -> None:
 
 
 # -- reductions ---------------------------------------------------------------
-
-
-def test_reductions_are_the_identity_without_a_mesh() -> None:
-    """No mesh means one rank, so not reducing is correct -- not a shortcut."""
-    x = torch.tensor(3.0)
-    assert dist_sum(x, None) == 3.0
-    assert dist_max(x, None) == 3.0
-    assert torch.equal(dist_sum_tensor(x, None), x)
 
 
 def test_the_timeout_applies_to_every_one_dimensional_group_and_the_default(

@@ -50,7 +50,7 @@ import torch.nn.functional as F
 from torch.distributed._composable.fsdp import FSDPModule
 from torch.distributed.tensor import DTensor
 
-from hpmesh.accelerator.collectives import dist_sum
+from hpmesh.accelerator.dist import all_reduce
 from hpmesh.parallel.fully_shard.fsdp_wrap import apply_fsdp
 from hpmesh.parallel.parallel_dims import ParallelDims
 from hpmesh.trainer import ParallelConfig
@@ -194,7 +194,9 @@ def main() -> None:
                     failures.append(f"step0 grad {name}: diff {grad_diff:.3e}")
         opt.step()
         # The trainer's loss reporting: sum over the dp loss mesh.
-        losses.append(dist_sum(loss.detach(), loss_mesh))
+        reduced = loss.detach().clone()
+        all_reduce(reduced, group=loss_mesh.get_group())
+        losses.append(float(reduced))
 
     for step, (got, want) in enumerate(zip(losses, ref_losses, strict=True)):
         if abs(got - want) > TOL:

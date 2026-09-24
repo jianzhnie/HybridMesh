@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import pytest
 import torch
 
 from hpmesh.accelerator import device
@@ -10,20 +9,11 @@ from hpmesh.accelerator import device
 
 def test_device_priority_prefers_npu(monkeypatch) -> None:
     available = {"npu", "cuda"}
-    monkeypatch.delenv("HPMESH_DEVICE", raising=False)
     monkeypatch.setattr(
         device, "is_device_type_available", lambda kind: kind in available
     )
 
     assert device.get_device_type() == "npu"
-
-
-def test_unavailable_device_override_fails_loudly(monkeypatch) -> None:
-    monkeypatch.setenv("HPMESH_DEVICE", "xpu")
-    monkeypatch.setattr(device, "is_device_type_available", lambda _kind: False)
-
-    with pytest.raises(RuntimeError, match="xpu.*not available"):
-        device.get_device_type()
 
 
 def test_current_device_uses_local_rank(monkeypatch) -> None:
