@@ -20,13 +20,19 @@ HF-backend ``_wrap_flex_kernel_cp`` uses), held by process-group name; the
 ulysses all-to-alls drive ``all_to_all_single`` on the group itself. Both are
 captured at attach time.
 
-Masks under ulysses: attention runs on the FULL sequence, so the Q-sharded
-BlockMask the wrapper hands every CP kernel does not apply -- its Q axis is the
-local shard's length. The wrapper cannot be told which strategy attached (its
-only CP channel is ``set_cp_mesh``), so the kernel rebuilds the full-length
-causal mask itself. That rebuild is exact because the wrapper's internal CP
-mask is causal-only; packed (``block_causal``) runs are refused at attach time
-in ``apply_cp``, where the model config is still visible.
+Masks under ulysses: attention runs on the FULL sequence, so a Q-sharded
+BlockMask does not apply -- its Q axis is the local shard's length. Two mask
+shapes therefore reach the kernel. For a single causal document the wrapper
+hands over its Q-sharded CP mask (it builds one mask shape for every CP
+strategy) and the kernel rebuilds the full-length causal mask itself -- exact
+because that mask is a function of the sequence length alone. For a packed
+corpus (``block_causal``) the wrapper hands over the full-length document mask
+UNSHARDED: the all-to-all reassembles the whole token stream on every rank
+before attention, so the document structure (the varlen metadata: which tokens
+share a document) needs no sharding -- the same reason upstream's ulysses
+``cp_shard`` lifts ``attention_masks`` out of the sharded inputs and reattaches
+it untouched. The kernel tells the two apart by the mask's Q length (see
+:meth:`CPFlexKernel._forward_ulysses`).
 """
 
 from __future__ import annotations
@@ -239,13 +245,16 @@ class CPFlexKernel(nn.Module):
         """Redistribute q/k/v per the strategy, run flex, redistribute back.
 
         For ``kv_allgather``, ``block_mask`` is the Q-sharded BlockMask (local
-        Q, full KV) that pairs with the gathered K/V; for ``ulysses`` the
-        incoming mask is replaced by a full-length causal one (see
-        :meth:`_forward_ulysses`). Returns just the attention output tensor --
-        ``hf_wrapper._flex_attention_hf`` appends the ``None`` LSE itself.
+        Q, full KV) that pairs with the gathered K/V; for ``ulysses`` it is
+        either dropped and rebuilt (single causal document) or used as-is
+        (packed corpus, full-length -- see :meth:`_forward_ulysses`). Returns
+        just the attention output tensor -- ``hf_wrapper._flex_attention_hf``
+        appends the ``None`` LSE itself.
         """
         if self.strategy == "ulysses":
-            return self._forward_ulysses(query, key, value, module=module, **kwargs)
+            return self._forward_ulysses(
+                query, key, value, module=module, block_mask=block_mask, **kwargs
+            )
         key, value = self._flex_cp_allgather(
             key.contiguous(), value.contiguous(), _SEQ_DIM, self._cp_pg_name
         )
@@ -253,20 +262,35 @@ class CPFlexKernel(nn.Module):
         # HF's interface contract is (batch, seq, heads, dim).
         return out.transpose(1, 2)
 
-    def _forward_ulysses(self, query, key, value, *, module, **kwargs):
+    def _forward_ulysses(self, query, key, value, *, module, block_mask=None, **kwargs):
         """Swap the token shard for a head shard, attend full-length, swap back.
 
-        The incoming ``block_mask`` is deliberately dropped: the wrapper
-        Q-shards the mask for every CP strategy (it cannot be told which one
-        attached), while ulysses attends full-length queries. The full-length
-        causal mask is rebuilt here instead -- exact because the wrapper's
-        internal CP mask is causal-only. Packed sequences are refused at
-        attach time in ``apply_cp``.
+        The mask is chosen by what the wrapper handed over, and the two cases
+        are distinguished by the mask's Q length against the post-swap (full)
+        sequence length:
+
+        * a FULL-LENGTH mask is a packed corpus's document mask
+          (``block_causal``): every rank attends the full sequence after the
+          all-to-all, so the unsharded document structure applies directly.
+          Passing it Q-sharded instead would index the wrong queries -- this is
+          the varlen/packed path, where "varlen metadata" in hpmesh's flex
+          integration is the document structure baked into the BlockMask.
+        * anything shorter (or nothing) is the single-document case, whose
+          incoming mask is the wrapper's Q-sharded causal CP mask; the
+          full-length causal one is rebuilt from the length alone (see
+          :meth:`_full_length_causal_mask`).
+
+        The decision is a pure function of shapes the input sharding fixes
+        identically on every rank (the wrapper prebuilds the packed mask
+        whenever ``attn_mask_type`` says packed, and both masks are built over
+        the full pre-shard sequence), so all ranks take the same branch and no
+        rank can stall the all-to-alls on a local surprise.
         """
         q = _SeqToHead.apply(query.contiguous(), self._cp_group)
         k = _SeqToHead.apply(key.contiguous(), self._cp_group)
         v = _SeqToHead.apply(value.contiguous(), self._cp_group)
-        block_mask = self._full_length_causal_mask(q)
+        if block_mask is None or block_mask.seq_lengths[0] != q.shape[_SEQ_DIM]:
+            block_mask = self._full_length_causal_mask(q)
         out = _run_flex(module, q, k, v, block_mask, kwargs)
         out = _HeadToSeq.apply(out.contiguous(), self._cp_group)
         return out.transpose(1, 2)  # HF's interface contract is (b, s/cp, h, d)

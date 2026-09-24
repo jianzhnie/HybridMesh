@@ -23,9 +23,10 @@ Three layers of checks:
   full-sequence logits, and the summed token losses agree. Non-vacuity:
   attending each shard against itself must differ materially, so a kernel that
   secretly skipped the all-to-all could not pass;
-* the refusals: heads not divisible by cp, ulysses + load balancer, and
-  ulysses + packed sequences must all raise rather than compute a confidently
-  wrong answer;
+* the refusals: heads not divisible by cp and ulysses + load balancer must
+  raise rather than compute a confidently wrong answer, while ulysses + packed
+  sequences must attach cleanly (varlen coverage lives in
+  ``cp_ulysses_varlen_equivalence.py``);
 * the asymmetry behind that second refusal: kv_allgather with a load balancer
   is *correct* (the rearrangement lands in the mask too, so it cancels), while
   ulysses with one reproduces the model run over the rearranged corpus. That
@@ -287,7 +288,10 @@ def _check_refusals(mesh, failures: list[str]) -> None:
         lambda: kernel(bad, bad, bad, module=None),
     )
 
-    # Attach-time guards: KV heads not divisible by cp, and packed sequences.
+    # Attach-time guard: KV heads not divisible by cp. Packed sequences are no
+    # longer refused -- ulysses x varlen is supported (the wrapper passes the
+    # document mask full-length) -- so the packed attach must now succeed and
+    # latch the strategy for the wrapper's mask handling.
     cfg = _cfg(num_kv_heads=1)
     model = _build_model(cfg, flex=True)
     _expect(
@@ -298,14 +302,17 @@ def _check_refusals(mesh, failures: list[str]) -> None:
     )
     model = _build_model(_cfg(), flex=True)
     # As in a packed run: ``build_model_config_for`` derives this from the
-    # corpus, and the attach guard below reads it.
+    # corpus. Attaching must NOT raise -- the varlen/packed coverage lives in
+    # cp_ulysses_varlen_equivalence.py.
     model.model.config.attn_mask_type = "block_causal"
-    _expect(
-        ValueError,
-        "packed",
-        "attach with packed sequences",
-        lambda: apply_cp(model, mesh, _cfg().parallel),
-    )
+    try:
+        apply_cp(model, mesh, _cfg().parallel)
+    except Exception as e:  # noqa: BLE001 - any raise here is the failure
+        failures.append(f"attach with packed sequences raised: {e}")
+    if model._cp_strategy != "ulysses":
+        failures.append(
+            f"packed ulysses attach latched strategy {model._cp_strategy!r}"
+        )
 
 
 def _check_ulysses_under_a_load_balancer(mesh, failures: list[str]) -> dict[str, float]:
