@@ -17,11 +17,11 @@ from torch.distributed.device_mesh import init_device_mesh
 
 from hpmesh.models.hf_wrapper import HFTransformerModel, build_model_config
 from hpmesh.parallel.parallel_dims import ParallelDims
+from hpmesh.parallel.pipeline_parallel.apply import _validate_microbatches, apply_pp
 from hpmesh.parallel.pipeline_parallel.pipeline import (
     generate_llm_fqn_per_model_part,
     split_model_into_stages,
 )
-from hpmesh.parallel.pipeline_parallel.pp import _validate_microbatches, apply_pp
 from hpmesh.trainer import ParallelConfig
 
 

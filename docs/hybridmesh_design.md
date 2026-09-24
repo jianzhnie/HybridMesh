@@ -293,7 +293,7 @@ preprocessing 路径调用：`context_parallel/input_shard.py` 的 `shard_batch_
 input_ids/labels/positions 同步切片；BlockMask 只沿 Q 维分片
 （`shard_attention_mask_for_cp`）。loss/token 归约走含 cp 轴的 `loss` mesh。
 
-**EP 已接线**。`parallel/expert_parallel/ep.py` 的 `swap_hf_moe_blocks` 以形状和属性
+**EP 已接线**。`parallel/expert_parallel/swap.py` 的 `swap_hf_moe_blocks` 以形状和属性
 探测 Qwen3Moe、OLMoE、Mixtral、DeepSeek-V2/V3、GLM4 等共同布局，并替换为
 `models/common` 的 `MoE`：router gate 与 experts 权重逐元素直拷进
 `TokenChoiceTopKRouter` / `GroupedExperts`；ep>1 时每 rank 切本地 experts 片并接
@@ -312,7 +312,7 @@ GPT-OSS 的转置、带 bias 专家布局，以及 DeepSeek-V2 的特定 group-l
 ——保留原始层索引以避免跨 rank state_dict 撞名——包成 `PipelineStage`）。vendored 自
 torchtitan，改动全是删除 protocol 层。
 
-**闭环已落地**：`pipeline_parallel/pp.py` 的 `apply_pp` 按 schedule 类推导 stage 数
+**闭环已落地**：`pipeline_parallel/apply.py` 的 `apply_pp` 按 schedule 类推导 stage 数
 （looped schedule 默认每 rank 2 个），切分后对每个 model_part 依次跑 `apply_tp` →
 `apply_fsdp`（与单卡路径同序）；`build_pipeline_schedule` 建 schedule
 （`scale_grads=False`，loss 是 sum 由 trainer 归一）。trainer 侧：

@@ -109,7 +109,7 @@ step 1 恢复 optimizer、scheduler、dataloader 和 train state 后完成并保
 | `RouterGateLinear`, `_RouterGateLinearFunction` | `models/common/linear.py` 同名实现 | 前向 FP32 输出、后向 FP32 GEMM；CUDA bf16 使用 `out_dtype`，其他设备安全提升，**通过** |
 | `TokenChoiceTopKRouter.forward` | `models/common/moe.py` router | hpmesh 参数化而非 Config 构建，保留 softmax/sigmoid、group limit、route norm，**通过（适配）**。上游 e07084202 抽出可覆写 hooks，hpmesh 以 `_select_experts` 为覆写 seam，数学一致 |
 | `RoutedExperts.forward`, `MoE.forward` | 上游同名逻辑 | hpmesh 专家权重是 EP swap 后的本地切片，不是上游 SPMD DTensor，**通过（适配）** |
-| `MoE.update_expert_bias` | 上游 expert bias 更新 | 在 optimizer step hook 执行；跨 PP part 汇总，**通过** |
+| `MoE.update_expert_bias` | 上游 expert bias 更新 | 在 optimizer step hook 执行；跨 PP part 汇总，**通过**。2026-09-24 起注册严格性与上游对齐：所有 MoE层 `load_balance_coeff` 混合配置（部分为 None）即 `ValueError`（上游 `_should_register_moe_balancing_hook` 同源），coeff 全 None 时不注册 hook（免每步无谓 collective） |
 | `MicrobatchWiseLoadBalanceLoss` | 上游 load-balance loss | hpmesh 用 autograd carrier 注入并按有效 token 归一，**通过（适配）** |
 | `aux_loss.AuxLoss.inject/collect_aux_loss_metrics` | `models/common/aux_loss.py` | 去全局 Module registry，使用显式寄存器与 step denominator；与上游逐符号一致（`reduce_mesh="dp"` ↔ hpmesh `"batch"` 是 mesh 命名适配），**通过** |
 | `LocalTokenDispatcher` | `models/common/token_dispatcher.py` | 本地排序、dispatch/combine 与上游同意图，**通过** |
@@ -156,7 +156,7 @@ step 1 恢复 optimizer、scheduler、dataloader 和 train state 后完成并保
 | `apply_fsdp_to_decoder` | 同名上游函数 | 支持 HF ModuleList、MoE expert placement、prefetch。2026-09-23 移植上游 4b5023b80 同源修复：专家分片度经 `_fsdp_shard_degree` 只计 shard 轴，HSDP 下不再误选 `Shard(1)`，**通过（适配）** |
 | `enable_fsdp_symm_mem` | 同名上游函数 | 2026-09-23 起支持 `scope="all"/"dense"/None`（上游 65e495dda），非法 scope 抛 ValueError；经 `fsdp_symm_mem_scope` config 字段（默认 "all"）对用户开放，**通过（适配）** |
 | `disable_fsdp_gradient_division` | 同名上游 helper | global valid-token loss 自行缩放，故禁用 FSDP 平均，**通过** |
-| `apply_fsdp` | 各模型 `parallelize.py` 的 driver | 固定 dtype 策略，非 NCCL 强制 SUM；兼容 Torch 2.10 类型缺失，**通过（适配）** |
+| `apply_fsdp` | 各模型 `parallelize.py` 的 driver | 固定 dtype 策略，非 NCCL 强制 SUM；兼容 Torch 2.10 类型缺失，**通过（适配）**。配置面收窄登记：`cpu_offload` 未接线（`fully_shard/apply.py` 恒 `False`），param/reduce dtype 固定（模型 dtype / fp32），所有 DP 轴为 1 时不装 MixedPrecisionPolicy（数值等价） |
 
 ### 5.4 CP、EP、PP 与 AC
 
@@ -164,13 +164,13 @@ step 1 恢复 optimizer、scheduler、dataloader 和 train state 后完成并保
 |---|---|---|
 | `apply_cp` | `distributed/context_parallel/api.py` + 模型 parallelize | 给 HF attention 注入 kernel；校验 backend、mesh 和 Ulysses heads，**通过（适配）** |
 | `shard_batch_for_cp/tp` | 上游 input sharding/post-dataloading | hpmesh 显式切 token tensors，保持 mask/positions 契约，**通过** |
-| `CPFlexKernel`（KV all-gather / Ulysses 两条路径） | `models/common/cp_attention.py` 同名意图 | 剥掉上游 CPInnerAttention/FlexInnerAttention 类层，redistribution 与 kernel 合在 `context_parallel/cp_kernel.py`；KV all-gather 的 backward reduce-scatter dtype 可配（默认 fp32），Ulysses 为 seq↔head all-to-all，均与上游一致。2026-09-23 起独立的 `primitives.py` 已删除（零调用者的重复实现） | **通过（适配）** |
+| `CPFlexKernel`（KV all-gather / Ulysses 两条路径） | `models/common/cp_attention.py` 同名意图 | 剥掉上游 CPInnerAttention/FlexInnerAttention 类层，redistribution 与 kernel 合在 `context_parallel/cp_kernel.py`；KV all-gather 的 backward reduce-scatter dtype 可配（默认 fp32），Ulysses 为 seq↔head all-to-all，均与上游一致。2026-09-23 起独立的 `primitives.py` 已删除（零调用者的重复实现）；2026-09-24 起 ulysses 的 `_full_length_causal_mask` 复用 `masks.create_attention_mask`（与 wrapper 同 builder、同参数），本地 inspect 兼容副本已删 | **通过（适配）** |
 | `swap_hf_moe_blocks` | transformers backend `moe_replacement.py` | 上游重新初始化，hpmesh 搬运 HF 权重；不是共享实现，等价性测试覆盖，**通过（适配）** |
 | `apply_ep` | 上游模型 EP parallelize | 先 swap 再建立 dispatcher/组，**通过（适配）** |
 | `generate_llm_fqn_per_model_part` | transformers backend `pipeline.py` | 加权切层公式一致，**通过** |
 | `split_model_into_stages` | 同文件 stage split | 删除模块用 `Identity`，每 stage 保留 rotary，兼容 Torch 2.10 `PipelineStage`，**通过（适配）** |
 | `apply_pp`, `build_pipeline_schedule` | `distributed/pipeline_parallel.py` | hpmesh 直接消费 HF 五部件契约，**通过（适配）** |
-| `apply_ac`, selective helpers | `distributed/activation_checkpoint.py` | FullAC/SelectiveAC 已移植，**通过**；RegionAC/MemoryBudgetAC 未移植，见 §9.1 |
+| `apply_ac`, selective helpers | `distributed/activation_checkpoint.py` | FullAC/SelectiveAC 已移植，**通过**；RegionAC/MemoryBudgetAC 未移植，见 §9.1。FullAC 的 `determinism_check`/`debug` 旋钮未暴露（固定默认值），登记于此 |
 
 ## 6. 数据系统
 
@@ -199,12 +199,12 @@ step 1 恢复 optimizer、scheduler、dataloader 和 train state 后完成并保
 |---|---|---|
 | `cross_entropy_loss`, `_LossParallelCrossEntropy` | `components/loss.py` | 以 logits shape 选择 vocab-parallel；非法 label async 拒绝，**通过** |
 | `vocab_shard_bounds`, `next_token_targets` | 上游公式散在 loss/训练器 | hpmesh 提取成共享 helper，**通过（适配）** |
-| `chunked_lm_head_cross_entropy` | 上游 chunked CE | 自行 backward 以控制 logits 峰值，**通过** |
-| `compute_logprobs`, `mse_loss` | 上游对应 loss | 直接自由函数，无 BaseLoss。2026-09-23 起分片路径的 `return_entropy` 真正生效：entropy 经 `_vocab_parallel_entropy` 免 gather 计算（上游 a3d59d316 同源）；batch-invariant 模式先经 `_GatherVocabShards` 全量 gather（后向为切片），**通过** |
+| `chunked_lm_head_cross_entropy` | 上游 chunked CE | 自行 backward 以控制 logits 峰值，**通过**。允许不整除的短尾 chunk（sum 归约下数值等价）。性能差异登记：不合并 lm_head 的 FSDP reshard/grad-sync（上游在 chunk 循环期间禁用），chunked×FSDP 下每 chunk 多一次 all-gather/reduce-scatter，数值等价 |
+| `compute_logprobs`, `mse_loss` | 上游对应 loss | 直接自由函数，无 BaseLoss。2026-09-23 起分片路径的 `return_entropy` 真正生效：entropy 经 `_vocab_parallel_entropy` 免 gather 计算（上游 a3d59d316 同源）；batch-invariant 模式先经 `_GatherVocabShards` 全量 gather（后向为切片），**通过**。严格性差异登记：`tp_group` 已给但 `global_vocab_size=None` 时静默走全词表路径（上游 raise），当前无调用者触发 |
 | `OptimizersContainer` | `components/optimizer/optimizer.py` | 删除 OptimizerWrapper；多 PP part 容器直接实现 Optimizer/Stateful surface，**通过（适配）** |
 | `init_optim_state` | `components/optimizer/utils.py` | 已支持部分参数已有 Adam state，并保持首次真实 step=1，**通过** |
 | flat state dict helpers | 同文件 | FQN flat format，支持 nested state，**通过** |
-| `_wsd_factor`, `LRSchedulersContainer`, `build_lr_scheduler` | `components/optimizer/lr_scheduler.py` | 去 Configurable，数学与 state 语义保留，**通过** |
+| `_wsd_factor`, `LRSchedulersContainer`, `build_lr_scheduler` | `components/optimizer/lr_scheduler.py` | 去 Configurable，数学与 state 语义保留，**通过**。默认值分叉登记：上游 `decay_ratio=None`（默认）表示 warmup 后贯穿余程 decay；hpmesh 无 None，默认 `0.0` 表示永不 decay（config docstring 声明为有意设计）。另新增 `total_steps < training_steps` 拒绝（上游会跑出负 lr） |
 
 ### 7.2 Checkpoint
 
@@ -240,7 +240,7 @@ step 1 恢复 optimizer、scheduler、dataloader 和 train state 后完成并保
 | `accelerator.monitoring.*` | 部分意图见 `tools/utils.py` | C 类，包含 peak FLOPS（含 MI350X）和 memory snapshot |
 | `utils.gc.GarbageCollection` | `tools/utils.py` GC helper | 去 structured logger，**通过（适配）** |
 | `utils.batch_invariant.*` | 上游 trainer/config 内的开关 | C 类提取，线程内全局状态；消费契约与上游一致（`hf_wrapper.py` 的 mask 构造读取同一开关），**通过** |
-| `utils.logger_utils.*` | 无单一对应 | C 类日志格式与 rank/outdir helper |
+| `utils.logger_utils.*` | 无单一对应 | C 类日志格式与 rank helper；2026-09-24 起全仓模块 logger 统一经 `get_logger`（发射时 rank 过滤），文件输出参数随零调用删除 |
 | `utils.checkpoint_keys` | 无文件对应 | C 类，打断 config→checkpointer 导入环 |
 
 ## 9. 缺口、悬空链与禁止误判项
@@ -269,6 +269,15 @@ step 1 恢复 optimizer、scheduler、dataloader 和 train state 后完成并保
   - validation 循环：hpmesh 整体无 validation，上游 6c2dadbb3（零 batch/零有效
     token 报错）与 90b25912f（dp>1 拒绝 validation.steps=-1）暂无挂载点；若未来
     引入 validation，两条校验须一并移植。
+- 2026-09-24 复核新增登记：
+  - `token_dispatcher.py` 的 TorchAO/DeepEP/HybridEP 三个 dispatcher：环境依赖型
+    不移植（torchao 非依赖、DeepEP/HybridEP 为 CUDA-only），理由见文件 docstring。
+  - router `_debug_force_load_balance`：纯调试开关，有意不移植。
+  - `pipeline_with_first_stage_modules`：多模态 first-stage 并入 stage 0，当前无
+    消费者。
+  - PP per-stage seed（上游 `distinct_seed_mesh_dims=["pp"]` + DTensor RNG
+    tracker）：hpmesh 各 stage 共用全局 seed；HF 模型通常 dropout=0 且初始化走
+    materialize 路径，影响面小，登记于此。
 
 ### 9.2 有意删除
 
@@ -341,13 +350,13 @@ step 1 恢复 optimizer、scheduler、dataloader 和 train state 后完成并保
 | `accelerator/dist.py` | object collectives、all_reduce/gather、collect_results | C，vendored 自 OpenMMLab `mmengine.dist`（非 torchtitan 来源），已去 mmengine 化 |
 | `accelerator/dist_utils.py` | init_dist 多 launcher（后端字符串由 `device.py` 单源驱动）、rank/group 查询、`cast_data_device` | C，同上 |
 | `parallel/expert_parallel/apply.py` | `apply_ep` | B，模型 EP parallelize |
-| `parallel/expert_parallel/ep.py` | HF MoE 探测、权重搬运与 swap | B，transformers backend `moe_replacement.py` |
+| `parallel/expert_parallel/swap.py` | HF MoE 探测、权重搬运与 swap | B，transformers backend `moe_replacement.py` |
 | `parallel/fully_shard/fsdp.py` | FSDP engine、mesh 与 placement | A2，`distributed/fsdp.py` |
-| `parallel/fully_shard/fsdp_wrap.py` | `apply_fsdp` HF driver | B，各模型 parallelize |
+| `parallel/fully_shard/apply.py` | `apply_fsdp` HF driver | B，各模型 parallelize |
 | `parallel/parallel_dims.py` | `ParallelDims` 与 mesh accessors | A2，distributed parallel dims |
 | `parallel/parallelize_hf.py` | 五种并行的总装配 | B，transformers backend parallelize |
 | `parallel/pipeline_parallel/pipeline.py` | FQN split 与 stage 构造 | A2，transformers backend pipeline |
-| `parallel/pipeline_parallel/pp.py` | metadata、apply、schedule build | B，`distributed/pipeline_parallel.py` |
+| `parallel/pipeline_parallel/apply.py` | metadata、apply、schedule build | B，`distributed/pipeline_parallel.py` |
 | `parallel/tensor_parallel/linear.py` | fused/fallback collective GEMM | A2，`models/common/dist_gemm.py`（原 `distributed/linear.py`，上游已删除并搬迁改名） |
 | `parallel/tensor_parallel/tp.py` | HF plan realizer 与 `apply_tp` | B，各模型 TP plan（上游 `distributed/tensor_parallel.py` 已删除，无后继） |
 | `trainer/config.py` | 全部配置 dataclass | B，`config/configs.py` + 嵌套 Config |
@@ -358,7 +367,7 @@ step 1 恢复 optimizer、scheduler、dataloader 和 train state 后完成并保
 | `accelerator/device.py` | 设备发现、backend 选择、厂商谓词、峰值显存查询 | C |
 | `utils/filesystem.py` | path/storage helpers | A1，`tools/filesystem.py` |
 | `utils/gc.py` | `GarbageCollection` | B，`tools/utils.py` |
-| `utils/logger_utils.py` | formatter、rank、outdir | C |
+| `utils/logger_utils.py` | `get_logger`（彩色 formatter + 发射时 rank 过滤）、`get_distributed_rank` | C |
 | `accelerator/monitoring.py` | device/memory/FLOPS helpers | C；部分意图可参考 `tools/utils.py` |
 | `accelerator/spmd_context.py` | SPMD mesh 上下文 | C，pip `spmd_types` 适配 |
 

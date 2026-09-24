@@ -28,8 +28,8 @@ class GarbageCollection:
     """Periodic, manually scheduled cyclic collection.
 
     Args:
-        gc_freq: collect every this many steps. 0 disables periodic collection
-            while leaving the collector off.
+        gc_freq: collect every this many steps; must be positive (matching
+            upstream, non-positive values are rejected).
         debug: collect every step and warn about tensor reference cycles.
     """
 

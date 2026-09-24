@@ -8,14 +8,15 @@ checkpoint produced by Transformers. No tensor conversion is required.
 from __future__ import annotations
 
 import json
-import logging
 import os
 import re
 from typing import Any
 
 from torch.distributed.checkpoint import HuggingFaceStorageReader
 
-logger = logging.getLogger(__name__)
+from ..utils.logger_utils import get_logger
+
+logger = get_logger(__name__)
 
 
 class HFTransformerStateDictAdapter:

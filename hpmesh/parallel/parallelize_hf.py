@@ -28,27 +28,26 @@ oversight:
   data in the model registry instead (see docs/hybridmesh_design.md, SEAM 1).
 * **Swapping in a native MoE.** No longer true: ``apply_ep`` swaps HF MoE
   blocks for the ``models/common`` MoE stack when ``ep > 1`` (see
-  ``parallel/expert_parallel/ep.py``). The swap moves weights rather than
+  ``parallel/expert_parallel/swap.py``). The swap moves weights rather than
   re-initializing them, so the model still trains from HF's initialization.
 """
 
 from __future__ import annotations
-
-import logging
 
 import torch
 import torch.nn as nn
 
 from hpmesh.trainer.config import ParallelConfig, SelectiveACConfig
 
+from ..utils.logger_utils import get_logger
 from .activation_checkpoint import apply_ac
 from .context_parallel import apply_cp
 from .expert_parallel import apply_ep
-from .fully_shard.fsdp_wrap import apply_fsdp
+from .fully_shard.apply import apply_fsdp
 from .pipeline_parallel import PipelineParallelSetup, apply_pp, build_pipeline_schedule
 from .tensor_parallel.tp import apply_tp
 
-logger = logging.getLogger(__name__)
+logger = get_logger(__name__)
 
 __all__ = ["PipelineParallelSetup", "parallelize_hf_transformers"]
 

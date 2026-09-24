@@ -43,7 +43,6 @@ model one only because a model has no other home.
 
 from __future__ import annotations
 
-import logging
 import queue
 import re
 import threading
@@ -68,8 +67,9 @@ from ...utils.checkpoint_keys import (
     TRAIN_STATE,
 )
 from ...utils.gc import GarbageCollection
+from ...utils.logger_utils import get_logger
 
-logger = logging.getLogger(__name__)
+logger = get_logger(__name__)
 
 # The state keys are defined in ``utils/checkpoint_keys.py`` so that
 # ``trainer/config.py`` can read them without importing this package; the

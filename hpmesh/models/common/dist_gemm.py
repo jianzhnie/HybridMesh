@@ -30,7 +30,6 @@ a misconfiguration looks like success -- hence the warning rather than silence.
 
 from __future__ import annotations
 
-import logging
 import math
 
 import torch
@@ -44,7 +43,9 @@ from hpmesh.parallel.tensor_parallel.linear import (
     LinearReduceScatter,
 )
 
-logger = logging.getLogger(__name__)
+from ...utils.logger_utils import get_logger
+
+logger = get_logger(__name__)
 
 __all__ = [
     "AllGatherFusedQKVLinear",

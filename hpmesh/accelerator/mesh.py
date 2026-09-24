@@ -30,7 +30,7 @@ from ..trainer.config import HybridMeshConfig
 # These are the axes of the dense mesh the parallel layer is handed; ``pp`` is
 # not among them because pipeline stages live on disjoint rank sets -- the PP
 # path resolves its own views off ParallelDims instead (see
-# parallel/pipeline_parallel/pp.py).
+# parallel/pipeline_parallel/apply.py).
 MESH_AXES = ("dp", "cp", "tp")
 
 

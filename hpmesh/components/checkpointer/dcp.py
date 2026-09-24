@@ -34,7 +34,6 @@ Two departures from torchtitan, both subtractions:
 from __future__ import annotations
 
 import enum
-import logging
 import os
 import queue
 import threading
@@ -62,6 +61,7 @@ from ...utils.gc import GarbageCollection
 if TYPE_CHECKING:
     from ...trainer.config import CheckpointConfig
 
+from ...utils.logger_utils import get_logger
 from .base import (
     DATALOADER,
     LR_SCHEDULER,
@@ -72,7 +72,7 @@ from .base import (
     purge_thread,
 )
 
-logger = logging.getLogger(__name__)
+logger = get_logger(__name__)
 
 
 # Mirrors torchtitan's config-level dtype map, narrowed to the three values the

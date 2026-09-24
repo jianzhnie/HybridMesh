@@ -68,7 +68,6 @@ only adds, and is refused at the point the shared expert is found.
 
 from __future__ import annotations
 
-import logging
 import sys
 from typing import NamedTuple
 
@@ -89,8 +88,9 @@ from ...models.common.token_dispatcher import (
     AllToAllTokenDispatcher,
     LocalTokenDispatcher,
 )
+from ...utils.logger_utils import get_logger
 
-logger = logging.getLogger(__name__)
+logger = get_logger(__name__)
 
 __all__ = ["swap_hf_moe_blocks"]
 
@@ -688,7 +688,7 @@ def swap_hf_moe_blocks(
             f"({type(getattr(model, 'model', model)).__name__}): no layer's "
             "``mlp`` has the router-gate + fused gate_up_proj/down_proj shape "
             "this swap recognizes. Add the model family's layout to the probe "
-            "in parallel/expert_parallel/ep.py."
+            "in parallel/expert_parallel/swap.py."
         )
     logger.info("Swapped %d HF MoE blocks for hpmesh MoE blocks", swapped)
     return swapped

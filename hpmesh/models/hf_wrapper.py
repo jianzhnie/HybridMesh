@@ -30,7 +30,6 @@ hidden states instead, for the trainer's chunked-loss path.
 
 from __future__ import annotations
 
-import logging
 import os
 from typing import Any
 
@@ -52,13 +51,14 @@ from ..parallel.context_parallel import (
 )
 from ..parallel.parallel_dims import ParallelDims
 from ..utils.batch_invariant import is_in_batch_invariant_mode
+from ..utils.logger_utils import get_logger
 from .common.masks import (
     create_attention_mask,
     get_causal_mask_mod,
     get_document_mask_mod,
 )
 
-logger = logging.getLogger(__name__)
+logger = get_logger(__name__)
 
 __all__ = [
     "HFTransformerModel",

@@ -205,7 +205,7 @@ class TokenChoiceTopKRouter(nn.Module):
         # once the load-balancing bias can push ``scores_for_choice`` negative
         # -- a masked 0.0 then outranks a real expert inside a selected group.
         # V2 never reaches this code (its ``topk_method`` is "greedy", so
-        # ``ep.py`` builds it no group restriction), but matching the majority
+        # ``swap.py`` builds it no group restriction), but matching the majority
         # spelling is the right default for the ones that do.
         scores_for_choice_TE = scores_TGP.masked_fill(
             unselected_groups_TG.unsqueeze(-1), float("-inf")
@@ -547,10 +547,27 @@ def register_moe_load_balancing_hook(
     own hook machinery rather than a hook registry.
 
     A no-op when no model part carries a MoE layer, so a dense run pays neither
-    the traversal nor an empty collective.
+    the traversal nor an empty collective. It is also a no-op when every MoE
+    layer has ``load_balance_coeff=None`` -- nothing would consume the reduced
+    counts, so no hook (and no per-step collective) is registered at all. A
+    mixed configuration, where only some layers carry a coeff, is rejected
+    outright: silently balancing a subset of the layers would look like a
+    working setup while the rest drift (torchtitan makes the same check in
+    ``_should_register_moe_balancing_hook``).
     """
     mappers = [(part, _iter_moe_layers(part)) for part in model_parts]
-    if not any(layers for _, layers in mappers):
+    all_layers = [moe for _, layers in mappers for moe in layers]
+    if not all_layers:
+        return
+    load_balance_enabled = all_layers[0].load_balance_coeff is not None
+    for moe in all_layers[1:]:
+        if (moe.load_balance_coeff is not None) != load_balance_enabled:
+            raise ValueError(
+                "MoE load_balance_coeff must be configured consistently across "
+                "all MoE layers. Either set it for every MoE layer or leave it "
+                "unset for all MoE layers."
+            )
+    if not load_balance_enabled:
         return
     optimizer.register_step_pre_hook(
         lambda *args, **kwargs: _update_expert_bias(mappers, parallel_dims)

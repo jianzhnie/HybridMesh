@@ -207,6 +207,37 @@ def test_no_hook_is_registered_for_a_model_without_moe_layers() -> None:
     assert optimizer._optimizer_step_pre_hooks == {}
 
 
+def test_no_hook_is_registered_when_every_coeff_is_none() -> None:
+    """``load_balance_coeff=None`` everywhere means nothing consumes the counts.
+
+    Registering anyway would cost one ``vstack`` + dp/cp all-reduce per step
+    whose result every layer then ignores -- a pure-waste collective.
+    """
+    model = _Holder([_moe(coeff=None), _moe(coeff=None)])
+    optimizer = torch.optim.SGD([torch.nn.Parameter(torch.zeros(1))], lr=0.1)
+
+    register_moe_load_balancing_hook(optimizer, [model], parallel_dims=None)
+
+    assert optimizer._optimizer_step_pre_hooks == {}
+
+
+def test_a_mixed_coeff_configuration_is_rejected() -> None:
+    """Balancing only some layers silently would drift the rest, so fail fast.
+
+    Torchtitan raises on the same configuration in
+    ``_should_register_moe_balancing_hook``; the swap installs the coeff
+    uniformly, so reaching this state means a hand-built model -- exactly the
+    case a loud error should catch.
+    """
+    model = _Holder([_moe(coeff=0.1), _moe(coeff=None)])
+    optimizer = torch.optim.SGD([torch.nn.Parameter(torch.zeros(1))], lr=0.1)
+
+    with pytest.raises(ValueError, match="load_balance_coeff"):
+        register_moe_load_balancing_hook(optimizer, [model], parallel_dims=None)
+
+    assert optimizer._optimizer_step_pre_hooks == {}
+
+
 def test_a_dense_layer_among_sparse_ones_is_skipped() -> None:
     """Mixed sparse/dense models have layers with no MoE at all."""
     sparse = _moe()

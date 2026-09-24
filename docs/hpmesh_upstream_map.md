@@ -99,8 +99,9 @@ C 类上会把项目**故意删掉**的抽象又拽回来。
 | `parallel/activation_checkpoint.py` | `distributed/activation_checkpoint.py` | 0.374 | **FullAC + SelectiveAC 已移植**；RegionAC（需 `torch_remat`）、MemoryBudgetAC（需编译）未移植，理由见文件 docstring |
 | `parallel/fully_shard/fsdp.py` | `distributed/fsdp.py` | 0.815 | 多轴 mesh 重建、HF decoder 与 MoE placement 是 hpmesh 适配 |
 | `parallel/parallel_dims.py` | `distributed/parallel_dims.py` | 0.772 | hpmesh 扩展 world/loss/sparse mesh 视图，不能按旧 A1 结构覆盖 |
-| `parallel/pipeline_parallel/pipeline.py` | `experiments/transformers_modeling_backend/pipeline.py` | 0.686 | `None` → `nn.Identity`；每 stage 追加 `rotary_emb` |
+| `parallel/pipeline_parallel/pipeline.py` | `experiments/transformers_modeling_backend/pipeline.py` | 0.686 | `None` → `nn.Identity`；每 stage 追加 `rotary_emb`；stage 内 layer 保留原始索引（不重新编号），避免多 stage state-dict FQN 冲突 |
 | `parallel/tensor_parallel/linear.py` | `models/common/dist_gemm.py`（原 `distributed/linear.py`，上游 e72fd863d 搬迁并改名 `Async*`，数学不变） | 0.511 | 保留 fused/fallback 数学意图，但运行时上下文和 autograd 形状已适配 hpmesh |
+| `accelerator/collectives.py` | `distributed/utils.py`（vendored `set_pg_timeouts` 与 EP 感知 `clip_grad_norm_` 两个符号） | 部分 | 2026-09-24 从 `parallel/` 迁入 `accelerator/`；EP 裁剪按物理本地 expert 参数适配（免 DTensor "ep" 轴断言）；同日复核后由 C 改标 A2 |
 
 ## B —— 适配层（读意图，不要抄形状）
 
@@ -112,9 +113,9 @@ C 类上会把项目**故意删掉**的抽象又拽回来。
 | `models/hf_wrapper.py` | `experiments/transformers_modeling_backend/model.py` 的包装层；上游另有 `models/*/model.py` 各一份 | 0.059 |
 | `parallel/parallelize_hf.py` | `experiments/transformers_modeling_backend/parallelize.py` + 各 `models/*/parallelize.py` | 0.089 |
 | `parallel/tensor_parallel/tp.py` | 各模型 TP plan；上游 `distributed/tensor_parallel.py` 已随 DTensor 后端删除、无后继文件。hpmesh 是**手写 plan realizer**，不是声明式 `_sharding_config` | 0.056 |
-| `parallel/expert_parallel/apply.py` + `ep.py` | `experiments/.../moe_replacement.py` + 各模型 EP parallelize；hpmesh 搬运 HF 权重而非重新初始化 | 0.036–0.146 |
-| `parallel/fully_shard/fsdp_wrap.py` | 各 `models/*/parallelize.py` 的 FSDP driver；HF 五部件适配 | 0.155 |
-| `parallel/pipeline_parallel/pp.py` | `distributed/pipeline_parallel.py`；hpmesh 直接消费 HF stage 部件 | 0.130 |
+| `parallel/expert_parallel/apply.py` + `swap.py` | `experiments/.../moe_replacement.py` + 各模型 EP parallelize；hpmesh 搬运 HF 权重而非重新初始化 | 0.036–0.146 |
+| `parallel/fully_shard/apply.py` | 各 `models/*/parallelize.py` 的 FSDP driver；HF 五部件适配 | 0.155 |
+| `parallel/pipeline_parallel/apply.py` | `distributed/pipeline_parallel.py`；hpmesh 直接消费 HF stage 部件 | 0.130 |
 | `trainer/trainer.py` | `trainer.py`，基本重写 | 0.065 |
 | `trainer/config.py` | `config/configs.py` | 0.189 |
 | `trainer/train.py` | `train.py` | 0.186 |
@@ -130,11 +131,10 @@ C 类上会把项目**故意删掉**的抽象又拽回来。
 | hpmesh | 说明 |
 | --- | --- |
 | `accelerator/spmd_context.py` | `spmd_types` pip 包的**独立活跃适配层**，由 trainer 和 `models/common/*` 使用；2026-09-24 从 `utils/` 迁入 |
-| `accelerator/collectives.py` | 最优相似度 0.089，是独立实现；2026-09-24 从 `parallel/` 迁入 |
 | `parallel/context_parallel/apply.py` | 0.058；CP 的编排层，上游无对应文件 |
 | `parallel/context_parallel/cp_kernel.py` | 0.051；hpmesh 独有的 CP flex kernel |
 | `parallel/context_parallel/input_shard.py` | 0.078 |
-| `utils/logger_utils.py` | 0.070，上游无对应 |
+| `utils/logger_utils.py` | 0.070，上游无对应；2026-09-24 起全仓模块 logger 统一经 `get_logger`（handler 挂模块 logger，rank 过滤在发射时判定，修掉了"import 时 rank 未知"的旧缺陷） |
 | `accelerator/monitoring.py` | 与 `tools/utils.py` 0.107，独立实现（含 `get_peak_flops`）；2026-09-24 从 `utils/` 迁入 |
 | `utils/checkpoint_keys.py` | 上游无 |
 | `accelerator/device.py` | 上游无（0.382 是噪音，命中实验目录）；2026-09-24 从 `utils/` 迁入 `accelerator/` |
@@ -172,6 +172,9 @@ C 类上会把项目**故意删掉**的抽象又拽回来。
 | `CastLinear`（150c4f73a 配套） | lm_head compute-dtype 变换；hpmesh 不带 `Linear` 类体系 |
 | Ulysses CP × varlen/packed（baff3c681） | redistribution 原语 hpmesh 已有，缺 varlen 内层 attention 路径；`apply_cp` 对该组合保持 fail-fast |
 | 多轮对话 SFT 的 renderer 路径（4a0d8dab3） | 依赖 `renderers==0.1.11` 与上游 `components/renderer.py`（Configurable 系） |
+| `models/common/token_dispatcher.py` 的 TorchAO/DeepEP/HybridEP 三个 dispatcher | 环境依赖型不移植：torchao 非依赖、DeepEP/HybridEP 为 CUDA-only，本机无法验证；`AllToAllTokenDispatcher` 满足同一 dispatch/combine 契约，理由见文件 docstring |
+| router `_debug_force_load_balance`（`models/common/moe.py`） | 纯调试 round-robin 强制均衡开关，有意不移植 |
+| `distributed/pipeline_parallel.py` 的 `pipeline_with_first_stage_modules` | 多模态 first-stage 模块并入 stage 0；hpmesh PP 当前限 decoder 五部件，无消费者 |
 
 **故意删除，不是缺口**（不要"补回来"）：`components/quantization/`、
 `structured_logger/`、`protocols/`、`configurable.py`。

@@ -1,4 +1,3 @@
-import logging
 from collections.abc import Iterator
 from typing import Any
 
@@ -10,9 +9,10 @@ from torch.distributed.fsdp import CPUOffloadPolicy, MixedPrecisionPolicy, fully
 from torch.distributed.tensor import Shard
 from torch.nn import ModuleDict
 
+from ...utils.logger_utils import get_logger
 from ..parallel_dims import ParallelDims
 
-logger = logging.getLogger(__name__)
+logger = get_logger(__name__)
 
 
 def iter_transformer_layers(layers: nn.Module) -> Iterator[tuple[Any, nn.Module]]:

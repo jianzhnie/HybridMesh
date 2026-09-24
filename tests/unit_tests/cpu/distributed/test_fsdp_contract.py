@@ -24,7 +24,7 @@ import torch.nn as nn
 from torch.nn import ModuleDict, ModuleList
 
 from hpmesh.models.hf_wrapper import HFTransformerModel, build_model_config
-from hpmesh.parallel.fully_shard import fsdp_wrap
+from hpmesh.parallel.fully_shard import apply
 from hpmesh.parallel.fully_shard.fsdp import iter_transformer_layers
 
 _VOCAB = 32
@@ -146,10 +146,10 @@ def test_apply_fsdp_preserves_parameter_dtype_for_mixed_precision(
             return 2
 
     captured: dict[str, object] = {}
-    monkeypatch.setattr(fsdp_wrap, "resolve_fsdp_mesh", lambda _dims: _Mesh())
-    monkeypatch.setattr(fsdp_wrap, "resolve_sparse_fsdp_mesh", lambda _dims: None)
+    monkeypatch.setattr(apply, "resolve_fsdp_mesh", lambda _dims: _Mesh())
+    monkeypatch.setattr(apply, "resolve_sparse_fsdp_mesh", lambda _dims: None)
     monkeypatch.setattr(
-        fsdp_wrap,
+        apply,
         "apply_fsdp_to_decoder",
         lambda _model, _mesh, **kwargs: captured.update(kwargs),
     )
@@ -166,7 +166,7 @@ def test_apply_fsdp_preserves_parameter_dtype_for_mixed_precision(
         {"fsdp_reshard_after_forward": "default", "enable_fsdp_symm_mem": False},
     )()
 
-    fsdp_wrap.apply_fsdp(model, config, parallel_dims)
+    apply.apply_fsdp(model, config, parallel_dims)
 
     assert captured["param_dtype"] is torch.bfloat16
     assert captured["reduce_dtype"] is torch.float32

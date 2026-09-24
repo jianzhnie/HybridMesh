@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import logging
 from dataclasses import dataclass, field
 from enum import StrEnum
 
@@ -9,8 +8,9 @@ from torch.distributed.device_mesh import DeviceMesh, init_device_mesh
 from hpmesh.trainer.config import ParallelConfig
 
 from ..accelerator.device import device_type
+from ..utils.logger_utils import get_logger
 
-logger = logging.getLogger(__name__)
+logger = get_logger(__name__)
 
 
 __all__ = [

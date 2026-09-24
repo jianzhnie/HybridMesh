@@ -1,11 +1,19 @@
-"""Colored distributed-aware logging with rank information."""
+"""Colored distributed-aware logging with rank information.
+
+hpmesh configures one stdout handler per module logger instead of touching the
+root logger, so a module that wants its INFO lines on the console takes its
+logger from ``get_logger`` here rather than from ``logging.getLogger``. The
+rank decision is made by a filter *at emit time*, not when the logger is
+created: engine modules are imported before ``init_dist``, when the real rank
+is not knowable yet, so an import-time rank check would hand every rank a
+rank-0 configuration.
+"""
 
 from __future__ import annotations
 
 import logging
 import sys
 from logging import Formatter, LogRecord
-from pathlib import Path
 from typing import ClassVar
 
 from colorama import Fore, Style
@@ -27,7 +35,6 @@ class ColorfulFormatter(Formatter):
     def format(self, record: LogRecord) -> str:
         # Add rank information to the record
         record.rank = self._get_rank()
-        record.is_main = record.rank == 0
 
         # Format the log message
         log_message = super().format(record)
@@ -39,80 +46,48 @@ class ColorfulFormatter(Formatter):
         return get_distributed_rank()
 
 
-def get_logger(
-    name: str,
-    log_file: str | Path | None = None,
-    log_level: int = logging.INFO,
-    file_mode: str = "w",
-    force_main_process: bool = False,
-) -> logging.Logger:
-    """Create or retrieve a logger with optional file output and
-    distributed-aware log levels."""
-    if file_mode not in ("w", "a"):
-        raise ValueError("file_mode must be either 'w' or 'a'")
+class MainProcessFilter(logging.Filter):
+    """Decide per record, at emit time, whether it reaches the console.
 
-    # Get or create logger instance
+    Regular lines (below ERROR) pass only on the rank-0 process -- that is the
+    whole point of distributed-aware logging. ERROR and above pass on every
+    rank: a failure on rank 3 is exactly the line you cannot afford to lose,
+    and the old import-time configuration let those through (via the root
+    logger's last-resort handler) precisely because non-main loggers carried
+    no handler of their own.
+    """
+
+    def filter(self, record: LogRecord) -> bool:
+        return record.levelno >= logging.ERROR or get_distributed_rank() == 0
+
+
+def get_logger(name: str, log_level: int = logging.INFO) -> logging.Logger:
+    """Create or retrieve a module logger with a rank-aware stdout handler.
+
+    Below ERROR, only the rank-0 process prints; ERROR and above print on
+    every rank. The decision is made by ``_MainProcessFilter`` at emit time,
+    so the logger can be created at module import time, before the process
+    group exists. The handler is attached once per ``name``; repeat calls
+    return the same logger untouched.
+    """
     logger = logging.getLogger(name)
-
-    # Return existing logger if already initialized
     if name in logger_initialized:
         return logger
 
-    # Get current rank safely
-    rank = get_distributed_rank()
-    is_main_process = rank == 0
-
-    # Fix PyTorch DDP duplicate logging issue
-    # Clear existing handlers to prevent duplicate logging
     if logger.handlers:
         logger.handlers.clear()
 
-    # Only configure handlers for main process or if explicitly requested
-    if is_main_process or not force_main_process:
-        # Initialize handlers list
-        handlers = []
+    fmt = (
+        "%(asctime)s - [Rank %(rank)d] - "
+        "%(name)s.%(funcName)s:%(lineno)d - %(levelname)s - %(message)s"
+    )
+    handler = logging.StreamHandler(sys.stdout)
+    handler.setFormatter(ColorfulFormatter(fmt=fmt, datefmt="%Y-%m-%d %H:%M:%S"))
+    handler.addFilter(MainProcessFilter())
+    logger.addHandler(handler)
+    logger.setLevel(log_level)
 
-        # Add StreamHandler for main process only
-        if is_main_process:
-            stream_handler = logging.StreamHandler(sys.stdout)
-            handlers.append(stream_handler)
-
-        # Add FileHandler for rank 0 process if log_file is specified
-        if is_main_process and log_file is not None:
-            log_file = Path(log_file)
-            log_file.parent.mkdir(parents=True, exist_ok=True)
-            handlers.append(logging.FileHandler(str(log_file), file_mode))
-
-        # Configure formatter with rank information
-        if is_main_process:
-            fmt = (
-                "%(asctime)s - [Rank %(rank)d] - "
-                "%(name)s.%(funcName)s:%(lineno)d - %(levelname)s - %(message)s"
-            )
-        else:
-            fmt = (
-                "%(asctime)s - [Rank %(rank)d] - %(name)s - %(levelname)s - %(message)s"
-            )
-
-        formatter = ColorfulFormatter(fmt=fmt, datefmt="%Y-%m-%d %H:%M:%S")
-
-        # Apply configuration to all handlers
-        for handler in handlers:
-            handler.setFormatter(formatter)
-            handler.setLevel(log_level if is_main_process else logging.ERROR)
-            logger.addHandler(handler)
-
-    # Set logger level based on rank and configuration
-    if force_main_process:
-        logger.setLevel(
-            log_level if is_main_process else logging.CRITICAL + 1
-        )  # Disable logging for non-main processes
-    else:
-        logger.setLevel(log_level if is_main_process else logging.ERROR)
-
-    # Mark logger as initialized
     logger_initialized[name] = True
-
     return logger
 
 
