@@ -17,7 +17,11 @@ from torch.distributed.device_mesh import init_device_mesh
 
 from hpmesh.models.hf_wrapper import HFTransformerModel, build_model_config
 from hpmesh.parallel.parallel_dims import ParallelDims
-from hpmesh.parallel.pipeline_parallel.apply import _validate_microbatches, apply_pp
+from hpmesh.parallel.pipeline_parallel.apply import (
+    _prepend_first_stage_modules,
+    _validate_microbatches,
+    apply_pp,
+)
 from hpmesh.parallel.pipeline_parallel.pipeline import (
     generate_llm_fqn_per_model_part,
     split_model_into_stages,
@@ -288,4 +292,109 @@ def test_pp_with_ep_is_refused_loudly() -> None:
             cfg=cfg,
             device=torch.device("cpu"),
             global_batch_size=8,
+        )
+
+
+# -- first_stage_module_fqns: co-locating extra modules with stage 0 ----------
+
+
+def _model_with_vision_encoder() -> HFTransformerModel:
+    """The five-part wrapper plus one extra top-level child, as a multimodal
+    model would carry it."""
+    model = _model()
+    model.vision_encoder = nn.Linear(16, 16, bias=False)
+    return model
+
+
+def test_first_stage_modules_are_prepended_to_stage_0() -> None:
+    model = _model_with_vision_encoder()
+    parts = generate_llm_fqn_per_model_part(2, _NUM_LAYERS)
+    stage0_before = list(parts[0])
+    rest_before = [list(part) for part in parts[1:]]
+
+    _prepend_first_stage_modules(parts, model, ["vision_encoder"])
+
+    assert parts[0] == ["vision_encoder"] + stage0_before
+    assert parts[1:] == rest_before
+
+
+def test_first_stage_module_order_is_preserved() -> None:
+    model = _model_with_vision_encoder()
+    model.audio_encoder = nn.Linear(16, 16, bias=False)
+    parts = generate_llm_fqn_per_model_part(2, _NUM_LAYERS)
+
+    _prepend_first_stage_modules(parts, model, ["audio_encoder", "vision_encoder"])
+
+    assert parts[0][:2] == ["audio_encoder", "vision_encoder"]
+
+
+def test_absent_first_stage_modules_are_skipped() -> None:
+    """A caller may list modules only some model variants carry."""
+    model = _model()  # no vision_encoder
+    parts = generate_llm_fqn_per_model_part(2, _NUM_LAYERS)
+    expected = [list(part) for part in parts]
+
+    _prepend_first_stage_modules(parts, model, ["vision_encoder"])
+
+    assert parts == expected
+
+
+def test_first_stage_module_already_owned_by_the_split_is_rejected() -> None:
+    """A decoder part would get a live copy on two stages and collide their
+    state-dict keys in one checkpoint."""
+    model = _model()
+    parts = generate_llm_fqn_per_model_part(2, _NUM_LAYERS)
+
+    with pytest.raises(ValueError, match="already assigned"):
+        _prepend_first_stage_modules(parts, model, ["norm"])
+
+
+def test_duplicate_first_stage_module_is_rejected() -> None:
+    model = _model_with_vision_encoder()
+    parts = generate_llm_fqn_per_model_part(2, _NUM_LAYERS)
+
+    with pytest.raises(ValueError, match="more than once"):
+        _prepend_first_stage_modules(
+            parts, model, ["vision_encoder", "vision_encoder"]
+        )
+
+
+def test_split_keeps_first_stage_module_fqns_stable(pp_mesh) -> None:
+    """Stage 0 holds the real extra module under its unsplit name; every other
+    stage blanks it, and no parameter key moves or collides."""
+    model = _model_with_vision_encoder()
+    unsplit_keys = {k for k, _ in model.named_parameters()}
+    module_names = generate_llm_fqn_per_model_part(2, _NUM_LAYERS)
+    _prepend_first_stage_modules(module_names, model, ["vision_encoder"])
+
+    _, model_parts = split_model_into_stages(
+        model, pp_mesh, "1F1B", torch.device("cpu"), module_names
+    )
+    first, last = model_parts
+
+    assert not isinstance(first.vision_encoder, nn.Identity)
+    assert isinstance(last.vision_encoder, nn.Identity)
+
+    first_keys = {k for k, _ in first.named_parameters()}
+    last_keys = {k for k, _ in last.named_parameters()}
+    assert any(k.startswith("vision_encoder.") for k in first_keys)
+    assert first_keys.isdisjoint(last_keys)
+    # FQN stability: every key on either stage is a key of the unsplit model.
+    assert first_keys | last_keys <= unsplit_keys
+
+
+def test_split_without_first_stage_modules_is_unchanged(pp_mesh) -> None:
+    """Default behavior: the five-part split owns exactly the same keys as
+    before the option existed (the extra child is blanked on both stages)."""
+    model = _model_with_vision_encoder()
+    module_names = generate_llm_fqn_per_model_part(2, _NUM_LAYERS)
+
+    _, model_parts = split_model_into_stages(
+        model, pp_mesh, "1F1B", torch.device("cpu"), module_names
+    )
+
+    for part in model_parts:
+        assert isinstance(part.vision_encoder, nn.Identity)
+        assert not any(
+            k.startswith("vision_encoder.") for k, _ in part.named_parameters()
         )

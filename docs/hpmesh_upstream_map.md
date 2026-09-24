@@ -172,8 +172,22 @@ C 类上会把项目**故意删掉**的抽象又拽回来。
 | Ulysses CP × varlen/packed（baff3c681） | redistribution 原语 hpmesh 已有，缺 varlen 内层 attention 路径；`apply_cp` 对该组合保持 fail-fast |
 | 多轮对话 SFT 的 renderer 路径（4a0d8dab3） | 依赖 `renderers==0.1.11` 与上游 `components/renderer.py`（Configurable 系） |
 | `models/common/token_dispatcher.py` 的 TorchAO/DeepEP/HybridEP 三个 dispatcher | 环境依赖型不移植：torchao 非依赖、DeepEP/HybridEP 为 CUDA-only，本机无法验证；`AllToAllTokenDispatcher` 满足同一 dispatch/combine 契约，理由见文件 docstring |
-| `distributed/pipeline_parallel.py` 的 `pipeline_with_first_stage_modules` | 多模态 first-stage 模块并入 stage 0；hpmesh PP 当前限 decoder 五部件，无消费者 |
 | DSA（DeepSeek sparse attention）的稠密 additive mask 路径 | 上游 `model.py` 的 `_build_dense_attention_mask` + indexer 支持；**2026-09-24 起 hpmesh wrapper 构造期对 `index_topk` fail-fast**（静默走 flex BlockMask 的错误语义已消除），稠密 mask 执行路径本身仍未移植，无消费者 |
+
+**已从 D 移除**（2026-09-24 批 4 移植）：`pipeline_with_first_stage_modules`——
+多模态 first-stage 模块并入 stage 0，落为 `apply_pp` 的可选关键字参数
+`first_stage_module_fqns: Sequence[str] | None`（默认 None，默认时切分与
+state-dict 键逐位不变）+ `parallel/pipeline_parallel/apply.py::
+_prepend_first_stage_modules`（仅作用于自动生成的切分，把存在的 FQN 按序前插
+stage 0；已被切分占有的 FQN 与重复 FQN loud-raise，缺失模块跳过；显式
+`module_fqns_per_model_part` 给定时忽略并告警，与上游委托语义一致）。配套改动
+`split_model_into_stages`：wrapper `named_children()` 不呈现的额外顶层模块
+（注册在 decoder 旁的多模态编码器等）在非属主 stage 上一律置 `nn.Identity`
+——上游"pruned on other stages"语义；装五部件的容器（wrapper 内层 HF 模型）
+通过"包含已呈现部件"判定跳过，绝不置空。不变量：stage FQN 稳定（并入模块保持
+原名顶层子模块，optimizer/checkpoint 键不跨 stage 冲突）、五部件契约与
+`named_children()` 语义不变。当前无真实消费者（多模态 vision encoder 路径未
+接线），属"能力就位 + 契约测试"；多 stage 真跑待目标设备（torch≥2.12）复跑。
 
 **已从 D 移除**（2026-09-24 批 4 移植）：validation 循环——上游
 `components/validate.py::Validator` 落 `trainer/trainer.py` 的

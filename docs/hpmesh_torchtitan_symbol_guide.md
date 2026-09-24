@@ -175,6 +175,7 @@ step 1 恢复 optimizer、scheduler、dataloader 和 train state 后完成并保
 | `generate_llm_fqn_per_model_part` | transformers backend `pipeline.py` | 加权切层公式一致，**通过** |
 | `split_model_into_stages` | 同文件 stage split | 删除模块用 `Identity`，每 stage 保留 rotary，兼容 Torch 2.10 `PipelineStage`，**通过（适配）** |
 | `apply_pp`, `build_pipeline_schedule` | `distributed/pipeline_parallel.py` | hpmesh 直接消费 HF 五部件契约，**通过（适配）** |
+| `apply_pp(first_stage_module_fqns=...)`, `_prepend_first_stage_modules` | 同文件 `pipeline_with_first_stage_modules` | 额外顶层模块并入 stage 0：仅作用自动切分，存在的 FQN 按序前插，已占有/重复 FQN raise、缺失跳过，显式 `module_fqns_per_model_part` 给定时忽略并告警（同上游委托语义）；`split_model_into_stages` 配套把 wrapper `named_children()` 不呈现的额外顶层模块在非属主 stage 置 `Identity`（上游 "pruned on other stages" 语义），装五部件的容器经"包含已呈现部件"判定跳过。stage FQN 稳定、默认 None 逐位不变，**通过（适配）** |
 | `apply_ac`, selective helpers | `distributed/activation_checkpoint.py` | FullAC/SelectiveAC 已移植，**通过**；RegionAC/MemoryBudgetAC 未移植，见 §9.1。FullAC 的 `determinism_check`/`debug` 旋钮未暴露（固定默认值），登记于此 |
 
 ## 6. 数据系统
@@ -290,8 +291,10 @@ step 1 恢复 optimizer、scheduler、dataloader 和 train state 后完成并保
     `ModelConfig.compute_dtype`，state-dict FQN 不变，默认关闭，见 §4.1）。
   - PP per-stage seed：**已移植**（批 1，`utils/seed.py::derive_distinct_seed` +
     trainer 接线；DTensor RNG tracker 不移植）。
-  - `pipeline_with_first_stage_modules`：多模态 first-stage 并入 stage 0，当前无
-    消费者。
+  - `pipeline_with_first_stage_modules`：**已移植**（批 4，`apply_pp` 的
+    `first_stage_module_fqns` 参数 + `_prepend_first_stage_modules`；
+    `split_model_into_stages` 配套置空非属主 stage 上的额外顶层模块，stage
+    FQN 稳定，默认 None 逐位不变；当前无消费者，见 §5.4）。
   - transformers_modeling_backend 复核（同目录全量盘点，结论：其余功能均有
     等价支持或已登记裁剪）曾登记三项，**均已于 2026-09-24 对齐**：
     - DSA 模型：wrapper 构造期对 `index_topk` fail-fast（稠密 additive mask

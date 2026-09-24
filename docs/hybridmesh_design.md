@@ -315,7 +315,13 @@ GPT-OSS 的转置、带 bias 专家布局，以及 DeepSeek-V2 的特定 group-l
 `pipeline.py` 提供两件纯函数构件：`generate_llm_fqn_per_model_part`（纯算术，决定哪层
 去哪个 stage）与 `split_model_into_stages`（每 stage deep-copy、删掉不属于自己的部分
 ——保留原始层索引以避免跨 rank state_dict 撞名——包成 `PipelineStage`）。vendored 自
-torchtitan，改动全是删除 protocol 层。
+torchtitan，改动全是删除 protocol 层。额外顶层模块（注册在 decoder 旁的多模态编码器等，
+wrapper 的 `named_children()` 只呈现五部件、看不到它们）同样按属主切分：非属主 stage
+一律置 `nn.Identity`，装五部件的容器（wrapper 内层 HF 模型）经"包含已呈现部件"判定
+跳过——这是 torchtitan `pipeline_with_first_stage_modules` 的 "pruned on other stages"
+语义；`apply_pp(first_stage_module_fqns=...)` 把这类模块并入 stage 0（仅作用自动生成
+的切分，默认 None 时切分与 state-dict 键逐位不变，stage FQN 稳定不跨 stage 撞键）。
+当前无真实消费者，属能力就位。
 
 **闭环已落地**：`pipeline_parallel/apply.py` 的 `apply_pp` 按 schedule 类推导 stage 数
 （looped schedule 默认每 rank 2 个），切分后对每个 model_part 依次跑 `apply_tp` →
