@@ -105,6 +105,17 @@ class ModelConfig:
             "where the swap replaces the whole MoE block."
         },
     )
+    compute_dtype: str | None = field(
+        default=None,
+        metadata={
+            "help": "Forward matmul dtype for the lm_head only: 'float32', "
+            "'float16', or 'bfloat16'. None (default) leaves the output "
+            "projection in the model's own dtype. The stored weight keeps its "
+            "dtype -- the cast happens inside the forward, so logits are "
+            "scored at the requested precision without an upcast copy of the "
+            "weight living in the optimizer."
+        },
+    )
     arch_overrides: dict[str, Any] = field(
         default_factory=dict,
         metadata={
@@ -1392,6 +1403,10 @@ class HybridMeshConfig:
     @property
     def experts_implementation(self) -> str:
         return self.model.experts_implementation
+
+    @property
+    def compute_dtype(self) -> str | None:
+        return self.model.compute_dtype
 
     @property
     def lr(self) -> float:

@@ -111,6 +111,7 @@ C 类上会把项目**故意删掉**的抽象又拽回来。
 | hpmesh | 替代掉的上游 | ratio |
 | --- | --- | --- |
 | `models/hf_wrapper.py` | `experiments/transformers_modeling_backend/model.py` 的包装层；上游另有 `models/*/model.py` 各一份 | 0.059 |
+| `models/hf_state_dict_adapter.py` | `experiments/transformers_modeling_backend/state_dict_adapter.py`；hpmesh 更强：读 safetensors index 做 missing/unexpected 严格校验；上游的 `hf_to_titan_moe_state_dict` 转换对因 hpmesh EP swap 直接搬运 HF 权重（无第二 key 布局）而不需要 | — |
 | `parallel/parallelize_hf.py` | `experiments/transformers_modeling_backend/parallelize.py` + 各 `models/*/parallelize.py` | 0.089 |
 | `parallel/tensor_parallel/tp.py` | 各模型 TP plan；上游 `distributed/tensor_parallel.py` 已随 DTensor 后端删除、无后继文件。hpmesh 是**手写 plan realizer**，不是声明式 `_sharding_config` | 0.056 |
 | `parallel/expert_parallel/apply.py` + `swap.py` | `experiments/.../moe_replacement.py` + 各模型 EP parallelize；hpmesh 搬运 HF 权重而非重新初始化 | 0.036–0.146 |
@@ -175,6 +176,7 @@ C 类上会把项目**故意删掉**的抽象又拽回来。
 | `models/common/token_dispatcher.py` 的 TorchAO/DeepEP/HybridEP 三个 dispatcher | 环境依赖型不移植：torchao 非依赖、DeepEP/HybridEP 为 CUDA-only，本机无法验证；`AllToAllTokenDispatcher` 满足同一 dispatch/combine 契约，理由见文件 docstring |
 | router `_debug_force_load_balance`（`models/common/moe.py`） | 纯调试 round-robin 强制均衡开关，有意不移植 |
 | `distributed/pipeline_parallel.py` 的 `pipeline_with_first_stage_modules` | 多模态 first-stage 模块并入 stage 0；hpmesh PP 当前限 decoder 五部件，无消费者 |
+| DSA（DeepSeek sparse attention）的稠密 additive mask 路径 | 上游 `model.py` 的 `_build_dense_attention_mask` + indexer 支持；**2026-09-24 起 hpmesh wrapper 构造期对 `index_topk` fail-fast**（静默走 flex BlockMask 的错误语义已消除），稠密 mask 执行路径本身仍未移植，无消费者 |
 
 **故意删除，不是缺口**（不要"补回来"）：`components/quantization/`、
 `structured_logger/`、`protocols/`、`configurable.py`。

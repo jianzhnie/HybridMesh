@@ -52,6 +52,7 @@ from ..parallel.context_parallel import (
 from ..parallel.parallel_dims import ParallelDims
 from ..utils.batch_invariant import is_in_batch_invariant_mode
 from ..utils.logger_utils import get_logger
+from .common.cast_linear import TORCH_DTYPE_MAP, to_cast_linear
 from .common.masks import (
     create_attention_mask,
     get_causal_mask_mod,
@@ -218,6 +219,9 @@ def build_model_config_for(cfg) -> PretrainedConfig:
     # The requested HF experts kernel travels on the config; the wrapper
     # validates settable-ness against the resolved model class at build time.
     config.experts_implementation = getattr(cfg, "experts_implementation", "native")
+    # Same ride for the lm_head compute-dtype cast: the wrapper applies it at
+    # build time, and None (the default) means no cast.
+    config.compute_dtype = getattr(cfg, "compute_dtype", None)
     return config
 
 
@@ -502,6 +506,24 @@ class HFTransformerModel(nn.Module):
             config._experts_implementation = impl
         self.model = model_cls(config=config)
         self.model.config._attn_implementation = config._attn_implementation
+
+        # Optional fixed-dtype lm_head (torchtitan's CastLinear semantics):
+        # score the vocabulary logits in the requested dtype while the stored
+        # weight keeps its own. Swapped in place rather than wrapped so the
+        # state-dict FQNs -- and a weight tie with the embedding -- are
+        # untouched (see models/common/cast_linear.py for why subclassing
+        # beats wrapping).
+        compute_dtype = getattr(config, "compute_dtype", None)
+        if compute_dtype is not None:
+            if compute_dtype not in TORCH_DTYPE_MAP:
+                raise ValueError(
+                    f"compute_dtype must be one of {sorted(TORCH_DTYPE_MAP)}, "
+                    f"got {compute_dtype!r}"
+                )
+            if self.model.lm_head is not None:
+                self.model.lm_head = to_cast_linear(
+                    self.model.lm_head, TORCH_DTYPE_MAP[compute_dtype]
+                )
 
         self.cp_mesh = None
         self._cp_load_balancer = None

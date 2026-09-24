@@ -26,6 +26,8 @@ changed:
   through an optimizer hook; hpmesh has no hook registry, and the trainer
   already owns the step boundary). The rule is the same sign-based, mean-centred
   nudge, and the counter is drained there.
+* the ``_debug_force_load_balance`` switch is kept: a constructor argument
+  here rather than a Config field, with the same round-robin semantics.
 * node-limited routing (DeepSeek-V3's ``n_group``/``topk_group``) lives in
   ``_select_experts_within_groups``, reached by passing
   ``num_expert_groups``/``num_limited_groups``. One deliberate difference from
@@ -100,6 +102,12 @@ class TokenChoiceTopKRouter(nn.Module):
             ``MicrobatchWiseLoadBalanceLoss``) run on the scores each training
             forward; its gradient is injected on the top-k scores' backward
             path. ``None`` disables it.
+        _debug_force_load_balance: replace the routing decision with a
+            round-robin assignment that lands exactly the same number of tokens
+            on every expert, so a load-imbalance bug can be told apart from a
+            bias/score bug. Debug only: the gate still runs and its scores are
+            gathered for the chosen experts, but nothing about them (or the
+            bias, or the group restriction) influences the choice.
     """
 
     def __init__(
@@ -114,6 +122,7 @@ class TokenChoiceTopKRouter(nn.Module):
         num_expert_groups: int | None = None,
         num_limited_groups: int | None = None,
         aux_loss: AuxLoss | None = None,
+        _debug_force_load_balance: bool = False,
     ) -> None:
         super().__init__()
         if num_expert_groups is not None:
@@ -147,6 +156,32 @@ class TokenChoiceTopKRouter(nn.Module):
         self.num_expert_groups = num_expert_groups
         self.num_limited_groups = num_limited_groups
         self.aux_loss = aux_loss
+        self._debug_force_load_balance = _debug_force_load_balance
+
+    def _debug_force_load_balance_routing(
+        self, scores_TE: torch.Tensor
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Balanced round-robin expert assignment.
+
+        Token ``t``'s ``k``-th slot gets expert ``(t * K + k) % E``, so over a
+        folded token stream every expert wins exactly ``ceil``/``floor`` of
+        ``T * K / E`` slots regardless of the scores. The gating *value* still
+        comes from the real scores (gathered, bias excluded), matching the
+        normal path -- only the choice is forced.
+
+        Returns expert ids and scores, both ``(T, K)``.
+        """
+        num_tokens = scores_TE.shape[0]
+        topk_expert_ids_TK = (
+            torch.arange(
+                num_tokens * self.top_k,
+                device=scores_TE.device,
+                dtype=torch.int64,
+            ).reshape(num_tokens, self.top_k)
+            % self.num_experts
+        )
+        topk_scores_TK = scores_TE.gather(dim=-1, index=topk_expert_ids_TK)
+        return topk_expert_ids_TK, topk_scores_TK
 
     def _select_experts(
         self,
@@ -243,10 +278,18 @@ class TokenChoiceTopKRouter(nn.Module):
         else:
             raise NotImplementedError(f"Unknown score function {self.score_func}")
 
-        topk_expert_ids_TK = self._select_experts(scores_TE, expert_bias_E)
-        # The bias only picks experts; the weight a token carries is the score of
-        # the expert it actually landed on, bias excluded.
-        topk_scores_TK = scores_TE.gather(dim=-1, index=topk_expert_ids_TK)
+        if self._debug_force_load_balance:
+            # The bias and the group restriction are both bypassed: the point
+            # of the flag is a routing decision nothing downstream can skew.
+            (
+                topk_expert_ids_TK,
+                topk_scores_TK,
+            ) = self._debug_force_load_balance_routing(scores_TE)
+        else:
+            topk_expert_ids_TK = self._select_experts(scores_TE, expert_bias_E)
+            # The bias only picks experts; the weight a token carries is the
+            # score of the expert it actually landed on, bias excluded.
+            topk_scores_TK = scores_TE.gather(dim=-1, index=topk_expert_ids_TK)
 
         if self.route_norm:
             denominator = topk_scores_TK.sum(dim=-1, keepdim=True) + 1e-20
