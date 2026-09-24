@@ -1127,3 +1127,39 @@ def test_dataloader_arguments_reject_a_mismatched_dp_size_at_build_time(
     # Stored under dp_rank_1 because that is what the config was built for.
     assert loader.state_dict()["dp_rank_1"] is not None
     loader.close()
+
+
+# --------------------------------------------------------------------------
+# chat template special-token injection
+# --------------------------------------------------------------------------
+
+
+def test_chat_template_injects_special_tokens_and_generation_prompt(tokenizer):
+    """Templates referencing bos_token/eos_token must not see empty variables.
+
+    Torchtitan's HFBackendTokenizer injects the same three defaults; without
+    them a template that references the variables renders blanks or raises.
+    """
+    tokenizer.set_chat_template(
+        "{{ bos_token }}|{{ eos_token }}|"
+        "{% if add_generation_prompt %}GEN{% endif %}"
+    )
+    messages = [{"role": "user", "content": "x"}]
+
+    out = tokenizer.apply_chat_template(messages)
+
+    assert out == f"{tokenizer.bos_token or ''}|{tokenizer.eos_token or ''}|GEN"
+
+
+def test_explicit_chat_template_kwargs_win_over_the_injected_defaults(tokenizer):
+    """The injection is defaults only -- an explicit caller choice stands."""
+    tokenizer.set_chat_template(
+        "{{ bos_token }}|{% if add_generation_prompt %}GEN{% endif %}"
+    )
+    messages = [{"role": "user", "content": "x"}]
+
+    out = tokenizer.apply_chat_template(
+        messages, bos_token="B", add_generation_prompt=False
+    )
+
+    assert out == "B|"

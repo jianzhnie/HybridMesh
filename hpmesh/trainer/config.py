@@ -95,6 +95,16 @@ class ModelConfig:
     num_key_value_heads: int = field(
         default=4, metadata={"help": "Number of KV heads (GQA)"}
     )
+    experts_implementation: str = field(
+        default="native",
+        metadata={
+            "help": "HF experts forward kernel for MoE models: 'native' keeps "
+            "the model's built-in kernel; 'grouped_mm' / 'batched_mm' / 'eager' "
+            "require a model with a settable experts implementation and raise "
+            "otherwise (never silently substituted). Irrelevant under EP>1, "
+            "where the swap replaces the whole MoE block."
+        },
+    )
     arch_overrides: dict[str, Any] = field(
         default_factory=dict,
         metadata={
@@ -1378,6 +1388,10 @@ class HybridMeshConfig:
     @property
     def arch_overrides(self) -> dict[str, Any]:
         return self.model.arch_overrides
+
+    @property
+    def experts_implementation(self) -> str:
+        return self.model.experts_implementation
 
     @property
     def lr(self) -> float:

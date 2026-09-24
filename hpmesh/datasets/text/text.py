@@ -153,7 +153,11 @@ class ChatProcessor(SampleProcessor):
         messages = self._messages_fn(sample)
         self._validate_messages(messages)
 
-        full_text = self._tokenizer.apply_chat_template(messages)
+        # The tokenizer defaults add_generation_prompt=True (torchtitan parity);
+        # a full-conversation render must not grow a trailing generation prompt.
+        full_text = self._tokenizer.apply_chat_template(
+            messages, add_generation_prompt=False
+        )
         # Strip extra newline and ensure the sequence ends with EOS without duplicates
         full_text = full_text.rstrip("\n")
         full_tokens = self._tokenizer.encode(full_text, add_bos=True, add_eos=False)

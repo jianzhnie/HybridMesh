@@ -114,6 +114,20 @@ def _flex_attention_hf(module, query, key, value, attention_mask, **kwargs):
     return out, None
 
 
+def _uses_dsa(config) -> bool:
+    """True if the model uses DeepSeek-style sparse attention (DSA).
+
+    DSA models (e.g. GLM-5, model_type 'glm_moe_dsa') run an auxiliary
+    "indexer" sub-attention that scores all keys and selects the top-k per
+    query, expressing the selection as a dense additive mask. A flex
+    ``BlockMask`` has no ``.dim()`` and cannot be added elementwise, so DSA
+    needs a dense 4D tensor mask (torchtitan builds one in
+    ``_build_dense_attention_mask``). Detected by the DSA-specific
+    ``index_topk`` config attr.
+    """
+    return getattr(config, "index_topk", None) is not None
+
+
 def build_model_config(
     model_name_or_path: str,
     *,
@@ -201,6 +215,9 @@ def build_model_config_for(cfg) -> PretrainedConfig:
         or cfg.dataloader.max_num_documents == 1
         else "block_causal"
     )
+    # The requested HF experts kernel travels on the config; the wrapper
+    # validates settable-ness against the resolved model class at build time.
+    config.experts_implementation = getattr(cfg, "experts_implementation", "native")
     return config
 
 
@@ -430,6 +447,16 @@ class HFTransformerModel(nn.Module):
         super().__init__()
 
         config = _unwrap_text_config(config)
+        if _uses_dsa(config):
+            # Fail fast rather than run silently wrong: hpmesh always builds a
+            # flex BlockMask, which DSA's indexer and main attention cannot
+            # consume (they call ``.dim()`` on the mask and add it to scores).
+            # Upstream's dense additive mask path is an unported D-class gap.
+            raise NotImplementedError(
+                f"{config.model_type}: DeepSeek-style sparse attention (DSA) "
+                "models are not supported -- they need a dense additive mask "
+                "path that hpmesh does not implement."
+            )
         num_heads = getattr(config, "num_attention_heads", None)
         num_kv_heads = getattr(config, "num_key_value_heads", None)
         num_kv_heads = num_heads if num_kv_heads is None else num_kv_heads
@@ -450,6 +477,29 @@ class HFTransformerModel(nn.Module):
         AttentionInterface._global_mapping[_ATTN_IMPLEMENTATION] = _flex_attention_hf
 
         model_cls = _resolve_model_class(config)
+        # Select the HF experts forward kernel, honoring the explicit request
+        # or failing -- never silently substituting a different kernel
+        # (torchtitan's semantics). "native" leaves the model's built-in
+        # kernel alone; anything else requires a model whose experts
+        # implementation is settable (transformers' @use_experts_implementation,
+        # probed as a classmethod). Irrelevant under EP>1, where the swap
+        # replaces the whole MoE block.
+        impl = getattr(config, "experts_implementation", "native")
+        if impl != "native":
+            can_set = getattr(model_cls, "_can_set_experts_implementation", None)
+            if impl not in ("grouped_mm", "batched_mm", "eager"):
+                raise ValueError(
+                    f"experts_implementation must be one of 'native', "
+                    f"'grouped_mm', 'batched_mm', 'eager', got '{impl}'"
+                )
+            if can_set is None or not can_set():
+                raise ValueError(
+                    f"{model_cls.__name__} does not support a settable experts "
+                    f"implementation, so experts_implementation='{impl}' cannot "
+                    "be honored. Set experts_implementation='native' to use "
+                    "the HF model's built-in experts kernel."
+                )
+            config._experts_implementation = impl
         self.model = model_cls(config=config)
         self.model.config._attn_implementation = config._attn_implementation
 
