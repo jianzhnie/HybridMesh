@@ -142,6 +142,7 @@ from ..parallel.tensor_parallel.tp import (
 )
 from ..utils.gc import GarbageCollection
 from ..utils.logger_utils import get_logger
+from ..utils.seed import derive_distinct_seed
 from .config import HybridMeshConfig
 
 # Rank-aware: the helper installs a handler on rank 0 only, so a torchrun run
@@ -197,9 +198,25 @@ class Trainer:
             _init_dist_pytorch(get_distributed_backend())
         self.rank, self.world_size, self.local_rank = get_env_dist_info()
 
-        # Deterministic seeding BEFORE model build so all ranks build identical
-        # initial weights -- the precondition for bit-exact DP comparisons.
-        self._seed_everything(cfg.seed, deterministic=cfg.deterministic)
+        # Resolve the degrees first: the PP seed offset below needs this rank's
+        # stage coordinate, and degree resolution draws no random numbers, so
+        # seeding after it leaves every non-PP run bit-identical.
+        self.parallel_dims = build_parallel_dims(cfg, self.world_size)
+
+        # Deterministic seeding BEFORE model build so ranks sharing an SPMD
+        # group build identical initial weights -- the precondition for
+        # bit-exact DP comparisons. Pipeline stages hold different layers, so
+        # seeding every stage identically would correlate their initialization;
+        # under PP each stage offsets the base seed by its stage rank (the
+        # upstream distinct_seed_mesh_dims=["pp"] semantics), while ranks at
+        # the same stage keep the base seed.
+        seed = cfg.seed
+        if self.parallel_dims is not None and self.parallel_dims.pp_enabled:
+            pp_mesh = self.parallel_dims.get_optional_mesh("pp")
+            seed = derive_distinct_seed(
+                seed, [(pp_mesh.get_local_rank(), pp_mesh.size())]
+            )
+        self._seed_everything(seed, deterministic=cfg.deterministic)
 
         self.device = torch.device(
             f"{device_type}:{self.local_rank}" if device_type != "cpu" else "cpu"
@@ -208,7 +225,6 @@ class Trainer:
         # 1. mesh (the process topology every dimension is built on). ``parallel_dims``
         #    is the same resolved degrees the mesh was built from, kept so the
         #    trainer can ask "how many DP ranks?" without re-indexing the mesh.
-        self.parallel_dims = build_parallel_dims(cfg, self.world_size)
         if self.parallel_dims is not None and self.parallel_dims.pp_enabled:
             # The dense (dp, cp, tp) mesh does not cover the world under PP,
             # so ``build_mesh``'s coverage backstop would reject it. The same

@@ -67,6 +67,8 @@ step 1 恢复 optimizer、scheduler、dataloader 和 train state 后完成并保
 | `_resolve_model_class` | 上游模型 registry | hpmesh 使用 HF auto mapping，不维护模型注册表 | 通过（适配） |
 | `HFTransformerModel.__init__` | transformers backend wrapper + 各原生 Decoder | 暴露 `tok_embeddings/layers/norm/lm_head/rotary_emb` 五部件；不复制参数注册 | 通过（适配） |
 | GQA 构造校验 | `models/common/attention.py::GQAttention.Config.__post_init__` | hpmesh 在 wrapper 边界校验 head 正数和 `Q heads % KV heads == 0` | 通过；Transformers 5.14 本身会漏掉后一项 |
+| `_uses_dsa` + DSA 构造拒绝 | 上游 `_uses_dsa` + `_build_dense_attention_mask` 稠密 additive mask | 2026-09-24 起 wrapper 构造期对 `index_topk`（DSA 特征）fail-fast，不再静默走 flex BlockMask；稠密 mask 路径本身仍是 D 类缺口 | 通过（fail-fast 侧已对齐） |
+| `experts_implementation` 旋钮 | 上游 `TitanMoeModelConfig.experts_implementation` + wrapper 应用 | 2026-09-24 起 `ModelConfig.experts_implementation`（默认 `native`）经 config 门面传到 HF config，wrapper 校验"可设置或 raise"（上游同语义），非法值先 raise；EP>1 无意义（swap 整块替换） | 通过 |
 | `named_children` | 上游 `Decoder` 的自然子树 | HF CausalLM 多套一层 `model`，hpmesh 只改遍历视图，不改 state_dict FQN | 通过；FSDP/TP/PP 合约测试覆盖 |
 | `tp_plan` | HF `_tp_plan` + 上游 sharding config | hpmesh 重写路径前缀供手写 plan 引擎消费 | 通过（适配） |
 | `preprocess_inputs` | 上游 post-dataloading process | 合并 batch、构造 mask、先 CP 后 TP 切序列 | 通过；CP×TP 等价测试覆盖 |
@@ -227,7 +229,7 @@ step 1 恢复 optimizer、scheduler、dataloader 和 train state 后完成并保
 | `MetricsProcessor` | 同名上游类 | 去 Configurable；按真实 step window 算吞吐/MFU，log frequency 构造时校验，**通过（适配）** |
 | `get_metrics_rank`, `ensure_pp_loss_visible` | 上游 metrics rank/PP warning | hpmesh 明确 PP schedule 可见性，**通过** |
 | `Profiler`, `MemoryProfiler` | `observability/profiler.py` | 去 Configurable，schedule 与 OOM 处理保留；`_caused_by_oom` 与上游 773e16e75 语义等价（含防环与隐式链），**通过** |
-| `BaseTokenizer`, `HuggingFaceTokenizer` | `components/tokenizer.py` | A1；encode 强制 `add_special_tokens=False` 后自行处理 BOS/EOS。2026-09-23 起 `apply_chat_template` 接受 `Sequence[Mapping]`（上游 4a0d8dab3 多轮 SFT 配套），**通过** |
+| `BaseTokenizer`, `HuggingFaceTokenizer` | `components/tokenizer.py` | A1；encode 强制 `add_special_tokens=False` 后自行处理 BOS/EOS。2026-09-23 起 `apply_chat_template` 接受 `Sequence[Mapping]`（上游 4a0d8dab3 多轮 SFT 配套），**通过**。2026-09-24 起 `apply_chat_template` 自动注入 `bos_token`/`eos_token` kwargs 与默认 `add_generation_prompt=True`（上游 backend tokenizer 同源）；SFT 全量渲染在 `datasets/text/text.py` 显式传 `add_generation_prompt=False` |
 | `MultiModalTokenizer` | 同文件多模态 tokenizer | 组合 text/vision token 契约，**通过** |
 
 ## 8. Utils 与 C 类模块
@@ -278,6 +280,14 @@ step 1 恢复 optimizer、scheduler、dataloader 和 train state 后完成并保
   - PP per-stage seed（上游 `distinct_seed_mesh_dims=["pp"]` + DTensor RNG
     tracker）：hpmesh 各 stage 共用全局 seed；HF 模型通常 dropout=0 且初始化走
     materialize 路径，影响面小，登记于此。
+  - transformers_modeling_backend 复核（同目录全量盘点，结论：其余功能均有
+    等价支持或已登记裁剪）曾登记三项，**均已于 2026-09-24 对齐**：
+    - DSA 模型：wrapper 构造期对 `index_topk` fail-fast（稠密 additive mask
+      路径仍不实现，但静默错误语义已消除，见 §3）。
+    - `experts_implementation` 旋钮：已移植（`ModelConfig` 字段 + wrapper
+      应用，"可设置或 raise"上游同语义，见 §3）。
+    - chat template 的 `bos_token`/`eos_token`/`add_generation_prompt` 自动
+      注入：已移植到 `HuggingFaceTokenizer.apply_chat_template`（见 §7.3）。
 
 ### 9.2 有意删除
 
