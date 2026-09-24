@@ -51,7 +51,7 @@ import torch.nn.functional as F
 if TYPE_CHECKING:
     from ...parallel.parallel_dims import ParallelDims
 
-from hpmesh.accelerator import dist_utils
+from hpmesh.accelerator.dist import all_reduce
 from hpmesh.accelerator.spmd_context import spmd_mesh_group, spmd_sparse_mesh
 
 from .aux_loss import AuxLoss
@@ -524,7 +524,7 @@ def _update_expert_bias(
         mesh = None if parallel_dims is None else parallel_dims.get_optional_mesh(axis)
         if mesh is None:
             continue
-        dist_utils.all_reduce(counts_LE, group=mesh.get_group())
+        all_reduce(counts_LE, group=mesh.get_group())
 
     row = 0
     for _, layers in mappers:
@@ -571,7 +571,7 @@ class _PartialToInvariantAllReduce(torch.autograd.Function):
     @staticmethod
     def forward(ctx, partial_E, group):  # pyrefly: ignore[bad-override]
         reduced_E = partial_E.clone()
-        dist_utils.all_reduce(reduced_E, group=group)
+        all_reduce(reduced_E, group=group)
         return reduced_E
 
     @staticmethod

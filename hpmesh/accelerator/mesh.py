@@ -23,17 +23,8 @@ until something addressed a rank through one group and collected on another.
 
 from __future__ import annotations
 
-import torch.distributed as dist
-
 from ..parallel.parallel_dims import ParallelDims
 from ..trainer.config import HybridMeshConfig
-from .device import (
-    device_type,
-    get_current_device,
-    get_distributed_backend,
-    get_env_dist_info,
-    set_device,
-)
 
 # Mesh axis names. `axis` names a specific DeviceMesh axis; `dim` is for shapes.
 # These are the axes of the dense mesh the parallel layer is handed; ``pp`` is
@@ -90,24 +81,3 @@ def build_mesh(parallel_dims: ParallelDims | None):
         )
     return mesh
 
-
-def init_distributed() -> tuple[int, int, int]:
-    """Init the process group if launched under torchrun; return
-    (rank, local_rank, world).
-
-    Single-process (no torchrun) -> (0, 0, 1) and no process group, so the
-    prototype also runs as a plain CPU/GPU script for step 0.
-
-    This is the trainer's entry point; ``dist_utils.init_dist`` is the
-    multi-launcher variant kept for standalone scripts.
-    """
-    import os
-
-    if "RANK" in os.environ and "WORLD_SIZE" in os.environ:
-        rank, world_size, local_rank = get_env_dist_info()
-        if device_type != "cpu":
-            set_device(get_current_device())
-        backend = get_distributed_backend()
-        dist.init_process_group(backend=backend)
-        return rank, local_rank, world_size
-    return 0, 0, 1

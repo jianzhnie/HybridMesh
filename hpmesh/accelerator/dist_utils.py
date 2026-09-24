@@ -14,24 +14,10 @@ from torch.distributed import ProcessGroup
 
 from .device import device_type, get_distributed_backend, set_device
 
-_LOCAL_PROCESS_GROUP = None
-
 
 def is_distributed() -> bool:
     """Return True if distributed environment has been initialized."""
     return torch_dist.is_available() and torch_dist.is_initialized()
-
-
-def get_local_group() -> ProcessGroup | None:
-    """Return local process group."""
-    if not is_distributed():
-        return None
-
-    if _LOCAL_PROCESS_GROUP is None:
-        raise RuntimeError('Local process group is not created, please use '
-                           '`init_local_group` to setup local process group.')
-
-    return _LOCAL_PROCESS_GROUP
 
 
 def get_default_group() -> ProcessGroup | None:
@@ -58,10 +44,12 @@ def init_dist(launcher,
     """Initialize distributed environment.
 
     Note:
-        This is the standalone, multi-launcher entry kept for scripts that
-        used ``mmengine.dist``. The hpmesh trainer does not come through
-        here -- it uses ``accelerator.mesh.init_distributed()``, which derives
-        the backend from the device layer instead of taking one.
+        The hpmesh trainer calls ``_init_dist_pytorch`` directly (it does
+        not want this wrapper's ``mp.set_start_method('spawn')`` side
+        effect); this multi-launcher entry is kept for standalone scripts.
+        On vendor accelerators the backend is derived from the device
+        layer (``device.get_distributed_backend``), and the ``backend``
+        argument is honored only on the CUDA path.
 
     Args:
         launcher (str): Way to launcher multi processes. Supported launchers
@@ -70,6 +58,10 @@ def init_dist(launcher,
             'gloo' and 'mpi'. Defaults to 'nccl'.
         **kwargs: keyword arguments are passed to ``init_process_group``.
     """
+    if device_type == 'cpu' and backend == 'nccl':
+        # 'nccl' is the default spelling, not a choice: on a CPU-only box it
+        # can only fail, so fall back to the derived backend (gloo).
+        backend = get_distributed_backend()
     timeout = kwargs.get('timeout', None)
     if timeout is not None:
         # If a timeout (in seconds) is specified, it must be converted
@@ -160,7 +152,10 @@ def _init_dist_mpi(backend, **kwargs) -> None:
                 '/available_images.md#sagemaker-framework-containers'
                 '-sm-support-only') from e
     local_rank = int(os.environ['OMPI_COMM_WORLD_LOCAL_RANK'])
-    torch.cuda.set_device(local_rank)
+    if device_type not in ('cpu', 'cuda'):
+        set_device(torch.device(device_type, local_rank))
+    elif device_type == 'cuda':
+        torch.cuda.set_device(local_rank)
     if 'MASTER_PORT' not in os.environ:
         # 29500 is torch.distributed default port
         os.environ['MASTER_PORT'] = '29500'
@@ -193,7 +188,9 @@ def _init_dist_slurm(backend,
     if local_rank_env is not None:
         local_rank = int(local_rank_env)
     else:
-        num_gpus = torch.cuda.device_count()
+        num_gpus = (
+            1 if device_type == 'cpu' else getattr(torch, device_type).device_count()
+        )
         local_rank = proc_id % num_gpus
     addr = subprocess.getoutput(
         f'scontrol show hostname {node_list} | head -n1')
@@ -216,6 +213,12 @@ def _init_dist_slurm(backend,
         set_device(torch.device(device_type, local_rank))
         torch_dist.init_process_group(
             backend=get_distributed_backend(), **kwargs)
+    elif device_type == 'cpu':
+        if init_backend == 'torch':
+            torch_dist.init_process_group(backend=backend, **kwargs)
+        else:
+            raise ValueError(
+                f'init_backend={init_backend!r} is not supported on CPU')
     else:
         torch.cuda.set_device(local_rank)
 
@@ -236,29 +239,6 @@ def _init_dist_slurm(backend,
             raise ValueError(
                 'supported "init_backend" is "torch" or "deepspeed", '
                 f'but got {init_backend}')
-
-
-def init_local_group(node_rank: int, num_gpus_per_node: int):
-    """Setup the local process group.
-
-    Setup a process group which only includes processes that on the same
-    machine as the current process.
-
-    The code is modified from
-    https://github.com/facebookresearch/detectron2/blob/main/detectron2/engine/launch.py
-
-    Args:
-        node_rank (int): Rank of machines used for training.
-        num_gpus_per_node (int): Number of gpus used for training in a single
-            machine.
-    """  # noqa: W501
-    global _LOCAL_PROCESS_GROUP
-    assert _LOCAL_PROCESS_GROUP is None
-
-    ranks = list(
-        range(node_rank * num_gpus_per_node,
-              (node_rank + 1) * num_gpus_per_node))
-    _LOCAL_PROCESS_GROUP = torch_dist.new_group(ranks)
 
 
 def get_backend(group: ProcessGroup | None = None) -> str | None:
@@ -340,40 +320,6 @@ def get_rank(group: ProcessGroup | None = None) -> int:
         return torch_dist.get_rank(group)
     else:
         return 0
-
-
-def get_local_size() -> int:
-    """Return the number of the current node.
-
-    Returns:
-        int: Return the number of processes in the current node if in
-        distributed environment, otherwise 1.
-    """
-    if not is_distributed():
-        return 1
-
-    if _LOCAL_PROCESS_GROUP is None:
-        raise RuntimeError('Local process group is not created, please use '
-                           '`init_local_group` to setup local process group.')
-
-    return torch_dist.get_world_size(_LOCAL_PROCESS_GROUP)
-
-
-def get_local_rank() -> int:
-    """Return the rank of current process in the current node.
-
-    Returns:
-        int: Return the rank of current process in the current node if in
-        distributed environment, otherwise 0
-    """
-    if not is_distributed():
-        return 0
-
-    if _LOCAL_PROCESS_GROUP is None:
-        raise RuntimeError('Local process group is not created, please use '
-                           '`init_local_group` to setup local process group.')
-
-    return torch_dist.get_rank(_LOCAL_PROCESS_GROUP)
 
 
 def get_dist_info(group: ProcessGroup | None = None) -> tuple[int, int]:
@@ -538,6 +484,8 @@ def get_comm_device(group: ProcessGroup | None = None) -> torch.device:
     elif backend == 'mccl':
         import torch_musa
         return torch.device('musa', torch_musa.current_device())
+    elif backend == 'xccl':
+        return torch.device('xpu', torch.xpu.current_device())
     else:
         # GLOO and MPI backends use cpu device by default
         return torch.device('cpu')

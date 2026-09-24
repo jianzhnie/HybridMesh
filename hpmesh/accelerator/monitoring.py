@@ -9,10 +9,10 @@ actually uses. Two departures:
 
 * **One device type, decided once.** torchtitan resolves ``device_type`` with
   ``torch._utils._get_available_device_type()`` and then reaches for ``torch.xpu``,
-  ``torch.neuron`` and friends at the point of use. hpmesh resolves ``cuda`` or
-  ``cpu`` in ``accelerator/device.py`` (see the note there on why MPS is excluded) and
-  everything else stays out. A probe for a device this package cannot train on
-  is a branch nothing can exercise.
+  ``torch.neuron`` and friends at the point of use. hpmesh resolves its
+  accelerator device in ``accelerator/device.py`` (NPU/CUDA/MLU/MUSA; see the
+  note there on why MPS is excluded) and everything else stays out. A probe
+  for a device this package cannot train on is a branch nothing can exercise.
 
 * **No ``subprocess`` for ``lspci``.** torchtitan shells out to ``lspci`` to
   recover a fuller H100 variant string (NVL / PCIe / SXM), because

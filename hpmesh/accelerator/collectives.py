@@ -36,9 +36,6 @@ logger = logging.getLogger(__name__)
 
 __all__ = [
     "clip_grad_norm_",
-    "dist_max",
-    "dist_sum",
-    "dist_sum_tensor",
     "set_pg_timeouts",
 ]
 
@@ -75,7 +72,9 @@ def set_pg_timeouts(
             dist.barrier(device_ids=[device.index])
         else:
             dist.barrier()
-        device_module.synchronize(device)
+        # Derive the sync call from the passed device rather than the
+        # import-time global.
+        getattr(torch, device.type, device_module).synchronize(device)
     else:
         dist.barrier()
 
@@ -116,47 +115,6 @@ def set_pg_timeouts(
     for group in groups:
         set_timeout(timeout, group)
     set_timeout(timeout)
-
-
-def _reduce(x: torch.Tensor, *, reduce_op: dist.ReduceOp, mesh) -> torch.Tensor:
-    """All-reduce ``x`` over ``mesh``, or return it untouched when there is none.
-
-    ``mesh is None`` is the single-rank case: the reduction is the identity, so
-    skipping the collective is the correct answer rather than a shortcut. It is
-    what lets one training loop run from one device up to a full mesh.
-
-    The clone is what makes this a *function* rather than a mutation: upstream
-    reaches the same place via ``funcol.all_reduce``, which is out-of-place by
-    construction. It matters because callers keep using the tensor they passed:
-    ``train_step`` reduces the local token count here and then divides the loss
-    by that same tensor, expecting the *local* count. Under ``dist.all_reduce``,
-    whose own docstring says the input is mutated in place, it instead holds the
-    global count, and the per-rank average silently becomes a global one.
-    """
-    if mesh is None:
-        return x
-    result = x.clone()
-    dist.all_reduce(result, op=reduce_op, group=mesh.get_group())
-    return result
-
-
-def dist_sum_tensor(x: torch.Tensor, mesh=None) -> torch.Tensor:
-    """Sum ``x`` across ``mesh``, keeping the result on its device.
-
-    The on-device counterpart of :func:`dist_sum`: used for the token count that
-    normalizes the loss, where a per-step ``.item()`` would cost a device sync.
-    """
-    return _reduce(x, reduce_op=dist.ReduceOp.SUM, mesh=mesh)
-
-
-def dist_sum(x: torch.Tensor, mesh=None) -> float:
-    """Sum ``x`` across ``mesh`` and return it as a Python float."""
-    return float(dist_sum_tensor(x, mesh).item())
-
-
-def dist_max(x: torch.Tensor, mesh=None) -> float:
-    """Max ``x`` across ``mesh`` and return it as a Python float."""
-    return float(_reduce(x, reduce_op=dist.ReduceOp.MAX, mesh=mesh).item())
 
 
 def clip_grad_norm_(
@@ -230,6 +188,10 @@ def clip_grad_norm_(
             expert_norm = expert_norm.full_tensor()
         if isinstance(dense_norm, DTensor):
             dense_norm = dense_norm.full_tensor()
+        if expert_norm.device != dense_norm.device:
+            # An empty expert_grads list yields a CPU zero from
+            # get_total_norm; the reduce below needs it on the comm device.
+            expert_norm = expert_norm.to(dense_norm.device)
 
         if math.isinf(norm_type):
             dist.all_reduce(

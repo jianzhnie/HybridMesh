@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import logging
-import os
 import sys
 from logging import Formatter, LogRecord
 from pathlib import Path
@@ -137,8 +136,6 @@ def get_distributed_rank() -> int:
         )
 
     # Fallback to environment variables
-    rank = os.environ.get("RANK")
-    if rank is not None:
-        return int(rank)
+    from ..accelerator.device import get_env_dist_info
 
-    return 0
+    return get_env_dist_info()[0]

@@ -48,7 +48,7 @@ DEVICE_PRIORITY = ("npu", "cuda", "musa", "mlu", "xpu")
 _BACKENDS = {
     "npu": "hccl",
     "cuda": "nccl",
-    "xpu": "ccl",
+    "xpu": "xccl",
     "mlu": "cncl",
     "musa": "mccl",
     "cpu": "gloo",
@@ -72,14 +72,11 @@ def is_device_type_available(kind: str) -> bool:
 
 
 def get_device_type() -> str:
-    """Select the training device, honoring ``HPMESH_DEVICE`` when set."""
-    override = os.environ.get("HPMESH_DEVICE", "").strip().lower()
-    if override:
-        if override not in ACCELERATOR_TYPES | {"cpu"}:
-            raise ValueError(f"Unsupported HPMESH_DEVICE={override!r}")
-        if not is_device_type_available(override):
-            raise RuntimeError(f"Requested device type {override!r} is not available")
-        return override
+    """Select the training device by priority: NPU first, CPU last.
+
+    The result is frozen into the module-level ``device_type`` at import
+    time, so device discovery happens exactly once per process.
+    """
     return next(
         (kind for kind in DEVICE_PRIORITY if is_device_type_available(kind)), "cpu"
     )
@@ -144,7 +141,7 @@ def is_device_available(device: torch.device) -> bool:
 def should_use_pin_memory(device: torch.device | None = None) -> bool:
     """Return whether asynchronous pinned-memory copies are useful."""
     device = get_current_device() if device is None else device
-    return device.type in {"cuda", "npu"}
+    return device.type in ACCELERATOR_TYPES
 
 
 # -- Per-vendor availability predicates (mmengine.device-style surface). --
