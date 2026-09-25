@@ -26,6 +26,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+from ...accelerator.capabilities import has
 from .activation import SwiGLU
 
 __all__ = ["GroupedExperts"]
@@ -34,29 +35,12 @@ __all__ = ["GroupedExperts"]
 def _grouped_mm_available() -> bool:
     """Whether ``torch._grouped_mm`` can run here.
 
-    Probed by doing it, rather than by checking the device or the torch
-    version: the op is reachable on CPU as well as CUDA, and it imposes shape
-    constraints of its own (strides must be 16-byte multiples, so the innermost
-    dim has to be at least 8 bf16 elements). A version or device test would be
-    wrong on both counts and would go stale silently.
-
-    The probe is necessarily approximate -- a shape that satisfies the op need
-    not be one a real layer uses. It is deliberately shaped like the real call
-    (``(T, K) @ (E, K, N)``, bf16, int32 offsets) so that it fails for the same
-    reasons a real call would.
+    The probe (run the op once on a real-shaped dummy -- a version or device
+    test would be wrong on both counts) lives in the capability registry as
+    ``torch_grouped_mm``; this wrapper keeps the local name the constructor
+    and the tests use.
     """
-    grouped_mm = getattr(torch, "_grouped_mm", None)
-    if grouped_mm is None:
-        return False
-    try:
-        grouped_mm(
-            torch.zeros(8, 8, dtype=torch.bfloat16),
-            torch.zeros(2, 8, 8, dtype=torch.bfloat16),
-            offs=torch.tensor([4, 8], dtype=torch.int32),
-        )
-    except Exception:
-        return False
-    return True
+    return has("torch_grouped_mm")
 
 
 class GroupedExperts(nn.Module):
