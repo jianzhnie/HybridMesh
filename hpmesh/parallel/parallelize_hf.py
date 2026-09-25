@@ -2,9 +2,11 @@
 
 Order matters, and it is the whole content of this file: TP / CP / EP are
 declared first, activation checkpointing wraps each decoder layer next, then
-``torch.compile``, and FSDP wraps last so its hooks sit outermost. Each
-``apply_*`` is a no-op when its degree is 1 (or its mode off), so the same
-call runs from a single device up to a full hybrid mesh.
+``torch.compile``, and FSDP wraps last so its hooks sit outermost. The order
+is not a comment -- it is the ``STAGES`` table in ``stages.py``, which both assembly
+paths are driven by (the PP per-part path runs the ``on_pp`` subsequence).
+Each ``apply_*`` is a no-op when its degree is 1 (or its mode off), so the
+same call runs from a single device up to a full hybrid mesh.
 
 PP is the exception to "one model in, one model out": with ``pp > 1`` the model
 is cut into per-stage chunks first (``pipeline_parallel.apply_pp``), each chunk
@@ -53,12 +55,12 @@ from .context_parallel import apply_cp
 from .expert_parallel import apply_ep
 from .fully_shard import apply_fsdp
 from .pipeline_parallel import PipelineParallelSetup, apply_pp, build_pipeline_schedule
+from .stages import PP_STAGE_ORDER, STAGE_ORDER, _stage_enabled
 from .tensor_parallel import apply_tp
 
 logger = get_logger(__name__)
 
 __all__ = ["PipelineParallelSetup", "parallelize_hf_transformers"]
-
 
 def parallelize_hf_transformers(
     model: nn.Module,
@@ -120,13 +122,17 @@ def parallelize_hf_transformers(
         )
         dense_mesh = parallel_dims.spmd_dense_mesh()
         tp_mesh = parallel_dims.get_optional_mesh("tp")
+        pp_runners = {
+            "tp": lambda m: apply_tp(m, dense_mesh, cfg),
+            "compile": lambda m: apply_compile(
+                m, compile_config=compile_config, tp_mesh=tp_mesh
+            ),
+            "fsdp": lambda m: apply_fsdp(m, cfg, parallel_dims),
+        }
         for i, part in enumerate(model_parts):
-            part = apply_tp(part, dense_mesh, cfg)
-            if compile:
-                part = apply_compile(
-                    part, compile_config=compile_config, tp_mesh=tp_mesh
-                )
-            part = apply_fsdp(part, cfg, parallel_dims)
+            for name in PP_STAGE_ORDER:
+                if _stage_enabled(name, compile=compile):
+                    part = pp_runners[name](part)
             model_parts[i] = part
             # Rebind the stage's submodule in case a transform replaced the chunk.
             stages[i].submod = part
@@ -156,33 +162,33 @@ def parallelize_hf_transformers(
             )
         ep_group = ep_mesh.get_group()
 
-    model = apply_tp(model, mesh, cfg)
-    model = apply_ep(model, cfg, ep_group=ep_group)
-    model = apply_cp(model, mesh, cfg)
-    # AC after the sharding wrappers (it must enclose the TP/CP-modified
-    # layer), before compile and FSDP -- torchtitan's order in
-    # ``parallelize_llama``.
-    model = apply_ac(
-        model,
-        activation_checkpoint,
-        selective=selective_ac,
-        memory_budget=memory_budget_ac,
-        compile_enabled=compile,
-    )
-
-    if compile:
+    runners = {
+        "tp": lambda m: apply_tp(m, mesh, cfg),
+        "ep": lambda m: apply_ep(m, cfg, ep_group=ep_group),
+        "cp": lambda m: apply_cp(m, mesh, cfg),
+        "ac": lambda m: apply_ac(
+            m,
+            activation_checkpoint,
+            selective=selective_ac,
+            memory_budget=memory_budget_ac,
+            compile_enabled=compile,
+        ),
         # ``parallel/compile.py``: whole-model compile by default (the
         # historical behavior), per-block compile and the three compile-side
         # toggles (async TP, regional_inductor, capture_scalar_outputs)
         # behind ``compile_config``'s switches.
-        model = apply_compile(
-            model,
+        "compile": lambda m: apply_compile(
+            m,
             compile_config=compile_config,
             tp_mesh=(
                 None
                 if parallel_dims is None
                 else parallel_dims.get_optional_mesh("tp")
             ),
-        )
-
-    return apply_fsdp(model, cfg, parallel_dims)
+        ),
+        "fsdp": lambda m: apply_fsdp(m, cfg, parallel_dims),
+    }
+    for name in STAGE_ORDER:
+        if _stage_enabled(name, compile=compile):
+            model = runners[name](model)
+    return model

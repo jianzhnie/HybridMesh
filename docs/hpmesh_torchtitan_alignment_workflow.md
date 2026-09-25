@@ -34,7 +34,8 @@
 每轮对齐前必须确认并保持：
 
 1. 配置沿 `CLI -> HybridMeshConfig -> 顶层显式参数` 单向传递。
-2. 并行装配由普通函数完成，非 PP 路径顺序保持：
+2. 并行装配由普通函数完成，非 PP 路径顺序保持（单一来源
+   `hpmesh/parallel/stages.py` 的 `STAGES` 表，测试钉死）：
 
    ```text
    apply_tp -> apply_ep -> apply_cp -> apply_ac -> compile -> apply_fsdp
