@@ -252,13 +252,14 @@ device.py 本身就是设备注册表）；DTensor/flex_attention/spmd_types 是
 
 ## 3.3 组合矩阵单一来源（parallel/matrix.py）
 
-"哪些组合支持/拒绝"只有一份答案：`hpmesh/parallel/matrix.py` 的声明式条目
-（`ENTRIES`）。每行 = 组合名 / 判定（异常类型）/ 理由与解锁条件 / 判定阶段 /
-守卫位置。三个阶段：
+"哪些组合支持/拒绝"只有一份答案：`hpmesh/parallel/matrix.py`——每个组合是
+一个普通函数（判定逻辑 + 文案 + 理由 docstring）加文件底部 `ENTRIES` 扁平表里
+的一行（函数引用 / 判定阶段 / 异常类型 / 守卫位置；`name` 与 `reason` 由函数
+派生）。三个阶段：
 
 * **config**：配置期可判（tp×ep×cp、deepep/hybridep、dispatcher@ep=1、ptrr、
   ulysses×load balancer、sequence_parallel、region AC、memory_budget×compile、
-  cp 整除 seq_len、async_tp×{compile,tp}）。条目自带谓词与文案，
+  cp 整除 seq_len、async_tp×{compile,tp}）。函数自带谓词与文案，
   `config/*` 的 `__post_init__` 在原位调用（首错顺序不变）；
   `check_config/check_training/check_root` 供一致性测试与文档全量重放。
 * **assembly**：需模型/运行时信息（PP×AC、PP×validation、EP×checkpoint、

@@ -440,8 +440,9 @@ step 1 恢复 optimizer、scheduler、dataloader 和 train state 后完成并保
 | `utils/batch_invariant.py` | batch-invariant getter/setter | C，上游开关散在 trainer/config |
 
 组合判定约定：并行组合的支持/拒绝单一来源是 `parallel/matrix.py`
-（config/assembly/probe 三阶段条目；配置期 `__post_init__` 原位调用，装配期
-与 probe 期由守卫点触发、条目给出判定与文案）。
+（每个组合一个普通函数 + 底部 `ENTRIES` 扁平表一行；config/assembly/probe
+三阶段；配置期 `__post_init__` 原位调用，装配期与 probe 期由守卫点触发、
+函数给出判定与文案）。
 
 能力探测约定：torch 版本/环境探测集中在 `accelerator/capabilities.py`
 （`has`/`require`，缺失经 `EnvironmentUnsupportedError` 报解锁指引）。
