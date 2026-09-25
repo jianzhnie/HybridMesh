@@ -11,7 +11,7 @@
 ## 0. 结论
 
 hpmesh 拿掉了 TorchTitan 的 `Configurable` 与 `Module` 两个抽象层，换来一个明显更短
-的框架：90 个 Python 模块、约 24.3k 行，覆盖 TP / FSDP2 / CP / EP / PP 五条并行路径
+的框架：94 个 Python 模块、约 27.4k 行，覆盖 TP / FSDP2 / CP / EP / PP 五条并行路径
 的装配、训练循环、checkpoint 与等价性测试。
 
 拿掉抽象不等于拿掉复杂度，只是把复杂度换成另一种形式。hpmesh 选择的形式是：
@@ -160,7 +160,7 @@ import trainer 或读取全局 run config；跨 models/parallel 的依赖必须�
 引擎层（TP/CP fused kernel、FSDP、`spmd_context`、checkpoint 的 PG 生命周期）直连
 `torch.distributed` 与 `_functional_collectives` 等私有 API。
 
-目录结构（90 个 Python 模块，约 24.3k 行；2026-09-24 实测）：
+目录结构（94 个 Python 模块，约 27.4k 行；2026-09-25 实测）：
 
 ```
 hpmesh/
@@ -468,7 +468,7 @@ vocab-parallel embedding 的全局 `padding_idx` 越界/梯度抑制（上游 #4
 7. 最新 `vllm-ascend` 镜像的 Torch 2.10 缺少新版 FSDP per-parameter mesh result，
    Transformers 5.14 也超出项目声明范围，因此 EP×FSDP placement 不能在该镜像完整
    验证；环境细节见
-   [`hpmesh_torchtitan_alignment_audit_2026-09-23.md`](./hpmesh_torchtitan_alignment_audit_2026-09-23.md)
+   `hpmesh_torchtitan_alignment_audit_2026-09-23.md`（不在当前工作区）
    与 symbol guide §12（2026-09-21 的记录文件不在当前工作区）。
 8. 8 卡 HCCL 已实测 Qwen3-8B、4096 序列、真实权重和真实 SFT 数据的 FSDP2+Full AC；
    meta 构建后只 materialize 本地 shard，BF16 参数通信、FP32 梯度归约。完整 DCP

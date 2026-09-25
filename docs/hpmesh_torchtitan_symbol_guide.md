@@ -31,7 +31,7 @@ TorchTitan `Module` 和声明式 `_sharding_config` 后产生的形状变化，�
 
 验证上游基线为 2026-09-22 的 TorchTitan `c6e416bbd`；2026-09-23 已审计至
 `b64103072`（记录见
-[`hpmesh_torchtitan_alignment_audit_2026-09-23.md`](./hpmesh_torchtitan_alignment_audit_2026-09-23.md)）。
+`hpmesh_torchtitan_alignment_audit_2026-09-23.md`（不在当前工作区））。
 最新 `vllm-ascend-env` 容器已实际完成 8 卡 HCCL Qwen3-8B、4096 序列、真实 HF 权重和
 真实 SFT 数据的 FSDP2+Full AC 训练，并完成完整 DCP checkpoint 的 save→resume：从
 step 1 恢复 optimizer、scheduler、dataloader 和 train state 后完成并保存 step 2。
@@ -86,7 +86,7 @@ step 1 恢复 optimizer、scheduler、dataloader 和 train state 后完成并保
 | `activation.ActivationFn`, `SwiGLU` | `models/common/activation.py` 的对应激活 | 同名但历史来源不完全相同；公式有单测，**通过**，不要按 AST 强行替换 |
 | `feed_forward.compute_ffn_hidden_dim` | 同名函数 | 去 Config，舍入公式一致，**通过** |
 | `FeedForward.forward`, `SigmoidGatedFeedForward.forward` | 同名类 | hpmesh 接受现成 `nn.Module` 投影；上游由嵌套 Config 构建，**通过（适配）** |
-| `param_init.skip_param_init`, `depth_scaled_std` | `models/common/param_init.py` | 去 Module 初始化协议；数学一致，**通过** |
+| `param_init.skip_param_init`, `depth_scaled_std` | ~~`models/common/param_init.py`~~ | **2026-09-25 已删除**：parity vendored 死代码，hpmesh 用 HF 自带 `_init_weights`，无消费者 |
 | `Embedding.forward` | 上游同名文件仅供概念比较 | hpmesh 是 C 类独立实现并支持 vocab shard bounds；不是同名移植。2026-09-23 移植上游 #4637 同源修复：vocab-parallel 分支把全局 `padding_idx` 映射为本地坐标，只有持有该行的 shard 传入，修复越界崩溃与他 shard 行梯度被静默抑制，**通过** |
 | `scatter_add.deterministic_scatter_add` 及 autograd hooks | `ops/scatter_add.py` | 路径不同，算法来源明确；前后向测试覆盖，**通过** |
 | `grouped_experts.GroupedExperts.forward` | `models/common/grouped_experts.py` 与 `models/gpt_oss/moe.py` | hpmesh 统一 grouped-mm/fallback，并承载 HF 权重形状，**通过（适配）** |
@@ -411,7 +411,7 @@ step 1 恢复 optimizer、scheduler、dataloader 和 train state 后完成并保
 | `models/common/masks.py` | mask mods、varlen metadata | A2，`attention.py` 拆分 |
 | `models/common/moe.py` | router、experts、MoE、balance loss | A2，同文件 |
 | `models/common/multimodal.py` | vision/text fusion helpers | A2，同文件 |
-| `models/common/param_init.py` | init context/std helper | A2，同文件 |
+| ~~`models/common/param_init.py`~~ | init context/std helper | 已于 2026-09-25 删除（死代码） |
 | `models/common/qkv.py` | fused QKV 与 state hooks | A2，`attention.py` 拆分 |
 | `models/common/rope.py` | RoPE 全家族 | A2，同文件 |
 | `models/common/scatter_add.py` | deterministic scatter-add autograd | A2，`ops/scatter_add.py` |
@@ -477,4 +477,4 @@ step 1 恢复 optimizer、scheduler、dataloader 和 train state 后完成并保
 - 2026-09-23 审计在 macOS 开发机上执行：torch 2.2.2 低于项目要求（>=2.12），缺
   `spmd_types`/`grain`，32 个测试文件收集即失败；当轮改动只有静态门禁、shim 级验证与
   vocab-loss 2-rank gloo 等价性覆盖，需在 torch>=2.12 环境重跑受影响套件。详见
-  [`hpmesh_torchtitan_alignment_audit_2026-09-23.md`](./hpmesh_torchtitan_alignment_audit_2026-09-23.md)。
+  `hpmesh_torchtitan_alignment_audit_2026-09-23.md`（不在当前工作区）。

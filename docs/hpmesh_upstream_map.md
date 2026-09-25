@@ -1,7 +1,7 @@
 # hpmesh → torchtitan 对应关系表
 
 [hpmesh](../hpmesh) 拿掉了 TorchTitan 的 `Configurable` 与 `Module` 两个抽象层，换来一个
-明显更短的框架：90 个 Python 模块、约 24.3k 行，覆盖 TP / FSDP2 / CP / EP / PP 五条
+明显更短的框架：94 个 Python 模块、约 27.4k 行，覆盖 TP / FSDP2 / CP / EP / PP 五条
 并行路径的装配、训练循环、checkpoint 与等价性测试。本文是这些模块与 torchtitan 之间
 对应关系的**唯一权威**。
 
@@ -91,7 +91,7 @@ C 类上会把项目**故意删掉**的抽象又拽回来。
 | `models/common/masks.py` | `models/common/attention.py` | 0.380 | 拆出了 mask 部分 |
 | `models/common/moe.py` | `models/common/moe.py` | 0.155 | |
 | `models/common/multimodal.py` | `models/common/multimodal.py` | 0.888 | 保留算法来源，但加入同步规避与更严格的 span/run 校验 |
-| `models/common/param_init.py` | `models/common/param_init.py` | 0.700 | |
+| ~~`models/common/param_init.py`~~ | — | — | **2026-09-25 移除**：torchtitan parity 的 vendored 死代码（hpmesh 走 HF 模型自带 `_init_weights`，全仓零引用） |
 | `models/common/qkv.py` | `models/common/attention.py` | 0.242 | |
 | `models/common/rope.py` | `models/common/rope.py` | 0.616 | 上游持续重构后结构已分叉；同步公式与边界修复，不同步 Module/缓存形状 |
 | `models/common/scatter_add.py` | `ops/scatter_add.py` | 0.711 | |
@@ -381,7 +381,7 @@ hpmesh 侧是 `datasets/multimodal/mm_image.py`），本表的 hpmesh 列是唯�
 
 - 本文最近一次人工审计工作树：hpmesh `5749d19`（+本轮改动），TorchTitan `b64103072`；
   详细验证记录见
-  [`hpmesh_torchtitan_alignment_audit_2026-09-23.md`](./hpmesh_torchtitan_alignment_audit_2026-09-23.md)。
+  `hpmesh_torchtitan_alignment_audit_2026-09-23.md`（不在当前工作区）。
   上一轮审计（hpmesh `8a2f269` × TorchTitan `c6e416bbd`）引用的
   `hpmesh_torchtitan_alignment_audit_2026-09-21.md` 不在当前工作区。
 - 检查后续漂移：`git -C <torchtitan> log b64103072..HEAD -- torchtitan/`。
