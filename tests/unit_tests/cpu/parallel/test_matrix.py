@@ -18,15 +18,33 @@ from hpmesh.parallel import matrix
 
 
 def test_every_row_has_a_verdict_reason_and_guard() -> None:
-    for name, entry in matrix.ENTRIES.items():
-        assert entry.name == name
-        assert entry.phase in ("config", "assembly", "probe")
-        assert issubclass(entry.error, Exception)
-        assert entry.reason and entry.guard
+    for row in matrix.ENTRIES:
+        assert row.name == row.fn.__name__
+        assert row.reason == row.fn.__doc__.strip()
+        assert row.phase in ("config", "assembly", "probe")
+        assert issubclass(row.error, Exception)
+        assert row.reason and row.guard
+
+
+def test_every_guard_function_has_a_row() -> None:
+    # The table and the functions cannot drift: every row references a real
+    # function in this module, and every public guard function is tabled.
+    import inspect
+
+    import hpmesh.parallel.matrix as m
+
+    public = {
+        n
+        for n, v in vars(m).items()
+        if inspect.isfunction(v) and v.__module__ == m.__name__
+        and not n.startswith("_")
+        and n not in ("check_config", "check_training", "check_root")
+    }
+    assert {r.name for r in matrix.ENTRIES} == public
 
 
 def test_config_rows_are_exactly_the_config_scope() -> None:
-    config_rows = {n for n, e in matrix.ENTRIES.items() if e.phase == "config"}
+    config_rows = {r.name for r in matrix.ENTRIES if r.phase == "config"}
     assert config_rows == {
         "sequence_parallel_required",
         "tp_ep_cp",
@@ -127,7 +145,7 @@ def test_assembly_rows_reject_with_their_entry_type() -> None:
         (matrix.shared_expert_tp_ep, (_Block(),), "tp x ep"),
     ]
     for fn, args, match in cases:
-        entry = matrix.ENTRIES[fn.__name__]
+        entry = next(r for r in matrix.ENTRIES if r.fn is fn)
         with pytest.raises(entry.error, match=match):
             fn(*args)
 
