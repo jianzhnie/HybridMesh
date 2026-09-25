@@ -199,7 +199,7 @@ loud-raise(ep=1 边界处、tp×ep 的 swap `_convert_block` 处）;plan 声明 
 探针找不到块（ep=1）loud-raise;GPT-OSS 布局 loud-raise。aux loss / padding-mask
 LB / quantile hook 的归约轴此前已按 ep_enabled 含 tp 书写，放行后不重复计数、无需
 改动。测试
-`tests/unit_tests/cpu/distributed/test_tp_moe.py`：规格解析、分片重建、单进程
+`tests/unit_tests/cpu/parallel/test_tp_moe.py`：规格解析、分片重建、单进程
 partial-sum 等价（reduce-scatter 求和的算术内容，无进程组）、FQN 稳定、幂等、
 ep>1 时 apply_tp 原样放行 MoE 块、shared-expert×tp×ep 拒绝、梯度排除规则、组合
 矩阵各格。**未覆盖**：真多卡 forward/backward 等价（本机 torch 2.2.2 无

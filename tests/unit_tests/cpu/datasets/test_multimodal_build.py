@@ -265,7 +265,7 @@ def test_importing_the_text_path_needs_no_multimodal_dependencies():
         "import hpmesh.datasets, hpmesh.datasets.build\n"
     )
     env = dict(os.environ)
-    env["PYTHONPATH"] = str(pathlib.Path(__file__).parents[4])
+    env["PYTHONPATH"] = str(pathlib.Path(__file__).parents[3])
     result = subprocess.run(
         [sys.executable, "-c", source],
         capture_output=True,

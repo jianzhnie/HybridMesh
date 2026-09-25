@@ -12,7 +12,7 @@
 
 ## 设计：只有两个抽象
 
-- **分组 `HybridMeshConfig`**（`hpmesh/trainer/config.py`）—— 按关注点分组
+- **分组 `HybridMeshConfig`**（`hpmesh/config/`）—— 按关注点分组
   （Model / Parallel / Optimizer / Training）再**组合**成单一配置；每组在自己的
   `__post_init__` 里校验。CLI 用 `HfArgumentParser` 暴露成扁平旗标
   （`--steps`、`--data_parallel_shard_size`、`--learning_rate`），也支持 YAML/JSON
@@ -42,22 +42,22 @@ torchrun --nproc_per_node=2 -m hpmesh --data_parallel_shard_size 2
 
 | 文件 | 核心概念 | 状态 |
 |---|---|---|
-| `hpmesh/trainer/config.py` | 分组组合配置（Model / Parallel / Optimizer / Training）+ 校验 | 可运行 |
-| `hpmesh/mesh.py` | **DeviceMesh / 进程拓扑** + torchrun 初始化 | 可运行 |
+| `hpmesh/config/` | 分组组合配置（Model / Parallel / Optimizer / Training）+ 校验 | 可运行 |
+| `hpmesh/parallel/parallel_dims.py` | **DeviceMesh / 进程拓扑**（`ParallelDims` + `build_mesh`） | 可运行 |
 | `hpmesh/models/hf_wrapper.py` | HF 模型包装成统一的 decoder forward（返回 logits，loss 在 trainer 里算） | 可运行 |
 | `hpmesh/trainer/trainer.py` | 训练循环：`train` -> `train_step` -> `forward_backward_step`，token 归一化 loss + 梯度裁剪 + 非有限值检测 | 可运行 |
-| `hpmesh/datasets/random_data.py` | `Batch` + 无限微批次迭代器（源耗尽即中止整步，不训练半个 batch） | 可运行 |
+| `hpmesh/datasets/{types,random_data}.py` | `Batch` + 无限微批次迭代器（源耗尽即中止整步，不训练半个 batch） | 可运行 |
 | `hpmesh/datasets/{loader,sources,packing,text}.py` | Grain 数据层：语料 -> 打包 -> 每 DP rank 分片；`DATALOADER` 状态进 checkpoint | 可运行 |
 | `hpmesh/datasets/multimodal/mm_*.py` | 多模态语料（图/视频/文本处理器 + collator）——**已接线**：`datasets/build.py` 惰性导入，`DataloaderConfig.dataset` 点名即用（需 torchvision） | 可运行 |
 | `hpmesh/components/checkpointer/{base,dcp,torch_checkpointing}.py` | 每 rank 一份检查点，`step` / `ntokens_seen` / 模型 / 优化器，可续训；`base.py` 是共用骨架，两种后端各一个 manager | 可运行 |
 | `hpmesh/components/loss.py` | 交叉熵（含 vocab-parallel 形式）+ next-token 目标构造 | 已实现 |
 | `hpmesh/components/{metrics,profiler}.py` | 训练指标 + profiler | 可运行 |
 | `hpmesh/components/optimizer/{optimizer,lr_scheduler,utils}.py` | 优化器容器（正则分组 + per-group lr/wd）、WSD 学习率调度、FQN-keyed checkout 状态序列化 | 可运行 |
-| `hpmesh/parallel/collectives.py` | mesh 感知的 `dist_sum` / `dist_max` / `clip_grad_norm_`（跨 PP stage 归约范数） | 可运行 |
+| `hpmesh/accelerator/collectives.py` | mesh 感知的归约 / `clip_grad_norm_`（跨 PP stage 归约范数） | 可运行 |
 | `hpmesh/parallel/fully_shard/fsdp.py` | 数据并行（FSDP2 `fully_shard`） | 已实现 |
 | `hpmesh/parallel/tensor_parallel/linear.py` | async-TP 融合原语（`AllGatherLinear` / `LinearReduceScatter`） | 已实现（CUDA） |
 | `hpmesh/parallel/tensor_parallel/tp.py` | 张量并行（声明式 sharding -> 融合原语） | 已实现（CUDA） |
-| `hpmesh/parallel/pipeline_parallel/{pipeline,pp}.py` | PP：stage 切分 + `apply_pp` / schedule 驱动（1F1B 闭环，pp+cp/ep 未接线） | 已实现 |
+| `hpmesh/parallel/pipeline_parallel/{pipeline,apply}.py` | PP：stage 切分 + `apply_pp` / schedule 驱动（1F1B 闭环，pp+cp/ep 未接线） | 已实现 |
 | `hpmesh/parallel/context_parallel/` + `expert_parallel/` | 上下文并行（KV all-gather 接线）/ 专家并行（Qwen3Moe MoE 替换 + all-to-all） | 已实现 |
 | `hpmesh/trainer/train.py` | 入口：`HfArgumentParser` 解析 config -> `Trainer(cfg).train()` | 可运行 |
 
@@ -117,7 +117,7 @@ DeepSeek-V3 那个值得单看：它的 `n_routed_experts` / `q_lora_rank` 这�
   NCCL 设计，在 CPU+gloo 上不可用 —— 请在 GPU 机器上做第 1 步及以后。
 - **第 2 步 TP 同样是 CUDA-only**：`parallel/tensor_parallel/linear.py` 的融合算子走
   `torch.ops.symm_mem.fused_*`（对称内存），本机 `symm_mem.is_available()==False`。
-  CPU 上只能验证声明层与权重切分（见 `tests/unit_tests/cpu/distributed/test_tp.py`），完整的 all-gather /
+  CPU 上只能验证声明层与权重切分（见 `tests/unit_tests/cpu/parallel/test_tp.py`），完整的 all-gather /
   reduce-scatter 前反向要在 GPU 上跑。
 - **PP 只支持 `--dataset random`**：打包语料的 `positions` 没有穿过 schedule 的通道
   （`pp.py` 里显式 raise）。见 `docs/hybridmesh_design.md` §5.5。
