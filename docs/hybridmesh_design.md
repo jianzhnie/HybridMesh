@@ -173,7 +173,7 @@ import trainer 或读取全局 run config；跨 models/parallel 的依赖必须�
 引擎层（TP/CP fused kernel、FSDP、`spmd_context`、checkpoint 的 PG 生命周期）直连
 `torch.distributed` 与 `_functional_collectives` 等私有 API。
 
-目录结构（111 个 Python 模块，约 28.2k 行；2026-09-25 终稿实测）：
+目录结构（112 个 Python 模块，约 28.3k 行；2026-09-25 终稿实测）：
 
 ```
 hpmesh/
@@ -186,10 +186,11 @@ hpmesh/
   models/      22 模块          hf_wrapper.py + hf_factory.py（config 构建/类解析/
                                 meta materialize/FLOPs）+ common/{rope,masks,qkv,
                                 moe/routers/balancing,...}
-  parallel/    25 模块          tensor_parallel/(tp+apply+linear)
+  parallel/    26 模块          tensor_parallel/(tp+apply+linear)
                                 fully_shard/ pipeline_parallel/ context_parallel/
                                 expert_parallel/(swap+probe+convert)
                                 activation_checkpoint.py compile.py matrix.py
+                                stages.py（装配 stage 表）
                                 parallel_dims.py parallelize_hf.py
   accelerator/  8 模块          device.py（设备发现/backend 选择）
                                 capabilities.py（能力注册表）
@@ -320,14 +321,16 @@ def apply_fsdp(model, mesh, cfg, parallel_dims) -> nn.Module # fully_shard/
 ```
 
 公共语义：`mesh is None` 或对应度数 `<= 1` 时 no-op 原样返回；否则返回就地改造后的
-模型。**顺序即契约**，整个框架的编排知识集中在 `parallel/parallelize_hf.py` 一个文件里：
+模型。**顺序即契约**——且契约是数据不是注释：`parallel/stages.py` 的 `STAGES`
+表是唯一来源（有序、`on_pp` 标记、每项带位置理由），`parallelize_hf.py` 的两条
+路径都由它驱动（无引擎依赖，任何地方可导入）：
 
 ```
-pp>1 时先调 pipeline_parallel.apply_pp（只切 stage），随后由 parallelize_hf
-对每个 part 过 apply_tp -> compile(可选) -> apply_fsdp（与 pp=1 同序、同一
-调用点），最后建 schedule，返回 PipelineParallelSetup；pp=1 时保持：
-apply_tp -> apply_ep -> apply_cp -> apply_ac -> compile(可选) -> apply_fsdp
+STAGE_ORDER    = tp -> ep -> cp -> ac -> compile(可选) -> fsdp   # pp=1 路径
+PP_STAGE_ORDER = tp -> compile(可选) -> fsdp                     # on_pp 子序列
 # AC 包住已经 TP/EP/CP 改造的层；FSDP 最后，outer wraps inner
+# pp>1 时先调 pipeline_parallel.apply_pp（只切 stage），per-part 走 PP_STAGE_ORDER，
+# 最后建 schedule，返回 PipelineParallelSetup
 ```
 
 compile 一步是 `parallel/compile.py::apply_compile`：默认整体
