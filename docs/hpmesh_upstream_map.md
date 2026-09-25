@@ -89,7 +89,7 @@ C 类上会把项目**故意删掉**的抽象又拽回来。
 | `models/common/feed_forward.py` | `models/common/feed_forward.py` | 0.560 | **曾写完又被退**，不要在没有明确指令时重新引入 |
 | `models/common/linear.py` | `models/common/linear.py` | 0.620 | |
 | `models/common/masks.py` | `models/common/attention.py` | 0.380 | 拆出了 mask 部分 |
-| `models/common/moe.py` | `models/common/moe.py` | 0.155 | |
+| `models/common/moe.py`（拆为 moe/routers/balancing 三文件） | `models/common/moe.py` | 0.155 | |
 | `models/common/multimodal.py` | `models/common/multimodal.py` | 0.888 | 保留算法来源，但加入同步规避与更严格的 span/run 校验 |
 | ~~`models/common/param_init.py`~~ | — | — | **2026-09-25 移除**：torchtitan parity 的 vendored 死代码（hpmesh 走 HF 模型自带 `_init_weights`，全仓零引用） |
 | `models/common/qkv.py` | `models/common/attention.py` | 0.242 | |
