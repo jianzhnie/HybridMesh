@@ -173,7 +173,7 @@ import trainer 或读取全局 run config；跨 models/parallel 的依赖必须�
 引擎层（TP/CP fused kernel、FSDP、`spmd_context`、checkpoint 的 PG 生命周期）直连
 `torch.distributed` 与 `_functional_collectives` 等私有 API。
 
-目录结构（109 个 Python 模块，约 27.9k 行；2026-09-25 批 6 终稿实测）：
+目录结构（110 个 Python 模块，约 28.0k 行；2026-09-25 批 6 终稿 + 能力注册表实测）：
 
 ```
 hpmesh/
@@ -191,7 +191,8 @@ hpmesh/
                                 expert_parallel/(swap+probe+convert)
                                 activation_checkpoint.py compile.py
                                 parallel_dims.py parallelize_hf.py
-  accelerator/  7 模块          device.py（设备发现/backend 选择）
+  accelerator/  8 模块          device.py（设备发现/backend 选择）
+                                capabilities.py（能力注册表）
                                 collectives.py（归约/超时/grad norm）
                                 monitoring.py（显存监控/peak FLOPS）
                                 spmd_context.py（SPMD mesh 作用域 + 轴查询, 最底层）
@@ -225,6 +226,28 @@ fail-fast 按类型分三类，全部继承 `HpmeshError`，并各自双继承�
 torchao、torchvision，安装指引放文案）；模块内部的抽象方法/未知枚举值
 （`routers.py` 的 score_func、`rope.py` 的变体拒绝等）保持原生
 `NotImplementedError`，不进层级——它们不是给运维看的三类决策。
+
+## 3.2 能力注册表（accelerator/capabilities.py）
+
+torch 版本/环境探测（`hasattr` 私有 knob、守卫 import）集中于单一注册表：
+`has(name)` 缓存探测、`require(name, feature=...)` 缺失时 raise
+`EnvironmentUnsupportedError`（文案带解锁指引），未知名立即 `KeyError` 防拼写
+静默。守卫点保留自己的 raise 文案（那是测试契约），只把探测搬进注册表。
+
+| 条目 | 探测 | 引入 | 消费方 |
+|---|---|---|---|
+| `dynamo_capture_scalar_outputs` | hasattr `torch._dynamo.config` | torch 2.7 | compile.py（MoE dispatch 编译） |
+| `inductor_micro_pipeline_tp` | hasattr `torch._inductor.config` | torch 2.8 | compile.py（async TP） |
+| `fx_regional_inductor` | import `torch.fx.passes.regional_inductor` | torch 2.10 | compile.py（aot_eager×flex） |
+| `symm_mem` | import `torch.distributed._symmetric_memory` | torch 2.8（CUDA） | compile.py、tp.py、linear.py |
+| `functorch_activation_memory_budget` | hasattr `torch._functorch.config` | torch 2.6 | activation_checkpoint.py（memory_budget） |
+| `torch_grouped_mm` | 实跑探测（bf16 哑调用） | torch 2.7 | grouped_experts.py |
+
+不纳入的：可选**包**（renderers/torchao/torchvision）保持本站 `ImportError`
+惯例；`device.py` 的设备发现是"缺席即静默"的可用性探测（另一种语义，且
+device.py 本身就是设备注册表）；DTensor/flex_attention/spmd_types 是无回退
+硬 import，没有可探测的降级路径；`linear.py` 的 functional-collectives
+改名回退是版本兼容 shim，不是守卫。
 
 ## 4. 核心契约（三条缝）
 

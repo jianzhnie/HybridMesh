@@ -74,6 +74,7 @@ from torch.utils.checkpoint import (
 
 from hpmesh.config import MemoryBudgetACConfig, SelectiveACConfig
 
+from ..accelerator.capabilities import has
 from ..utils.logger_utils import get_logger
 
 logger = get_logger(__name__)
@@ -273,7 +274,7 @@ def _apply_memory_budget(cfg: MemoryBudgetACConfig) -> None:
     a torch without that knob setting it would be a silent no-op -- refuse
     instead. Upstream never restores the global; it is a per-run setting.
     """
-    if not hasattr(torch._functorch.config, "activation_memory_budget"):
+    if not has("functorch_activation_memory_budget"):
         raise NotImplementedError(
             "mode='memory_budget' needs "
             "torch._functorch.config.activation_memory_budget, which this "

@@ -31,6 +31,7 @@ import contextlib
 import pytest
 import torch
 
+from hpmesh.accelerator.capabilities import has
 from hpmesh.config import (
     CompileConfig,
     HybridMeshConfig,
@@ -183,7 +184,7 @@ def test_async_tp_without_tp_mesh_raises() -> None:
 
 @requires_runtime
 @pytest.mark.skipif(
-    hasattr(__import__("torch._inductor.config", fromlist=["x"]), "_micro_pipeline_tp"),
+    has("inductor_micro_pipeline_tp"),
     reason="this torch carries _micro_pipeline_tp; the loud-raise is unreachable",
 )
 def test_async_tp_on_unsupported_torch_loud_raises() -> None:

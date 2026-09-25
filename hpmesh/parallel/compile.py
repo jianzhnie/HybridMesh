@@ -46,6 +46,7 @@ import torch.nn as nn
 from hpmesh.config import CompileConfig
 from hpmesh.errors import EnvironmentUnsupportedError
 
+from ..accelerator.capabilities import has
 from ..models.common.moe import _iter_moe_layers
 from ..utils.logger_utils import get_logger
 
@@ -92,7 +93,7 @@ def apply_compile(
         # Token-choice dispatch sizes its expert splits from the routing,
         # so the compiled graph has data-dependent shapes. Dense models
         # never touch the flag, keeping their trace bitwise unchanged.
-        if not hasattr(torch._dynamo.config, "capture_scalar_outputs"):
+        if not has("dynamo_capture_scalar_outputs"):
             raise EnvironmentUnsupportedError(
                 "This torch has no torch._dynamo.config.capture_scalar_outputs, "
                 "which compiling a token-choice MoE dispatch needs for its "
@@ -136,22 +137,21 @@ def _maybe_enable_async_tp(compile_config: CompileConfig, tp_mesh) -> None:
 
     import torch._inductor.config as inductor_config
 
-    if not hasattr(inductor_config, "_micro_pipeline_tp"):
+    if not has("inductor_micro_pipeline_tp"):
         raise EnvironmentUnsupportedError(
             "compile_config.enable_async_tensor_parallel needs "
             "torch._inductor.config._micro_pipeline_tp, which this torch "
             f"({torch.__version__}) does not carry. Upgrade torch, or run "
             "without async TP."
         )
-    try:
-        from torch.distributed._symmetric_memory import enable_symm_mem_for_group
-    except ImportError as e:
+    if not has("symm_mem"):
         raise EnvironmentUnsupportedError(
             "compile_config.enable_async_tensor_parallel needs "
             "torch.distributed._symmetric_memory.enable_symm_mem_for_group, "
             f"which this torch ({torch.__version__}) does not carry. Upgrade "
             "torch, or run without async TP."
-        ) from e
+        )
+    from torch.distributed._symmetric_memory import enable_symm_mem_for_group
 
     group_name = tp_mesh.get_group().group_name
     if group_name not in _symm_mem_enabled_groups:
@@ -193,17 +193,16 @@ def _maybe_regional_inductor_backend(
             "or 'aot_eager'."
         )
 
-    try:
-        from torch._dynamo.backends.common import aot_autograd
-        from torch.fx.passes.regional_inductor import regional_inductor
-    except ImportError as e:
+    if not has("fx_regional_inductor"):
         raise EnvironmentUnsupportedError(
             "compile backend 'aot_eager' on a flex-attention model needs "
             "torch.fx.passes.regional_inductor to scoop the flex region "
             f"into inductor, which this torch ({torch.__version__}) does "
             "not carry. Upgrade torch, use backend='inductor', or run "
             "without compile."
-        ) from e
+        )
+    from torch._dynamo.backends.common import aot_autograd
+    from torch.fx.passes.regional_inductor import regional_inductor
 
     global _regional_inductor_enabled
     _regional_inductor_enabled = True

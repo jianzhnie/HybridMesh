@@ -53,6 +53,7 @@ from torch.distributed.device_mesh import DeviceMesh
 
 from hpmesh.errors import UnsupportedCombinationError
 
+from ...accelerator.capabilities import has
 from .linear import (
     AllGatherLinear,
     LinearReduceScatter,
@@ -476,11 +477,7 @@ def _supports_symm_mem(tp_mesh: DeviceMesh) -> bool:
     """
     if tp_mesh.device_type != "cuda":
         return False
-    try:
-        import torch.distributed._symmetric_memory  # noqa: F401
-    except ImportError:
-        return False
-    return True
+    return has("symm_mem")
 
 
 def _enable_symm_mem(group) -> None:

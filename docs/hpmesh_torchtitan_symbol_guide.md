@@ -439,6 +439,9 @@ step 1 恢复 optimizer、scheduler、dataloader 和 train state 后完成并保
 | `trainer/trainer.py`（+ `validation.py` / `pp_steps.py` 抽出的 validation 与 PP microbatch 段） | 完整训练生命周期 | B，根 `trainer.py` + `training_engine.py` |
 | `utils/batch_invariant.py` | batch-invariant getter/setter | C，上游开关散在 trainer/config |
 
+能力探测约定：torch 版本/环境探测集中在 `accelerator/capabilities.py`
+（`has`/`require`，缺失经 `EnvironmentUnsupportedError` 报解锁指引）。
+
 错误处理约定：fail-fast 类型层级在 `hpmesh/errors.py`——`ConfigError`
 （配置非法，兼 `ValueError`）、`UnsupportedCombinationError`（组合拒绝，兼
 `NotImplementedError`）、`EnvironmentUnsupportedError`（依赖缺失、文案带解锁
