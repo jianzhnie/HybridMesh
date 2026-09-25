@@ -7,6 +7,12 @@ from typing import Literal
 
 import torch
 
+from hpmesh.errors import (
+    ConfigError,
+    EnvironmentUnsupportedError,
+    UnsupportedCombinationError,
+)
+
 
 @dataclass(kw_only=True, slots=True)
 class ParallelConfig:
@@ -282,14 +288,14 @@ class ParallelConfig:
         fixed = self.non_dp_sizes()
         if self.data_parallel_shard_size == -1:
             if world_size % fixed != 0:
-                raise ValueError(
+                raise ConfigError(
                     f"world_size={world_size} not divisible by "
                     f"dp_replicate*tp*pp*cp={fixed}"
                 )
             return world_size // fixed
         dp_shard = self.data_parallel_shard_size
         if dp_shard * fixed != world_size:
-            raise ValueError(
+            raise ConfigError(
                 f"dp_shard*dp_replicate*tp*pp*cp = {dp_shard * fixed} "
                 f"!= world_size={world_size}"
             )
@@ -311,7 +317,7 @@ class ParallelConfig:
 
     def __post_init__(self):
         if self.train_timeout_seconds <= 0:
-            raise ValueError(
+            raise ConfigError(
                 "train_timeout_seconds must be greater than 0, got "
                 f"{self.train_timeout_seconds}"
             )
@@ -323,7 +329,7 @@ class ParallelConfig:
             "expert_parallel_size",
         ):
             if getattr(self, name) < 1:
-                raise ValueError(f"{name} must be >= 1, got {getattr(self, name)}")
+                raise ConfigError(f"{name} must be >= 1, got {getattr(self, name)}")
         if not self.enable_sequence_parallel:
             # The flag used to be read by no line of the package, so ``False``
             # was accepted and silently behaved as ``True``. It cannot simply be
@@ -331,7 +337,7 @@ class ParallelConfig:
             # sequence-parallel one (see the field's docstring). Refuse the
             # configuration rather than train something other than what was
             # asked for.
-            raise NotImplementedError(
+            raise UnsupportedCombinationError(
                 "parallelism.enable_sequence_parallel=false is not supported: "
                 "hpmesh's tensor parallelism is sequence-parallel by "
                 "construction (the fused TP GEMMs gather/scatter the sequence "
@@ -351,20 +357,20 @@ class ParallelConfig:
             # attention kernel is orthogonal, but the token-count reductions
             # and dispatcher layouts have not been exercised together), so it
             # is refused here rather than silently composing.
-            raise NotImplementedError(
+            raise UnsupportedCombinationError(
                 "tensor_parallel_size > 1 with expert_parallel_size > 1 and "
                 "context_parallel_size > 1 is not supported: tp x ep x cp is "
                 "unverified. Run tp x ep with context_parallel_size=1, or ep x "
                 "cp with tensor_parallel_size=1."
             )
         if self.data_parallel_shard_size < 1 and self.data_parallel_shard_size != -1:
-            raise ValueError(
+            raise ConfigError(
                 "data_parallel_shard_size must be >= 1 or -1 (derive), got "
                 f"{self.data_parallel_shard_size}"
             )
         allowed_dispatchers = ("alltoall", "torchao", "deepep", "hybridep")
         if self.ep_token_dispatcher not in allowed_dispatchers:
-            raise ValueError(
+            raise ConfigError(
                 "parallelism.ep_token_dispatcher must be one of: "
                 f"{allowed_dispatchers} (got {self.ep_token_dispatcher!r})"
             )
@@ -377,7 +383,7 @@ class ParallelConfig:
             # CUDA target device; neither is done, so refuse the configuration
             # rather than silently run all-to-all. The default 'alltoall'
             # dispatcher satisfies the same dispatch/combine contract.
-            raise NotImplementedError(
+            raise EnvironmentUnsupportedError(
                 f"ep_token_dispatcher={self.ep_token_dispatcher!r} is a "
                 "registered gap, not a supported backend: it is CUDA-only and "
                 "requires the deep_ep/hybridep kernels plus torchtitan's "
@@ -388,25 +394,25 @@ class ParallelConfig:
                 "numerics on a CUDA device. Use 'alltoall' meanwhile."
             )
         if self.ep_token_dispatcher != "alltoall" and self.expert_parallel_size == 1:
-            raise NotImplementedError(
+            raise UnsupportedCombinationError(
                 f"ep_token_dispatcher={self.ep_token_dispatcher!r} has no "
                 "effect at expert_parallel_size=1: the EP swap is the only "
                 "place a token dispatcher is installed and it does not run at "
                 "ep=1. Set expert_parallel_size > 1, or keep 'alltoall'."
             )
         if self.ep_torchao_pad_multiple < 1:
-            raise ValueError(
+            raise ConfigError(
                 "ep_torchao_pad_multiple must be >= 1, got "
                 f"{self.ep_torchao_pad_multiple}"
             )
         if self.context_parallel_load_balancer == "":
-            raise ValueError(
+            raise ConfigError(
                 "context_parallel_load_balancer cannot be an empty string. "
                 "Use None to disable load balancing."
             )
         allowed = frozenset({None, "headtail", "ptrr"})
         if self.context_parallel_load_balancer not in allowed:
-            raise ValueError(
+            raise ConfigError(
                 "parallelism.context_parallel_load_balancer must be one of: "
                 f"None, 'headtail', 'ptrr' "
                 f"(got {self.context_parallel_load_balancer!r})"
@@ -417,7 +423,7 @@ class ParallelConfig:
             # the mesh builder moves the failure from the first forward -- after
             # process groups, model build and dataloader construction -- to the
             # config, where the message is still about the flag.
-            raise NotImplementedError(
+            raise UnsupportedCombinationError(
                 "parallelism.context_parallel_load_balancer='ptrr' is not "
                 "implemented in hpmesh: it derives its schedule from a "
                 "BlockMask, which hpmesh's CP kernel does not consume. Use "
@@ -425,7 +431,7 @@ class ParallelConfig:
             )
         allowed_strategies = frozenset({"kv_allgather", "ulysses"})
         if self.context_parallel_strategy not in allowed_strategies:
-            raise ValueError(
+            raise ConfigError(
                 "parallelism.context_parallel_strategy must be one of: "
                 f"'kv_allgather', 'ulysses' "
                 f"(got {self.context_parallel_strategy!r})"
@@ -434,7 +440,7 @@ class ParallelConfig:
             self.context_parallel_strategy == "ulysses"
             and self.context_parallel_load_balancer is not None
         ):
-            raise ValueError(
+            raise UnsupportedCombinationError(
                 "parallelism.context_parallel_strategy='ulysses' requires "
                 "context_parallel_load_balancer=None: every rank attends the "
                 "full sequence in whatever order the all-to-all delivers, and "
@@ -451,12 +457,12 @@ class ParallelConfig:
                 and torch.cuda.get_device_capability() < (9, 0)
             )
         ):
-            raise ValueError(
+            raise ConfigError(
                 "For NVIDIA GPUs, parallelism.enable_fsdp_symm_mem is only supported "
                 "for compute capability 9.0 or newer."
             )
         if self.fsdp_symm_mem_scope not in ("all", "dense"):
-            raise ValueError(
+            raise ConfigError(
                 "parallelism.fsdp_symm_mem_scope must be one of: 'all', 'dense' "
                 f"(got {self.fsdp_symm_mem_scope!r})"
             )
@@ -467,7 +473,7 @@ class ParallelConfig:
         try:
             get_schedule_class(self.pipeline_parallel_schedule)
         except ValueError as e:
-            raise ValueError(
+            raise ConfigError(
                 "Invalid parallelism.pipeline_parallel_schedule "
                 f"{self.pipeline_parallel_schedule!r}: {e}"
             ) from e

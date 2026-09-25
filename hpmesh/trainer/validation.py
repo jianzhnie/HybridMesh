@@ -14,6 +14,7 @@ from __future__ import annotations
 import torch
 
 from hpmesh.config import ValidationConfig
+from hpmesh.errors import UnsupportedCombinationError
 
 from ..accelerator.dist import all_reduce
 from ..accelerator.spmd_context import spmd_context
@@ -49,7 +50,7 @@ def _check_validation_feasibility(
           skipping validation or training on the pass.
         """
     if pp_enabled:
-        raise NotImplementedError(
+        raise UnsupportedCombinationError(
             "validation with pipeline parallelism is not supported: "
             "hpmesh drives the pipeline schedule through its training "
             "seam, where the last stage's loss is computed and backwarded "

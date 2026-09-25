@@ -79,6 +79,8 @@ from typing import NamedTuple
 import torch
 import torch.nn as nn
 
+from hpmesh.errors import UnsupportedCombinationError
+
 from ...models.common.moe import MOE_LAYER_ATTRS
 from ...utils.logger_utils import get_logger
 
@@ -148,7 +150,7 @@ def _fused_experts_of(block: nn.Module) -> _FusedExperts | None:
     if gate_up.shape[0] != down.shape[0]:
         return None
     if hasattr(experts, "gate_up_proj_bias") or hasattr(experts, "down_proj_bias"):
-        raise NotImplementedError(
+        raise UnsupportedCombinationError(
             f"{type(experts).__name__} carries per-expert bias vectors, which "
             "hpmesh's GroupedExperts has no slot for. Only GPT-OSS has them, "
             "and it differs further: its gate_up_proj is transposed to "
@@ -366,7 +368,7 @@ def _read_expert_groups(
     if topk_method == "greedy":
         return None, None
     if _ignores_norm_topk_prob(block, router):
-        raise NotImplementedError(
+        raise UnsupportedCombinationError(
             "DeepSeek-V2's group_limited_greedy scores a group by its single "
             "best expert (max); the implemented rule sums the group's top-2 "
             "(DeepSeek-V3/GLM4). Routing this checkpoint with that rule picks "

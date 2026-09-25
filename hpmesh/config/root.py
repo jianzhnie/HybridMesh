@@ -18,6 +18,7 @@ from hpmesh.config.training import (
     TrainingConfig,
     ValidationConfig,
 )
+from hpmesh.errors import ConfigError
 from hpmesh.utils.logger_utils import get_logger
 
 logger = get_logger(__name__)
@@ -40,7 +41,7 @@ class HybridMeshConfig:
     def __post_init__(self) -> None:
         # Cross-group check: CP must divide the sequence length.
         if self.training.max_seq_len % self.parallel.cp != 0:
-            raise ValueError(
+            raise ConfigError(
                 f"max_seq_len ({self.training.max_seq_len}) must be divisible by "
                 f"cp ({self.parallel.cp})"
             )
@@ -50,14 +51,14 @@ class HybridMeshConfig:
         # rather than surfacing deep inside the compile step.
         if self.training.compile_config.enable_async_tensor_parallel:
             if not self.training.compile:
-                raise ValueError(
+                raise ConfigError(
                     "training.compile_config.enable_async_tensor_parallel "
                     "requires training.compile=True: async TP is an inductor "
                     "pass over compiled regions, so without compile it would "
                     "silently do nothing."
                 )
             if self.parallel.tp < 2:
-                raise ValueError(
+                raise ConfigError(
                     "training.compile_config.enable_async_tensor_parallel "
                     "requires tensor_parallel_size > 1 (got "
                     f"{self.parallel.tp}): it pipelines the TP collectives, "

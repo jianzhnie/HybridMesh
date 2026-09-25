@@ -210,6 +210,22 @@ optimizer/) datasets/ models/ parallel/ utils/，目录名 = 被测包名；
 tests/integration_tests/ 下 25 个 torchrun 脚本由 run_all.py 统一驱动。
 ```
 
+## 3.1 异常约定（hpmesh/errors.py）
+
+fail-fast 按类型分三类，全部继承 `HpmeshError`，并各自双继承既有内建类型
+（旧 `pytest.raises` 断言不受影响）：
+
+| 类型 | 同时继承 | 语义 | 典型位置 |
+|---|---|---|---|
+| `ConfigError` | `ValueError` | 配置错了，改 flag/字段值 | `config/*` 的 `__post_init__` 校验 |
+| `UnsupportedCombinationError` | `NotImplementedError` | 各自合法、组合拒绝（tp×ep×cp、PP×validation、shared-expert×tp、ulysses×load balancer、TP 的 MoE 布局） | `parallelize_hf`、`apply_*`、EP swap |
+| `EnvironmentUnsupportedError` | `NotImplementedError` | 构建/宿主缺依赖，文案必须带解锁条件（所需 torch 版本/包） | compile 的 inductor/dynamo knob、AC 的 budget knob、deepep/hybridep、RegionAC |
+
+两条边界规则：可选**包**缺失保持 `ImportError`（Python 惯例：renderers、
+torchao、torchvision，安装指引放文案）；模块内部的抽象方法/未知枚举值
+（`routers.py` 的 score_func、`rope.py` 的变体拒绝等）保持原生
+`NotImplementedError`，不进层级——它们不是给运维看的三类决策。
+
 ## 4. 核心契约（三条缝）
 
 ### 4.1 SEAM 0：唯一配置入口

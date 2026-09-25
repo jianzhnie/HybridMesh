@@ -12,6 +12,7 @@ import torch.nn as nn
 from torch.distributed.device_mesh import DeviceMesh
 
 from hpmesh.config import ParallelConfig
+from hpmesh.errors import UnsupportedCombinationError
 
 from .tp import (
     _MOE_PLAN_SPECS,
@@ -99,7 +100,7 @@ def apply_tp(
             if _is_hf_moe_block(module):
                 moe_blocks.append((module_path, module))
         if not moe_blocks and not already_bracketed:
-            raise ValueError(
+            raise UnsupportedCombinationError(
                 f"apply_tp with tp={cfg.tp}: the plan declares MoE TP specs "
                 "but no HF MoE block was found on "
                 f"{type(model).__name__}. Refusing to run TP with the experts "
@@ -127,7 +128,7 @@ def apply_tp(
         if getattr(block, "shared_expert", None) is not None or (
             getattr(block, "shared_experts", None) is not None
         ):
-            raise NotImplementedError(
+            raise UnsupportedCombinationError(
                 f"TP over {module_path} ({type(block).__name__}): the block "
                 "has a shared expert, which the plan shards with the dense "
                 "colwise/rowwise realizers. Composing those with the MoE "
