@@ -110,6 +110,7 @@ step 1 恢复 optimizer、scheduler、dataloader 和 train state 后完成并保
 
 | hpmesh 符号 | TorchTitan 对应符号 | 差异与正确性 |
 |---|---|---|
+| `PartialBiasRowwiseLinear` | 上游 9e159aed7 已删除：bias 的 I→P 转换并入新 `RowParallelLinear`；hpmesh 同名类语义本就一致，保留（仅测试使用），**通过** |
 | `RouterGateLinear`, `_RouterGateLinearFunction` | `models/common/linear.py` 同名实现 | 前向 FP32 输出、后向 FP32 GEMM；CUDA bf16 使用 `out_dtype`，其他设备安全提升，**通过** |
 | `TokenChoiceTopKRouter.forward` | `models/common/routers.py` router | hpmesh 参数化而非 Config 构建，保留 softmax/sigmoid、group limit、route norm，**通过（适配）**。上游 e07084202 抽出可覆写 hooks，hpmesh 以 `_select_experts` 为覆写 seam，数学一致。2026-09-24 起 `_debug_force_load_balance` 调试开关已移植（构造参数，round-robin `(t*K+k)%E`，gating 值仍取真实 score，bias/group 限制均绕过——与上游逐字一致） |
 | `RoutedExperts.forward`, `MoE.forward` | 上游同名逻辑 | hpmesh 专家权重是 EP swap 后的本地切片，不是上游 SPMD DTensor，**通过（适配）**。2026-09-24 起 `MoE.set_padding_mask` 一次性暂存通道（上游 d34a13fdf 同源）：mask（True=padding）只过滤负载均衡统计（`tokens_per_expert_E`、aux loss f/p、quantile 直方图），routing 决策/dispatch/expert compute 始终跑完整 token 流，无 mask 逐位不变；CP/TP 由 `shard_padding_mask_for_cp/tp` 与 token 流同序切分 |
@@ -121,7 +122,7 @@ step 1 恢复 optimizer、scheduler、dataloader 和 train state 后完成并保
 | `AllToAllTokenDispatcher` | 上游 EP dispatcher | hpmesh 直接操作本地专家切片和 PG，非 MinimalAsyncEP（上游已删除该实验），**通过（适配）** |
 | `TorchAOTokenDispatcher` | 上游同名 dispatcher | 可选导入适配层：`_permute`/`_unpermute` 委托 torchao `permute_and_pad`（expert-major 重排 + token 组 pad 到 `pad_multiple`，EP=1 本地 padded permute 路径一并移植）；构造期 lazy import，未装 torchao loud-raise ImportError 带安装指引；`ParallelConfig.ep_token_dispatcher="torchao"` + `ep_torchao_pad_multiple` 接线，**通过（适配）**，数值**环境未覆盖**（无 torchao/CUDA），待 CUDA 目标设备复跑 |
 | `DeepEPTokenDispatcher` / `HybridEPTokenDispatcher` | 上游同名 dispatcher | **登记缺口（loud-raise）**：CUDA-only（`deep_ep`/`hybridep` 内核）且 dispatch/combine 需上游 `distributed/deepep/` wrappers（1155 行，未 vendor），可选导入无法忠实表达契约；`ParallelConfig.ep_token_dispatcher` 选到即 NotImplementedError（含解锁条件：vendor wrappers + CUDA optional extra + CUDA 设备复跑），swap 入口防御性同语义；`AllToAllTokenDispatcher` 满足同一 dispatch/combine 契约 |
-| `dist_gemm` 三个模块 | `models/common/dist_gemm.py` | 保留 fused collective+GEMM，mesh 从 hpmesh context 获取。上游 e72fd863d 重构为组合式 `Async*Linear`，hpmesh 保持子类式委托 `parallel/tensor_parallel/linear.py`，数学等价，**受限**：需 TP/CUDA 能力 |
+| `dist_gemm` 三个模块 | `models/common/async_linear.py`（9e159aed7 自 dist_gemm.py 改名） | 保留 fused collective+GEMM，mesh 从 hpmesh context 获取。上游 e72fd863d 重构为组合式 `Async*Linear`、9e159aed7 再改为继承新 `ColumnParallelLinear`/`RowParallelLinear` 通信角色，hpmesh 保持子类式委托 `parallel/tensor_parallel/linear.py`，数学等价，**受限**：需 TP/CUDA 能力 |
 
 ### 4.4 多模态
 
@@ -148,7 +149,7 @@ step 1 恢复 optimizer、scheduler、dataloader 和 train state 后完成并保
 
 | hpmesh 符号 | TorchTitan 对应符号 | 差异与正确性 |
 |---|---|---|
-| `AllGatherLinear`, `LinearReduceScatter` | `models/common/dist_gemm.py` 的 `AsyncAllGatherLinear`/`AsyncLinearReduceScatter`（原 `distributed/linear.py`，上游 e72fd863d 搬迁改名，数学不变） | fused symmetric-memory autograd 实现；提供 functional collective fallback，**通过** |
+| `AllGatherLinear`, `LinearReduceScatter` | `models/common/async_linear.py` 的 `AsyncAllGatherLinear`/`AsyncLinearReduceScatter`（原 `distributed/linear.py` → dist_gemm.py → async_linear.py，数学不变） | fused symmetric-memory autograd 实现；提供 functional collective fallback，**通过** |
 | `all_gather_linear`, `linear_reduce_scatter` | 同上非融合语义 | CPU/gloo fallback，前后向是 collective 对偶，**通过** |
 | `ColwiseLinear`, `RowwiseLinear` | 各模型 TP plan（上游 `distributed/tensor_parallel.py` 已随 DTensor 后端删除，无后继文件） | hpmesh 替换 HF `nn.Linear`，不使用 ParallelStyle，**通过（适配）** |
 | `ColwiseLinearNoGather` | vocab-parallel/特定输出 plan | 输出保留 sequence shard，供匹配计划使用，**通过** |
@@ -403,7 +404,7 @@ step 1 恢复 optimizer、scheduler、dataloader 和 train state 后完成并保
 | `parallel/parallel_dims.py`（含 `build_parallel_dims` / `build_mesh`，2026-09-25 自 `accelerator/mesh.py` 并入） | dims、mesh、distributed init | B，散在 parallel dims/trainer |
 | `models/common/activation.py` | activation wrappers | C，同名不同源 |
 | `models/common/aux_loss.py` | aux-loss carrier/registry/hooks | A2，同文件 |
-| `models/common/dist_gemm.py` | TP-overlap projections/FFN | A2，同文件 |
+| `models/common/dist_gemm.py` | TP-overlap projections/FFN | A2，上游 9e159aed7 已改名 `async_linear.py` |
 | `models/common/embedding.py` | vocab-aware embedding | C，同名不同源 |
 | `models/common/feed_forward.py` | FFN helpers/classes | A2，同文件 |
 | `models/common/grouped_experts.py` | `GroupedExperts` | B，common + gpt_oss MoE |
@@ -432,7 +433,7 @@ step 1 恢复 optimizer、scheduler、dataloader 和 train state 后完成并保
 | `parallel/parallelize_hf.py` | 五种并行的总装配 | B，transformers backend parallelize |
 | `parallel/pipeline_parallel/pipeline.py` | FQN split 与 stage 构造 | A2，transformers backend pipeline |
 | `parallel/pipeline_parallel/apply.py` | metadata、apply、schedule build | B，`distributed/pipeline_parallel.py` |
-| `parallel/tensor_parallel/linear.py` | fused/fallback collective GEMM | A2，`models/common/dist_gemm.py`（原 `distributed/linear.py`，上游已删除并搬迁改名） |
+| `parallel/tensor_parallel/linear.py` | fused/fallback collective GEMM | A2，`models/common/async_linear.py`（原 `distributed/linear.py`，上游经 dist_gemm.py 搬迁改名） |
 | `parallel/tensor_parallel/tp.py` + `apply.py` | HF plan realizer 与 `apply_tp` 入口 | B，各模型 TP plan（上游 `distributed/tensor_parallel.py` 已删除，无后继） |
 | `config/`（顶层配置包） | 全部配置 dataclass | B，`config/configs.py` + 嵌套 Config |
 | `trainer/train.py` | parse/main | B，根 `train.py` |
