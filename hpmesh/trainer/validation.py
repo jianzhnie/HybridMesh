@@ -18,7 +18,8 @@ from hpmesh.config import ValidationConfig
 from ..accelerator.dist import all_reduce
 from ..accelerator.spmd_context import spmd_context
 from ..datasets import build_dataloader
-from ..datasets.random_data import Batch, DataLoaderExhausted
+from ..datasets.random_data import DataLoaderExhausted
+from ..datasets.types import Batch
 
 
 def _check_validation_feasibility(

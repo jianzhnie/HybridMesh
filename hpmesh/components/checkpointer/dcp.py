@@ -22,7 +22,7 @@ Two departures from torchtitan, both subtractions:
   ``logger.info`` line from the same callback.
 
 * **No ``torchtitan.tools.filesystem``.** The local equivalent is
-  ``hpmesh.utils.filesystem``, which has the same API for the paths this module
+  ``checkpointer/filesystem``, which has the same API for the paths this module
   uses. The one difference is deliberate: hpmesh's ``rmtree`` mirrors
   ``shutil.rmtree(..., ignore_errors=True)`` for local paths, so a purge of an
   already-deleted directory is a no-op rather than a ``FileNotFoundError`` in
@@ -55,8 +55,8 @@ from torch.distributed.checkpoint.state_dict_saver import (
     AsyncSaveResponse,
 )
 
-from ...utils import filesystem
 from ...utils.gc import GarbageCollection
+from . import filesystem
 
 if TYPE_CHECKING:
     from ...config import CheckpointConfig
@@ -92,7 +92,7 @@ class AsyncMode(str, enum.Enum):
 
 
 class _FilesystemCheckpointStorage:
-    """``CheckpointStorage`` backed by ``hpmesh.utils.filesystem``.
+    """``CheckpointStorage`` backed by ``checkpointer/filesystem``.
 
     Local paths go through ``os``/``shutil`` and remote fsspec URIs through
     fsspec, so DCP keeps reading and writing remote checkpoint folders exactly as

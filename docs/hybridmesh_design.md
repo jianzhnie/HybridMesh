@@ -149,9 +149,22 @@ G1 决定模型层只能依赖 HF 公共约定（`config.architectures`、常见
 +---------------------------------------------------------------+
 ```
 
-主要装配方向是 `trainer -> parallel -> models`，但不是严格的源码单向 DAG：
-`models/common/dist_gemm.py` 复用 `parallel/tensor_parallel/linear.py` 的底层 fused
-原语，parallel 的 EP/CP driver 也会引用 models/common 类型。真正禁止的是底层模块
+主要装配方向是 `trainer -> parallel -> models`，但不是严格的源码单向 DAG。
+批 5 收尾后，明确保留三处"models 依赖下层原语"的例外（语义上合理，不为消依赖
+制造更差的结构）：
+
+1. `models/common/dist_gemm.py` -> `parallel/tensor_parallel/linear.py`：dist_gemm
+   只是 fused collective+GEMM 原语的接线与 fallback，原语属 parallel 层（与
+   `apply_tp` 同源），上移 dist_gemm 会把模型构件塞进装配层，下移 linear 会把
+   TP 引擎依赖拖进 models。
+2. `models/common/embedding.py` -> `components.loss`（`vocab_shard_bounds`）：
+   vocab 并行 embedding 的分片边界是 loss 层共用的纯函数词汇表，反向移动会让
+   loss 依赖模型构件。
+3. `models/hf_wrapper.py` -> `parallel.compile` / `parallel.context_parallel` /
+   `parallel.parallel_dims`：wrapper 的全部职责就是把 HF 模型插进并行层
+   （SEAM 1），CP 分片与 regional-inductor 标注是它契约的一部分。
+
+parallel 的 EP/CP driver 也会引用 models/common 类型。真正禁止的是底层模块
 import trainer 或读取全局 run config；跨 models/parallel 的依赖必须停留在小型数学
 原语或显式 apply seam，不能形成隐式装配。
 
@@ -167,9 +180,9 @@ hpmesh/
   __main__.py / __init__.py     入口: python -m hpmesh
   config/       8 模块          model/parallel/optimizer/checkpoint/data/
                                 training/root.py + __init__(全量再导出)
-  trainer/      6 模块          trainer.py / train.py / validation.py /
-                                pp_steps.py / batch.py（validation、PP microbatch
-                                与 batch 预处理段）
+  trainer/      7 模块          trainer.py / train.py / validation.py /
+                                pp_steps.py / batch.py / seed.py（validation、
+                                PP microbatch、batch 预处理段 + 种子派生）
   models/      22 模块          hf_wrapper.py + hf_factory.py（config 构建/类解析/
                                 meta materialize/FLOPs）+ common/{rope,masks,qkv,
                                 moe/routers/balancing,...}
@@ -183,11 +196,13 @@ hpmesh/
                                 monitoring.py（显存监控/peak FLOPS）
                                 spmd_context.py（SPMD mesh 作用域 + 轴查询, 最底层）
                                 + dist.py/dist_utils.py（vendored mmengine.dist 工具箱）
-  components/  14 模块          loss / checkpointer(DCP) / metrics / profiler /
-                                optimizer(lr_scheduler)
-  datasets/    17 模块          Grain 数据图 + random_data + {text,multimodal}
-  utils/        6 模块          logger_utils / filesystem / gc / batch_invariant
-                                checkpoint_keys.py (checkpoint 键常量)
+  components/  13 模块          loss / checkpointer(DCP; 含 checkpoint_keys
+                                与 filesystem) / metrics / profiler / optimizer
+  datasets/    18 模块          Grain 数据图 + random_data + types.py(Batch)
+                                + {text(含 renderer),multimodal}
+  utils/        3 模块          logger_utils / gc / batch_invariant
+                                （filesystem 与 checkpoint_keys 归
+                                components/checkpointer/；seed 归 trainer/）
 ```
 
 ## 4. 核心契约（三条缝）

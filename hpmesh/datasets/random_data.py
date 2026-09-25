@@ -20,12 +20,12 @@ path rather than two.
 from __future__ import annotations
 
 from collections.abc import Iterable, Iterator
-from dataclasses import dataclass
 from typing import Any
 
 import torch
 
 from .loader import BaseDataLoader
+from .types import Batch
 
 __all__ = [
     "Batch",
@@ -34,14 +34,6 @@ __all__ = [
     "RandomTokenSource",
     "batch_iterator",
 ]
-
-
-@dataclass
-class Batch:
-    """One micro-batch, on CPU: ``input_ids`` and ``labels`` of shape ``(B, T)``."""
-
-    input_ids: torch.Tensor
-    labels: torch.Tensor
 
 
 class DataLoaderExhausted(Exception):

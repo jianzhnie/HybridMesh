@@ -6,8 +6,12 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Literal
 
-from hpmesh.utils import filesystem
-from hpmesh.utils.checkpoint_keys import LR_SCHEDULER, MODEL, OPTIMIZER
+from hpmesh.components.checkpointer import filesystem
+from hpmesh.components.checkpointer.checkpoint_keys import (
+    LR_SCHEDULER,
+    MODEL,
+    OPTIMIZER,
+)
 from hpmesh.utils.logger_utils import get_logger
 
 logger = get_logger(__name__)

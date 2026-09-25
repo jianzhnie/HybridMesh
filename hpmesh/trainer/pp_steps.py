@@ -16,7 +16,7 @@ import torch
 
 from ..accelerator.spmd_context import spmd_context
 from ..datasets.loader import TrainerBatch
-from ..datasets.random_data import Batch
+from ..datasets.types import Batch
 
 
 def _pp_microbatches(self, batch: Batch | TrainerBatch) -> list[dict[str, Any]]:

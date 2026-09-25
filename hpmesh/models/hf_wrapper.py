@@ -42,7 +42,7 @@ from transformers.modeling_utils import AttentionInterface
 
 from ..accelerator import dist_utils
 from ..components.loss import next_token_targets
-from ..datasets.random_data import Batch
+from ..datasets.types import Batch
 from ..parallel.compile import maybe_regional_inductor
 from ..parallel.context_parallel import (
     shard_attention_mask_for_cp,

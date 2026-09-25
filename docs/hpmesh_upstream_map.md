@@ -13,7 +13,7 @@
 **分类不是装饰，是操作指令。** 把 A 类的高保真同步规则套到 B 类文件上会毁掉设计；套到
 C 类上会把项目**故意删掉**的抽象又拽回来。
 
-**比结构用 AST，不要比 diff 行数。** `utils/filesystem.py` 的 diff 有几十行，代码差异
+**比结构用 AST，不要比 diff 行数。** `components/checkpointer/filesystem.py` 的 diff 有几十行，代码差异
 是 **0**——全是改写措辞。做法是剥掉 docstring、`ast.unparse`、再
 `difflib.SequenceMatcher`。下表 `ratio` 列就是这么来的。
 
@@ -26,7 +26,7 @@ C 类上会把项目**故意删掉**的抽象又拽回来。
 | `models/common/scatter_add.py` | `ops/scatter_add.py` |
 | `parallel/pipeline_parallel/pipeline.py` | `experiments/transformers_modeling_backend/pipeline.py` |
 | `datasets/text/text.py` | `hf_datasets/text_datasets.py` |
-| `utils/filesystem.py` | `tools/filesystem.py` |
+| `components/checkpointer/filesystem.py` | `tools/filesystem.py` |
 
 ## 图例
 
@@ -49,13 +49,13 @@ C 类上会把项目**故意删掉**的抽象又拽回来。
 
 ## A1 —— 高保真移植（改动需逐位验证）
 
-只有 `components/checkpointer/utils.py` 和 `utils/filesystem.py` 在该快照中经人工确认
+只有 `components/checkpointer/utils.py` 和 `components/checkpointer/filesystem.py` 在该快照中经人工确认
 属于"去 docstring 后结构等价"；其余行即使 ratio 很高也不是逐字复制。
 
 | hpmesh | torchtitan | ratio |
 | --- | --- | --- |
 | `components/checkpointer/utils.py` | `components/checkpointer/utils.py` | 1.000 |
-| `utils/filesystem.py` | `tools/filesystem.py` | 1.000 |
+| `components/checkpointer/filesystem.py` | `tools/filesystem.py` | 1.000 |
 | `components/optimizer/utils.py` | `components/optimizer/utils.py` | 0.996 |
 | `datasets/multimodal/mm_image.py` | `hf_datasets/multimodal/utils/image.py` | 0.977 |
 | `datasets/multimodal/mm_text_utils.py` | `hf_datasets/multimodal/utils/text.py` | 0.971 |
@@ -137,7 +137,7 @@ C 类上会把项目**故意删掉**的抽象又拽回来。
 | `parallel/context_parallel/input_shard.py` | 0.078 |
 | `utils/logger_utils.py` | 0.070，上游无对应；2026-09-24 起全仓模块 logger 统一经 `get_logger`（handler 挂模块 logger，rank 过滤在发射时判定，修掉了"import 时 rank 未知"的旧缺陷） |
 | `accelerator/monitoring.py` | 与 `tools/utils.py` 0.107，独立实现（含 `get_peak_flops`）；2026-09-24 从 `utils/` 迁入 |
-| `utils/checkpoint_keys.py` | 上游无 |
+| `components/checkpointer/checkpoint_keys.py` | 上游无 |
 | `accelerator/device.py` | 上游无（0.382 是噪音，命中实验目录）；2026-09-24 从 `utils/` 迁入 `accelerator/` |
 | `utils/batch_invariant.py` | 上游无；上游把 batch-invariant 开关放在 `trainer.py`/`config/configs.py` 里，没有独立模块 |
 | `models/common/activation.py` | 与上游同名但不同源；公式由 hpmesh 自持，不能按 A 类覆盖 |
@@ -145,7 +145,7 @@ C 类上会把项目**故意删掉**的抽象又拽回来。
 | `datasets/random_data.py` | 合成语料，上游无 |
 | `datasets/build.py` | 工厂；上游把 `build()` 放在 config 上 |
 | `accelerator/dist.py` + `accelerator/dist_utils.py` | 2026-09-24 加入：vendored 自 OpenMMLab `mmengine.dist`（**不是 torchtitan 来源**），已去 mmengine 化，设备谓词与后端表统一由同包的 `accelerator/device.py` 提供；不进 trainer 装配路径 |
-| `utils/seed.py` | 2026-09-24 加入：上游 `distributed/utils.py::set_determinism` 的 distinct-seed 派生公式的纯函数提取（仅该项，非全文件移植）；DTensor RNG tracker 不移植 |
+| `trainer/seed.py` | 2026-09-24 加入：上游 `distributed/utils.py::set_determinism` 的 distinct-seed 派生公式的纯函数提取（仅该项，非全文件移植）；DTensor RNG tracker 不移植 |
 
 **已清理悬空链**：`parallel/sharding.py` 与 `parallel/spmd_shims.py` 没有运行时消费者，
 已在 2026-09-21 一并删除。`accelerator/spmd_context.py` 是独立活代码，不在删除组内。TP 的
@@ -170,7 +170,7 @@ C 类上会把项目**故意删掉**的抽象又拽回来。
 | `models/common/moe_sharding.py` | **部分移除**（2026-09-25）。其载荷 MoE-under-TP 已在 `parallel/tensor_parallel/tp.py` 落 B 类适配：HF plan 的 `packed_colwise`/`packed_rowwise`/`moe_tp_experts` 规格不再 raise，专家权重沿 F 维原地切分、router Replicate、块边界 AG/RS 对偶 collective；**tp×ep 同日起按上游语义放行**（TP 只切 dense、EP 独占 routed 专家沿 E 切、router Replicate，`apply_tp` 在 ep>1 时把块留给 swap，专家梯度排除由 `_tp_sharded_param_ids` 统一判定；tp×ep×cp 与 shared-expert×tp 保持 loud-raise）。声明层+装配层就位并有 CPU 单测，但真多卡前后向等价性**环境未覆盖**（本机 torch 2.2.2 无分布式执行栈），待 torch≥2.12 多卡复跑后方可视为完整移除。见下"已从 D 移除（部分）" |
 | `components/optimizer/ema.py`（2026-09 新增，515 行） | **已移植**（2026-09-24，`hpmesh/components/optimizer/ema.py`）：在线 EMA 模型平均，config/trainer/checkpointer 三侧接线完成，见下"已从 D 移除" |
 | Ulysses CP × varlen/packed（baff3c681） | **已移植**（2026-09-25，批 5）：`apply_cp` 不再 fail-fast，wrapper 全长透传文档 mask、kernel 按 mask Q 长度分派，见下"已从 D 移除" |
-| 多轮对话 SFT 的 renderer 路径（4a0d8dab3） | **已适配为可选路径**（2026-09-25，§9.1 第 12 项）：不引入硬依赖、不复制 Configurable 外形。`components/renderer.py` 为可选导入适配层（`build_chat_renderer` + `RendererTokenizerWrapper`），`ChatProcessor(renderer=...)` 走多-turn renderer 分支，`--chat_renderer`/`--messages_field` 接线 `local_jsonl_sft`；未装 `renderers` 时启用 loud-raise（ImportError 带安装指引），默认关闭逐位不变。真实库数值**未验证**（本机无 renderers，单测以 fake 模块覆盖接口与 mask 移位语义）；解锁条件：pyproject 加 optional extra `renderers==0.1.11` 后装包复跑 |
+| 多轮对话 SFT 的 renderer 路径（4a0d8dab3） | **已适配为可选路径**（2026-09-25，§9.1 第 12 项）：不引入硬依赖、不复制 Configurable 外形。`datasets/text/renderer.py` 为可选导入适配层（`build_chat_renderer` + `RendererTokenizerWrapper`），`ChatProcessor(renderer=...)` 走多-turn renderer 分支，`--chat_renderer`/`--messages_field` 接线 `local_jsonl_sft`；未装 `renderers` 时启用 loud-raise（ImportError 带安装指引），默认关闭逐位不变。真实库数值**未验证**（本机无 renderers，单测以 fake 模块覆盖接口与 mask 移位语义）；解锁条件：pyproject 加 optional extra `renderers==0.1.11` 后装包复跑 |
 | `models/common/token_dispatcher.py` 的 DeepEP/HybridEP 两个 dispatcher | 登记缺口（2026-09-25，§9.1 第 13 项）：CUDA-only（`deep_ep`/`hybridep` 内核 + GB200/NVLink72 假设）且 dispatch/combine 经上游 `distributed/deepep/` wrappers（1155 行）驱动，可选导入无法忠实表达契约，故不 vendor；`ParallelConfig.ep_token_dispatcher="deepep"/"hybridep"` 配置期 NotImplementedError（含解锁条件），swap 入口防御性同语义。解锁条件：vendor 上游 wrappers + pyproject 加 CUDA-only optional extra + CUDA 目标设备复跑数值。`AllToAllTokenDispatcher` 满足同一 dispatch/combine 契约 |
 | `models/common/token_dispatcher.py` 的 `TorchAOTokenDispatcher` | **已适配为可选导入适配层**（2026-09-25，§9.1 第 13 项）：torchao 不进 pyproject、不复制上游 Config 嵌套。`TorchAOTokenDispatcher(num_experts, top_k, pad_multiple)` 继承 `AllToAllTokenDispatcher`，仅 `_permute`/`_unpermute` 改委托 torchao `permute_and_pad`（expert-major 重排 + 每组 pad 到 `pad_multiple`，EP=1 本地 padded permute 路径一并移植），构造期 lazy import，未装 torchao loud-raise ImportError（带 `pip install torchao` 指引）；`ParallelConfig.ep_token_dispatcher="torchao"` + `ep_torchao_pad_multiple`（默认 16=FP8）接线 `apply_ep` → swap，默认 `alltoall` 逐位不变。数值**环境未覆盖**（本机无 torchao/CUDA，单测以 sys.modules fake 覆盖 sentinel-row padding 契约与 EP=1 combine 等价性）；解锁条件：CUDA 目标设备装 torchao 复跑 |
 | DSA（DeepSeek sparse attention）的稠密 additive mask 路径 | 上游 `model.py` 的 `_build_dense_attention_mask` + indexer 支持；**2026-09-24 起 hpmesh wrapper 构造期对 `index_topk` fail-fast**（静默走 flex BlockMask 的错误语义已消除），稠密 mask 执行路径本身仍未移植，无消费者 |
@@ -314,7 +314,7 @@ DTensor unwrap/rewrap 与 CUDA `torch._foreach_lerp_` 专项未移植（hpmesh �
 变换，落 `models/common/cast_linear.py`（`nn.Linear` 子类，state-dict FQN 不变），
 经 `ModelConfig.compute_dtype` 启用，默认关闭；router `_debug_force_load_balance`
 ——落 `TokenChoiceTopKRouter` 同名构造参数，round-robin 语义与上游逐字一致；
-PP per-stage seed——`utils/seed.py` 的 `derive_distinct_seed`（上游
+PP per-stage seed——`trainer/seed.py` 的 `derive_distinct_seed`（上游
 `distinct_seed_mesh_dims=["pp"]` 同公式），trainer 在 `pp_enabled` 时按 stage rank
 偏移，pp=1 逐位不变；DTensor RNG tracker 不移植（初始化走 materialize 路径）。
 

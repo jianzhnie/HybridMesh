@@ -53,8 +53,8 @@ from typing import TYPE_CHECKING, Any
 
 import torch
 
-from ...utils import filesystem
 from ...utils.gc import GarbageCollection
+from . import filesystem
 
 if TYPE_CHECKING:
     from ...config import CheckpointConfig

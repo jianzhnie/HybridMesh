@@ -319,7 +319,7 @@ def make_local_jsonl_sft_multiturn(
     Each row's ``messages_field`` holds the conversation as a list of
     ``{"role": ..., "content": ...}`` messages ending with an assistant
     turn. ``renderer`` is a built ``renderers`` renderer (see
-    ``components/renderer.build_chat_renderer``); it owns tokenization and
+    ``datasets/text/renderer.build_chat_renderer``); it owns tokenization and
     the per-turn loss mask.
     """
 
