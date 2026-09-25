@@ -59,6 +59,7 @@ from .linear import (
     all_gather_along,
     all_gather_linear,
     linear_reduce_scatter,
+    reduce_scatter_along,
 )
 
 ShardKind = Literal["colwise", "rowwise"]
@@ -244,6 +245,109 @@ def _looks_like_attention(module: nn.Module) -> bool:
     return all(hasattr(module, name) for name in ("q_proj", "k_proj", "v_proj"))
 
 
+# -- MoE under TP ---------------------------------------------------------------
+
+# The HF tp_plan spec strings that declare MoE-under-TP (transformers 5.x
+# spelling, e.g. Qwen3Moe's ``base_model_tp_plan``). They name no nn.Linear --
+# the expert weights are stacked parameters on the experts module -- so they
+# resolve to None in the plan and are realized structurally by ``_apply_moe_tp``
+# below, which is what keeps the refusal-to-replicate validation honest.
+_MOE_PLAN_SPECS = frozenset({"packed_colwise", "packed_rowwise", "moe_tp_experts"})
+
+
+class _TPMoeSequenceBoundary:
+    """Mixin that brackets a HF MoE block with the TP sequence collectives.
+
+    The MoE block under TP is the dense colwise/rowwise pair with the feature
+    shard kept internal: the input arrives as this rank's ``(B, T / tp, D)``
+    sequence shard and is all-gathered (backward: reduce-scatter of the input
+    gradient); the block then runs on the full token stream with its expert
+    weights sharded on the F dim (``_shard_experts_for_tp``), producing an
+    output that is partial over the TP group; the boundary reduce-scatter sums
+    the partials and returns a ``(B, T / tp, D)`` sequence shard (backward:
+    all-gather of the output gradient). Weight layout and collectives are the
+    same dual pair the dense TP realizers use.
+
+    The router is deliberately untouched: its weight stays replicated, every
+    rank computes the identical routing on the gathered stream, and the
+    trainer's ``_allreduce_replicated_tp_grads`` sums its gradient (each rank's
+    copy earns a different partial through the sharded expert outputs).
+
+    Installed by ``__class__`` swap (like ``_GatherSequenceFirst``), so module
+    paths, ``state_dict`` keys and later attach points are all untouched.
+    """
+
+    def forward(self, hidden_states: torch.Tensor, *args, **kwargs):
+        gathered = all_gather_along(hidden_states, -2, self._tp_seq_group)
+        out = super().forward(gathered, *args, **kwargs)
+        if not isinstance(out, torch.Tensor):
+            raise NotImplementedError(
+                f"TP over {type(self).__name__}: the MoE block returned "
+                f"{type(out).__name__}, not a bare hidden-states tensor. The "
+                "boundary reduce-scatter has no defined place to run; refusing "
+                "rather than dropping part of the output."
+            )
+        return reduce_scatter_along(out, -2, self._tp_seq_group)
+
+
+def _shard_experts_for_tp(
+    block: nn.Module, *, tp_size: int, tp_rank: int
+) -> frozenset[int]:
+    """Shard a HF MoE block's fused expert weights on the F dim, in place.
+
+    Cuts ``experts.gate_up_proj (E, 2F, D)`` and ``experts.down_proj (E, D, F)``
+    where the dense TP realizers cut their projections, so the partial sums the
+    boundary reduce-scatter completes are exactly the rowwise half of the dense
+    contract:
+
+    * ``down_proj`` on dim 2 (its input features F) -- the rowwise direction.
+    * ``gate_up_proj`` on dim 1, gate half and up half SEPARATELY: the block's
+      forward splits the packed dim by ``chunk(2)``, and a plain contiguous cut
+      of ``2F`` would slice across the gate/up boundary (HF's own
+      ``packed_colwise`` style does the same per-half split).
+
+    The parameter objects are replaced with the same attribute names, so
+    ``state_dict`` FQNs do not change -- the shapes shrink, the same convention
+    the dense TP realizers already follow. The router weight is not touched
+    (Replicate). Returns the ids of the sharded parameters so the trainer's
+    replicated-gradient all-reduce can exclude them: each rank's F-shard
+    gradient is already complete, and summing it with a *different* shard's
+    gradient would corrupt it.
+    """
+    experts = block.experts
+    gate_up = experts.gate_up_proj
+    down = experts.down_proj
+    num_experts, double_hidden, dim = gate_up.shape
+    if down.shape[0] != num_experts or down.shape[1] != dim:
+        raise ValueError(
+            f"unrecognized expert weight shapes for TP sharding: "
+            f"gate_up_proj {tuple(gate_up.shape)}, down_proj {tuple(down.shape)}"
+        )
+    hidden = down.shape[2]
+    if double_hidden != 2 * hidden:
+        raise ValueError(
+            f"gate_up_proj {tuple(gate_up.shape)} is not (E, 2F, D) against "
+            f"down_proj's F={hidden}; the gate/up halves cannot be located."
+        )
+    if hidden % tp_size != 0:
+        raise ValueError(
+            f"expert hidden dim F={hidden} is not divisible by tp_size={tp_size}; "
+            "each TP rank must hold the same F-shard of every expert."
+        )
+
+    def _shard(w: torch.Tensor, dim_: int) -> torch.Tensor:
+        return torch.chunk(w.detach(), tp_size, dim=dim_)[tp_rank].contiguous()
+
+    gate_shard = _shard(gate_up[:, :hidden], 1)
+    up_shard = _shard(gate_up[:, hidden:], 1)
+    with torch.no_grad():
+        experts.gate_up_proj = nn.Parameter(
+            torch.cat([gate_shard, up_shard], dim=1).contiguous()
+        )
+        experts.down_proj = nn.Parameter(_shard(down, 2))
+    return frozenset({id(experts.gate_up_proj), id(experts.down_proj)})
+
+
 @dataclass(frozen=True)
 class ShardingConfig:
     """How one projection is sharded on the TP axis.
@@ -291,18 +395,20 @@ def _resolve_plan(model: nn.Module, plan) -> dict[str, ShardingConfig | None]:
     decoration: Qwen3's plan marks ``q_norm`` / ``k_norm`` with it, and without
     this branch every Qwen3 TP run dies here before touching a weight.
 
-    HF's MoE specs (``packed_colwise``, ``moe_tp_experts``) still raise. hpmesh
-    does not shard MoE experts over the TP axis -- it has no fused-expert
-    realizer -- so honouring them silently would be worse than refusing.
-
-    That refusal is also why hpmesh has no counterpart to upstream's
-    ``models/common/moe_sharding.py``: those declarations describe exactly this
-    combination -- routed experts as dense params on the TP axis (``Shard(1)``
-    colwise / ``Shard(2)`` rowwise) with the router held Replicate -- and there
-    is nothing here for them to drive. MoE parallelism in hpmesh is EP-only
-    (``parallel/expert_parallel/``), where the experts are sliced per rank at
-    swap time and FSDP shards them afterwards. See
+    HF's MoE specs (``packed_colwise``, ``packed_rowwise``,
+    ``moe_tp_experts``) resolve to None here: they declare MoE-under-TP --
+    routed expert weights sharded on the expert hidden dim F (``gate_up_proj``
+    on its packed output dim, ``down_proj`` on its input dim), the router held
+    Replicate -- and they name stacked parameters on the experts module, not
+    nn.Linear modules, so there is nothing for the per-Linear engine to swap.
+    They are realized structurally by ``_apply_moe_tp`` (weight sharding in
+    ``_shard_experts_for_tp``, activation collectives in
+    ``_TPMoeSequenceBoundary``), which ``apply_tp`` invokes when the raw plan
+    carries any of these specs. This is hpmesh's counterpart to upstream's
+    ``models/common/moe_sharding.py`` declarations; see
     docs/hpmesh_upstream_map.md (D: ``models/common/moe_sharding.py``).
+    EP-plan strings (``grouped_gemm``, ``ep_router``) are not TP declarations
+    and still raise.
 
     When ``plan`` is omitted the model's own declaration is used, preferring the
     ``tp_plan`` property over the raw ``_tp_plan`` attribute: a wrapper that
@@ -327,6 +433,14 @@ def _resolve_plan(model: nn.Module, plan) -> dict[str, ShardingConfig | None]:
             # gradients -- so this entry only has to be understood, not acted
             # on. Recorded as None rather than dropped so _match still stops
             # here instead of falling through to a broader later pattern.
+            resolved[pattern] = None
+        elif spec in _MOE_PLAN_SPECS:
+            # MoE-under-TP, realized structurally in apply_tp (weight sharding
+            # in _shard_experts_for_tp, activation collectives in
+            # _TPMoeSequenceBoundary). None for
+            # the same first-match-wins reason as above, and so a pattern that
+            # happens to match an nn.Linear is left whole rather than wrongly
+            # swapped for a dense realizer.
             resolved[pattern] = None
         else:
             raise ValueError(f"Unsupported TP plan entry for {pattern!r}: {spec!r}")
@@ -420,7 +534,41 @@ def apply_tp(
             spec = _match(sharding_plan, module_path)
             if spec is not None:
                 targets.append((module_path, module, spec))
-    if not targets:
+
+    # MoE-under-TP is declared by spec strings that name no nn.Linear (the
+    # expert weights are stacked parameters), so it has to be detected on the
+    # RAW plan, before _resolve_plan maps those specs to None.
+    raw_plan = plan
+    if raw_plan is None:
+        raw_plan = (
+            getattr(model, "tp_plan", None) or getattr(model, "_tp_plan", None) or {}
+        )
+    plan_declares_moe = any(
+        isinstance(spec, str) and spec in _MOE_PLAN_SPECS for spec in raw_plan.values()
+    )
+    moe_blocks: list[tuple[str, nn.Module]] = []
+    already_bracketed = False
+    if plan_declares_moe:
+        from ..expert_parallel.swap import _is_hf_moe_block
+
+        for module_path, module in model.named_modules():
+            if getattr(module, "_tp_moe_boundary", False):
+                # Already bracketed by an earlier apply_tp pass (the engine is
+                # idempotent per module): still counts as realized MoE TP.
+                already_bracketed = True
+                continue
+            # Blocks the probe refuses (GPT-OSS's transposed, bias-bearing
+            # experts) raise out of it here, before any weight is touched.
+            if _is_hf_moe_block(module):
+                moe_blocks.append((module_path, module))
+        if not moe_blocks and not already_bracketed:
+            raise ValueError(
+                f"apply_tp with tp={cfg.tp}: the plan declares MoE TP specs "
+                "but no HF MoE block was found on "
+                f"{type(model).__name__}. Refusing to run TP with the experts "
+                "silently replicated."
+            )
+    if not targets and not moe_blocks and not already_bracketed:
         raise ValueError(
             f"apply_tp with tp={cfg.tp}: the plan patterns "
             f"{sorted(sharding_plan)} matched no nn.Linear on "
@@ -436,6 +584,32 @@ def apply_tp(
     use_symm_mem = _supports_symm_mem(mesh["tp"])
     if use_symm_mem:
         _enable_symm_mem(group)
+
+    for module_path, block in moe_blocks:
+        if getattr(block, "shared_expert", None) is not None or (
+            getattr(block, "shared_experts", None) is not None
+        ):
+            raise NotImplementedError(
+                f"TP over {module_path} ({type(block).__name__}): the block "
+                "has a shared expert, which the plan shards with the dense "
+                "colwise/rowwise realizers. Composing those with the MoE "
+                "sequence-boundary collectives is unverified; use tp=1, or "
+                "ep > 1 (the EP swap handles shared experts)."
+            )
+        # The sharded expert parameters are excluded from the trainer's
+        # replicated-gradient all-reduce through this id set: each rank's
+        # F-shard gradient is complete, and summing it with a different
+        # shard's gradient would corrupt it.
+        block._tp_sharded_param_ids = _shard_experts_for_tp(
+            block, tp_size=tp_size, tp_rank=tp_rank
+        )
+        block._tp_seq_group = group
+        block._tp_moe_boundary = True
+        block.__class__ = type(
+            f"TPMoe{type(block).__name__}",
+            (_TPMoeSequenceBoundary, type(block)),
+            {},
+        )
 
     # Deepest paths first, so replacing a module never hides an inner target.
     attention_parents: dict[str, nn.Module] = {}

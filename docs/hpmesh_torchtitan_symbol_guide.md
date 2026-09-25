@@ -261,8 +261,18 @@ step 1 恢复 optimizer、scheduler、dataloader 和 train state 后完成并保
   token-choice MoE block 时设置，dense 不动）四件各自独立开关，默认全关即旧整体
   compile 逐位不变。未移植登记：`skip_fwd_side_effects_in_bwd_under_checkpoint`、
   FakeTensorMode monkeypatch、`components` 列表。见 §5 符号行与 upstream map。
-- `models/common/moe_sharding.py`：缺少的是 **TP×MoE 整个组合能力**，不是一个文件。
-  `apply_tp` 会拒绝 `moe_tp_experts`，这是正确的 fail-fast。
+- `models/common/moe_sharding.py`：**部分移除**（2026-09-25）。TP×MoE 组合能力的
+  声明层与装配层已就位（B 类适配，见 upstream map"已从 D 移除（部分）"）：
+  `apply_tp` 接受 `moe_tp_experts` 等规格并结构性地实现 MoE-under-TP——专家权重
+  F 维原地切分、router Replicate、块边界 AG/RS;tp×ep 组合 config 级 fail-fast。
+  真多卡前后向等价性环境未覆盖，待 torch≥2.12 复跑。符号对应：上游
+  `expert_param_placement_sparse`（EP 轴 S(0) 声明）→ hpmesh EP swap 的 per-rank
+  experts 切片（`parallel/expert_parallel/swap.py::_convert_block`)；上游
+  `dense_param_placement(tp=R)` 的 router Replicate 声明 → hpmesh MoE-under-TP
+  下 router 不切 + `_allreduce_replicated_tp_grads` 求和；上游
+  `_moe_sharding_config` 的块边界 in/out 声明 →
+  `tensor_parallel/tp.py::_TPMoeSequenceBoundary`;HF 侧
+  `packed_colwise`/`moe_tp_experts` 规格 → `_shard_experts_for_tp`。
 - RegionAC：依赖 `torch_remat` 包与上游 `Module.configure_remat_regions` 协议，hpmesh
   两者皆无，不引入该依赖；配置 `activation_checkpoint_mode='region'` 在 config 校验与
   `apply_ac` 两处均显式 `NotImplementedError` 并写明解锁条件。MemoryBudgetAC 已于
