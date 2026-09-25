@@ -111,6 +111,20 @@ def all_gather_along(
     return all_gather(x.contiguous(), dim, group)
 
 
+def reduce_scatter_along(
+    x: torch.Tensor, dim: int, group: dist.ProcessGroup
+) -> torch.Tensor:
+    """Autograd-covered reduce-scatter along ``dim``; backward is the all-gather dual.
+
+    The exact mirror of ``all_gather_along``: sums the per-rank partials and
+    hands each rank its slice of ``dim``. Used for the MoE-block boundary under
+    TP (see ``tp.py``), where the block's output is partial over the TP group
+    and must return to a sequence shard.
+    """
+    _, reduce_scatter = _functional_collectives()
+    return reduce_scatter(x.contiguous(), "sum", dim, group)
+
+
 class AllGatherLinear(torch.autograd.Function):
     """All-gather the sequence shard, then apply a column-parallel linear.
 

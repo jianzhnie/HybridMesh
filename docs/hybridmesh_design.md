@@ -292,8 +292,24 @@ PP 外轴，并派生 dataloading、dense storage、dense fwd/bwd、sparse EP、
 reduce-scatter），均为 sequence-parallel 形态。plan 为 None 时读 `model.tp_plan`（即
 HF `_tp_plan` 的重写版），按路径深度倒序替换 `nn.Linear`；遇 bias 直接 raise。可选
 注册对称内存（`enable_fsdp_symm_mem`）。`colwise_gather_output` 当前保守地保持
-lm_head 复制，因为 hpmesh 尚无 vocab-sharded head + gather-output realizer；
-MoE-under-TP 同样明确拒绝。不要把这些 loud-raise/复制退化写成已支持能力。
+lm_head 复制，因为 hpmesh 尚无 vocab-sharded head + gather-output realizer。
+
+**MoE-under-TP 已支持（2026-09-25，部分，声明层+装配层就位）**。HF tp_plan 的
+MoE 规格（`packed_colwise` / `packed_rowwise` / `moe_tp_experts`）不再 raise：
+解析为 None 并由结构路径实现——`_shard_experts_for_tp` 把 fused 专家权重沿专家
+hidden 维 F 原地切分（`down_proj (E,D,F)` 切 dim 2；`gate_up_proj (E,2F,D)` 的
+gate/up 两半各自切 dim 1，同 HF `packed_colwise` 的 per-half 语义），router 保持
+Replicate；`_TPMoeSequenceBoundary` 以 `__class__` swap 在块边界加 sequence
+all-gather / reduce-scatter 对偶 collective（与 dense TP 同一契约：块内是全 token
+流、F 分片，边界回到 T/tp 序列分片）。router 梯度跨 TP 求和复用
+`_allreduce_replicated_tp_grads`（被切专家参数经 `_tp_sharded_param_ids` 排除，
+其 F-shard 梯度天然完备）。state_dict FQN 不变（原地换 Parameter，形状变小，同
+dense TP 约定）；tp=1 逐位不变。组合矩阵：tp>1×ep>1 在 config 校验 loud-raise
+（二维专家切分未实现）；plan 声明 MoE 规格但找不到 HF MoE 块 loud-raise（防静默
+复制）；shared-expert 块 loud-raise（dense realizer 与边界 collective 未组合验
+证）；GPT-OSS 等布局沿用 swap 探针的 NotImplementedError。边界 collective 的真多
+卡前后向等价性**环境未覆盖**（本机 torch 2.2.2 无分布式执行栈），待 torch≥2.12
+多卡复跑。不要把未覆盖项写成已验证能力。
 
 ### 5.4 CP / EP（context_parallel/ + expert_parallel/）
 

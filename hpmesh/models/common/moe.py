@@ -1127,13 +1127,13 @@ class MicrobatchWiseLoadBalanceLoss(AuxLoss):
         """
         # DP is deliberately not reduced: each DP rank owns an independent
         # token stream, so only the axes that shard one stream are summed over.
-        # ``tp`` belongs under EP for the same reason as upstream: hpmesh's TP
-        # is the sequence-parallel formulation (``tensor_parallel/tp.py``
-        # reduce-scatters the residual stream back to a sequence shard), so a
-        # TP'd MoE would see a tp-partial token stream. Today the combination
-        # is unreachable -- ``apply_tp`` refuses every supported MoE family's
-        # HF tp_plan (unsupported spec strings) -- so the tp term is dormant
-        # rather than wrong: dropping it would under-reduce if TP+EP ever ran.
+        # ``tp`` belongs under EP for the same reason as upstream: EP borrows
+        # ranks from TP, so an EP'd MoE sees a tp-partial token stream. Under
+        # MoE-under-TP (tp>1, ep=1) no reduction is needed: the block-boundary
+        # all-gather means the router already sees the full token stream, and
+        # the aux loss only exists on the hpmesh MoE stack, which the TP path
+        # does not install. The tp term stays dormant rather than wrong:
+        # dropping it would under-reduce if TP+EP ever ran.
         axes = ("cp", "tp") if spmd_sparse_mesh() is not None else ("cp",)
 
         # Eq. 18: per-expert routing counts, then f_i = E * counts_i /

@@ -1018,6 +1018,18 @@ class Trainer:
             for module in part.modules()
             if isinstance(module, ColwiseLinear | RowwiseLinear | ColwiseLinearNoGather)
         }
+        # TP-sharded MoE expert weights are not one of the three classes above
+        # (they are stacked parameters on the HF experts module, sharded in
+        # place by apply_tp), so apply_tp records their ids on the block. Each
+        # rank's F-shard gradient is already complete; all-reducing it with a
+        # different shard's gradient would corrupt it. The block's router
+        # weight is NOT in the set: replicated, it is summed like any other
+        # replicated parameter.
+        for part in self.model_parts:
+            for module in part.modules():
+                extra = getattr(module, "_tp_sharded_param_ids", None)
+                if extra:
+                    sharded_ids.update(extra)
         group = tp_mesh.get_group()
         for part in self.model_parts:
             for param in part.parameters():

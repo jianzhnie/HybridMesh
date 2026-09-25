@@ -167,12 +167,31 @@ C 类上会把项目**故意删掉**的抽象又拽回来。
 | 上游 | 影响 |
 | --- | --- |
 | `distributed/compile.py` | **已移植**（2026-09-24，批 8）：逐 block compile、async TP `_micro_pipeline_tp`、`regional_inductor`、`capture_scalar_outputs` 四件全部落 `hpmesh/parallel/compile.py` + `CompileConfig`，见下"已从 D 移除" |
-| `models/common/moe_sharding.py` | **比"缺一个文件"更深**。旧的未接线 `parallel/sharding.py` 形式已删除；hpmesh 没有 MoE 的 TP 声明或读取声明的运行引擎。它真正的载荷是 **MoE-under-TP**（routed 专家在 TP 轴分片、router 保持 Replicate），而 hpmesh 的 TP 对 `moe_tp_experts` 明确 raise。所以这是 **TP×MoE 组合维度整体没有**，不是漏文件 |
+| `models/common/moe_sharding.py` | **部分移除**（2026-09-25）。其载荷 MoE-under-TP 已在 `parallel/tensor_parallel/tp.py` 落 B 类适配：HF plan 的 `packed_colwise`/`packed_rowwise`/`moe_tp_experts` 规格不再 raise，专家权重沿 F 维原地切分、router Replicate、块边界 AG/RS 对偶 collective；tp×ep 组合 config 级 fail-fast。声明层+装配层就位并有 CPU 单测，但真多卡前后向等价性**环境未覆盖**（本机 torch 2.2.2 无分布式执行栈），待 torch≥2.12 多卡复跑后方可视为完整移除。见下"已从 D 移除（部分）" |
 | `components/optimizer/ema.py`（2026-09 新增，515 行） | **已移植**（2026-09-24，`hpmesh/components/optimizer/ema.py`）：在线 EMA 模型平均，config/trainer/checkpointer 三侧接线完成，见下"已从 D 移除" |
 | Ulysses CP × varlen/packed（baff3c681） | **已移植**（2026-09-25，批 5）：`apply_cp` 不再 fail-fast，wrapper 全长透传文档 mask、kernel 按 mask Q 长度分派，见下"已从 D 移除" |
 | 多轮对话 SFT 的 renderer 路径（4a0d8dab3） | 依赖 `renderers==0.1.11` 与上游 `components/renderer.py`（Configurable 系） |
 | `models/common/token_dispatcher.py` 的 TorchAO/DeepEP/HybridEP 三个 dispatcher | 环境依赖型不移植：torchao 非依赖、DeepEP/HybridEP 为 CUDA-only，本机无法验证；`AllToAllTokenDispatcher` 满足同一 dispatch/combine 契约，理由见文件 docstring |
 | DSA（DeepSeek sparse attention）的稠密 additive mask 路径 | 上游 `model.py` 的 `_build_dense_attention_mask` + indexer 支持；**2026-09-24 起 hpmesh wrapper 构造期对 `index_topk` fail-fast**（静默走 flex BlockMask 的错误语义已消除），稠密 mask 执行路径本身仍未移植，无消费者 |
+
+**已从 D 移除（部分）**（2026-09-25）：`models/common/moe_sharding.py`——上游该文件是
+声明层：`ShardingConfig` 声明 router 参数 TP Replicate、routed 专家权重仅在 EP 开时
+沿专家维 E 取 placement（DP_REPLICATE/EFSDP 为 R,EP 为 S(0)），由上游 Module 协议
+的 parallelize 引擎消费。hpmesh 按 B 类语义适配，不复制其 Config 协议：MoE-under-TP
+的声明改由 HF tp_plan 的 `packed_colwise`/`packed_rowwise`/`moe_tp_experts` 规格承载
+（`_resolve_plan` 解析为 None），执行落在 `parallel/tensor_parallel/tp.py` 的结构路
+径——`_shard_experts_for_tp`（`down_proj (E,D,F)` 切 dim 2，`gate_up_proj (E,2F,D)`
+gate/up 两半各自切 dim 1,router 不动）+ `_TPMoeSequenceBoundary`（`__class__` swap
+安装块边界 sequence all-gather / reduce-scatter，与 dense TP 同一对偶契约，序列维
+-2)。梯度语义：边界 collective 的注册反向互为对偶；router 权重 Replicate，梯度由
+`_allreduce_replicated_tp_grads` 求和；被切专家参数经块上 `_tp_sharded_param_ids`
+从该归约排除。state_dict FQN 不变、tp=1 逐位不变。组合矩阵：tp>1×ep>1 在
+`ParallelConfig.__post_init__` fail-fast；plan 声明 MoE 规格但探针找不到块
+loud-raise;shared-expert 块与 GPT-OSS 布局 loud-raise。测试
+`tests/unit_tests/cpu/distributed/test_tp_moe.py`：规格解析、分片重建、单进程
+partial-sum 等价（reduce-scatter 求和的算术内容，无进程组）、FQN 稳定、幂等、组合
+矩阵各拒绝格。**未覆盖**：真多卡 forward/backward 等价（本机 torch 2.2.2 无
+DTensor/spmd 执行栈，gloo 下功能 collective 未验证）——待 torch≥2.12 多卡复跑。
 
 **已从 D 移除**（2026-09-25 批 5 移植）：Ulysses CP × varlen/packed（上游
 baff3c681）——上游形态是把 Ulysses 的 token↔head resharding 提为
