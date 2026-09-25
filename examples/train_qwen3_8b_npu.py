@@ -25,7 +25,7 @@ from hpmesh.trainer import (
     ParallelConfig,
     TrainingConfig,
 )
-from hpmesh.trainer.config import CheckpointConfig, DataloaderConfig, MetricsConfig
+from hpmesh.config import CheckpointConfig, DataloaderConfig, MetricsConfig
 from hpmesh.trainer.trainer import Trainer
 
 MODEL_PATH = "/home/jianzhnie/llmtuner/hfhub/models/Qwen/Qwen3-8B"

@@ -118,7 +118,7 @@ C 类上会把项目**故意删掉**的抽象又拽回来。
 | `parallel/fully_shard/apply.py` | 各 `models/*/parallelize.py` 的 FSDP driver；HF 五部件适配 | 0.155 |
 | `parallel/pipeline_parallel/apply.py` | `distributed/pipeline_parallel.py`；hpmesh 直接消费 HF stage 部件 | 0.130 |
 | `trainer/trainer.py` | `trainer.py`，基本重写 | 0.065 |
-| `trainer/config.py` | `config/configs.py` | 0.189 |
+| `config/`（顶层配置包） | `config/configs.py` | 0.189 |
 | `trainer/train.py` | `train.py` | 0.186 |
 | `accelerator/mesh.py` | `distributed/parallel_dims.py` + `trainer.py` 中分散的 mesh 逻辑 | 0.111 |
 | `models/common/grouped_experts.py` | `models/common/grouped_experts.py` + `models/gpt_oss/moe.py` | 0.119 |
@@ -227,7 +227,7 @@ Ulysses 拒绝（per-head sinks 只走 TP 分片）不适用：hpmesh 尚无 GPT
 
 **已从 D 移除**（2026-09-24 批 8 移植）：`distributed/compile.py`——四件互相独立的
 能力全部落 `hpmesh/parallel/compile.py::apply_compile`，由
-`trainer/config.py::CompileConfig`（`training.compile_config`，默认全关）驱动，
+`config/training.py::CompileConfig`（`training.compile_config`，默认全关）驱动，
 装配顺序不变（AC 之后、FSDP 之前；PP 下每 chunk 经 `apply_pp` 同一函数）：
 
 * **逐 block compile**（`per_block=True`）：每个 decoder layer `block.compile(
@@ -277,7 +277,7 @@ stage 0；已被切分占有的 FQN 与重复 FQN loud-raise，缺失模块跳�
 **已从 D 移除**（2026-09-24 批 4 移植）：validation 循环——上游
 `components/validate.py::Validator` 落 `trainer/trainer.py` 的
 `Trainer.validate`/`should_validate`/`_check_validation_feasibility` +
-`trainer/config.py::ValidationConfig`（`training.validation_config`，默认
+`config/training.py::ValidationConfig`（`training.validation_config`，默认
 None 关闭，关闭时训练循环逐位不变；programmatic-only，同 `ema_config`）。
 语义对齐：eval 模式 + `no_grad`、结束恢复 train；loss 按全局有效 token 数
 归一化，token 计数走 dp mesh、loss 和走 dp×cp×tp loss mesh（与训练 loss 同一
@@ -305,7 +305,7 @@ moe_quantile_balancing` 启用；MoE padding-mask 负载均衡——`MoE.set_pad
 动态计划或固定 decay，firing count 由 trainer step 推导（resume 不重置 decay），
 `step_bias` 支持阶段重编号，`start_step`/`update_every_n_steps` 门控，可选
 `buffer_patterns` 浮点 buffer 跟踪（整型 buffer 拒绝）；checkpointer 增加 `ema`
-state 键与 `_find_load_step(max_step=)`，trainer/config 完成三侧接线。上游
+state 键与 `_find_load_step(max_step=)`，hpmesh/config 完成三侧接线。上游
 DTensor unwrap/rewrap 与 CUDA `torch._foreach_lerp_` 专项未移植（hpmesh 的 FSDP2
 张量本身就是 DTensor，容器 state dict 直接交给 DCP）。
 

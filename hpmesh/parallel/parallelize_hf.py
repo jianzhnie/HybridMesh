@@ -37,7 +37,7 @@ from __future__ import annotations
 import torch
 import torch.nn as nn
 
-from hpmesh.trainer.config import (
+from hpmesh.config import (
     CompileConfig,
     MemoryBudgetACConfig,
     ParallelConfig,

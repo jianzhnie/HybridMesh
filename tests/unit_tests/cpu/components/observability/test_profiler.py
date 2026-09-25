@@ -26,7 +26,7 @@ from hpmesh.components.profiler import (
     Profiler,
     _caused_by_oom,
 )
-from hpmesh.trainer.config import ProfilerConfig as Config
+from hpmesh.config import ProfilerConfig as Config
 
 # -- config -------------------------------------------------------------------
 

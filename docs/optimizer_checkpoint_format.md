@@ -52,7 +52,7 @@ dataloader cursor 均未变化，模型权重的导出和重载与之前完全�
 ## 这次改动暴露的一个 bug
 
 复查 CP 路径时发现一个独立缺陷：**`attn_mask_type` 没有配置通路。**
-`trainer/config.py` 里没有任何地方设置它，只有两个等价性测试手工赋值。它在 mask 处
+`hpmesh/config/` 里没有任何地方设置它，只有两个等价性测试手工赋值。它在 mask 处
 （`hf_wrapper.py`、`context_parallel/apply.py`）回退到 `"causal"`。
 
 这很要紧，因为每个非 random 语料都是 packed 的：`datasets/build.py` 总是把样本送进

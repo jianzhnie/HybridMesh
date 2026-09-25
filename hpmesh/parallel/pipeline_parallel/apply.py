@@ -35,7 +35,7 @@ from torch.distributed.pipelining.schedules import (
     get_schedule_class,
 )
 
-from hpmesh.trainer.config import CompileConfig, ParallelConfig
+from hpmesh.config import CompileConfig, ParallelConfig
 
 from ...components.loss import cross_entropy_loss
 from ...utils.logger_utils import get_logger

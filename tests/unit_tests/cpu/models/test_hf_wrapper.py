@@ -292,7 +292,7 @@ def test_the_mask_type_follows_the_corpus_rather_than_being_configured() -> None
     """
     from dataclasses import replace
 
-    from hpmesh.trainer.config import DataloaderConfig
+    from hpmesh.config import DataloaderConfig
 
     training = TrainingConfig(seed=42)
     synthetic = build_model_config_for(HybridMeshConfig(training=training))

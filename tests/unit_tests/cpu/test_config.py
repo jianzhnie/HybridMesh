@@ -1,6 +1,6 @@
 """Config validation: the rejections, since the acceptances are the default runs.
 
-Every ``__post_init__`` in ``trainer/config.py`` guards a combination that would
+Every ``__post_init__`` in ``hpmesh/config/`` guards a combination that would
 otherwise fail late -- inside a distributed launch, a checkpoint load, or a mesh
 build -- or, worse, silently train something other than what was asked for. The
 valid defaults are exercised by every other test in this suite (they construct a
@@ -16,7 +16,7 @@ from __future__ import annotations
 import pytest
 
 from hpmesh.components.checkpointer import LR_SCHEDULER, MODEL, OPTIMIZER
-from hpmesh.trainer.config import (
+from hpmesh.config import (
     CheckpointConfig,
     LRSchedulerConfig,
     ParallelConfig,

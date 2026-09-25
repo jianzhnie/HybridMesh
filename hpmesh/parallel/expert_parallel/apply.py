@@ -5,7 +5,7 @@ from __future__ import annotations
 import torch.distributed as dist
 import torch.nn as nn
 
-from hpmesh.trainer.config import ParallelConfig
+from hpmesh.config import ParallelConfig
 
 from ...utils.logger_utils import get_logger
 from .swap import swap_hf_moe_blocks

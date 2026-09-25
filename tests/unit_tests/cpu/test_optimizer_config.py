@@ -18,12 +18,12 @@ import pytest
 import torch
 from transformers import HfArgumentParser
 
-from hpmesh.trainer.config import HybridMeshConfig, OptimizerConfig
+from hpmesh.config import HybridMeshConfig, OptimizerConfig
 
 
 def _parser() -> HfArgumentParser:
     """The production parser group list, so the flags are the real ones."""
-    from hpmesh.trainer.config import (
+    from hpmesh.config import (
         CheckpointConfig,
         DataloaderConfig,
         LRSchedulerConfig,

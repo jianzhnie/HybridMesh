@@ -21,6 +21,12 @@ import pytest
 
 from hpmesh.components.loss import IGNORE_INDEX
 from hpmesh.components.tokenizer import HuggingFaceTokenizer
+from hpmesh.config import (
+    DataloaderConfig,
+    HybridMeshConfig,
+    ModelConfig,
+    TrainingConfig,
+)
 from hpmesh.datasets import (
     DatasetConcat,
     DatasetMix,
@@ -35,12 +41,6 @@ from hpmesh.datasets import (
 )
 from hpmesh.datasets.random_data import RandomTokenDataLoader
 from hpmesh.datasets.text.text import ChatProcessor
-from hpmesh.trainer.config import (
-    DataloaderConfig,
-    HybridMeshConfig,
-    ModelConfig,
-    TrainingConfig,
-)
 from tests.data_fixtures import (
     CHAT_TEMPLATE,
     NUM_ROWS,

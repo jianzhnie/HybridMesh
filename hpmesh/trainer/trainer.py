@@ -103,6 +103,8 @@ import torch.nn.functional as F
 from torch.distributed.device_mesh import DeviceMesh
 from torch.distributed.tensor import DTensor
 
+from hpmesh.config import HybridMeshConfig, ValidationConfig
+
 from .. import parallel
 from ..accelerator.collectives import clip_grad_norm_, set_pg_timeouts
 from ..accelerator.device import (
@@ -160,7 +162,6 @@ from ..parallel.tensor_parallel.tp import (
 from ..utils.gc import GarbageCollection
 from ..utils.logger_utils import get_logger
 from ..utils.seed import derive_distinct_seed
-from .config import HybridMeshConfig, ValidationConfig
 
 # Rank-aware: the helper installs a handler on rank 0 only, so a torchrun run
 # logs one line per step instead of one per rank.

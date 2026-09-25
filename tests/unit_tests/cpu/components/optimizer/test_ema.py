@@ -14,7 +14,7 @@ import torch
 import torch.nn as nn
 
 from hpmesh.components.optimizer import EMA, OptimizersContainer
-from hpmesh.trainer.config import EMAConfig, OptimizerConfig
+from hpmesh.config import EMAConfig, OptimizerConfig
 
 
 def _model() -> nn.Module:

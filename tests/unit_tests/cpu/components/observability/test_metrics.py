@@ -24,15 +24,15 @@ from hpmesh.components.metrics import (
     ensure_pp_loss_visible,
     get_metrics_rank,
 )
-from hpmesh.models.hf_wrapper import num_flops_per_token
-from hpmesh.trainer.config import (
+from hpmesh.config import (
     HybridMeshConfig,
     ModelConfig,
     TrainingConfig,
 )
-from hpmesh.trainer.config import (
+from hpmesh.config import (
     MetricsConfig as Config,
 )
+from hpmesh.models.hf_wrapper import num_flops_per_token
 
 
 class _RecordingLogger(BaseLogger):

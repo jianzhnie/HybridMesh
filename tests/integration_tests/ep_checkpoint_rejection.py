@@ -13,13 +13,13 @@ import os
 import torch
 import torch.distributed as dist
 
+from hpmesh.config import CheckpointConfig
 from hpmesh.trainer import (
     HybridMeshConfig,
     ModelConfig,
     ParallelConfig,
     TrainingConfig,
 )
-from hpmesh.trainer.config import CheckpointConfig
 from hpmesh.trainer.trainer import Trainer
 
 

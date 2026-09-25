@@ -26,14 +26,14 @@ from hpmesh.components.renderer import (
     build_chat_renderer,
 )
 from hpmesh.components.tokenizer import HuggingFaceTokenizer
-from hpmesh.datasets.build import build_dataloader
-from hpmesh.datasets.text.text import ChatProcessor
-from hpmesh.trainer.config import (
+from hpmesh.config import (
     DataloaderConfig,
     HybridMeshConfig,
     ModelConfig,
     TrainingConfig,
 )
+from hpmesh.datasets.build import build_dataloader
+from hpmesh.datasets.text.text import ChatProcessor
 from tests.data_fixtures import (
     make_context,
     tokenizer,  # noqa: F401  (fixture re-export)

@@ -25,6 +25,12 @@ from functools import partial
 import numpy as np
 import pytest
 
+from hpmesh.config import (
+    DataloaderConfig,
+    HybridMeshConfig,
+    ModelConfig,
+    TrainingConfig,
+)
 from hpmesh.datasets import (
     IndexedJsonlSource,
     SingleDataset,
@@ -32,12 +38,6 @@ from hpmesh.datasets import (
     build_source,
 )
 from hpmesh.datasets.text.text import DATASETS as TEXT_DATASETS
-from hpmesh.trainer.config import (
-    DataloaderConfig,
-    HybridMeshConfig,
-    ModelConfig,
-    TrainingConfig,
-)
 from tests.data_fixtures import VOCAB, write_tokenizer
 
 IMAGE_TOKEN = "<|image_pad|>"

@@ -27,7 +27,7 @@ to the checkpointer.
 Departures from upstream, all subtractive:
 
 * **No ``Configurable``.** torchtitan configs build themselves. hpmesh keeps
-  every config in ``hpmesh.trainer.config``, so the container takes an
+  every config in ``hpmesh.config``, so the container takes an
   ``OptimizerConfig`` and the trainer constructs it.
 * **No ``DistMuon``.** torchtitan's factory table also offers ``DistMuon``,
   which is built on ``torchtitan.distributed.flex_shard``; hpmesh has no
@@ -66,10 +66,10 @@ from .utils import (
 )
 
 if TYPE_CHECKING:
-    # Type-only. ``trainer.config`` does not import this package at runtime (it
+    # Type-only. ``hpmesh.config`` does not import this package at runtime (it
     # describes the object; the trainer builds it), so there is no cycle to
     # break -- this matches ``lr_scheduler.py``'s import of ``LRSchedulerConfig``.
-    from ...trainer.config import OptimizerConfig, ParamGroupConfig
+    from ...config import OptimizerConfig, ParamGroupConfig
 
 logger = get_logger(__name__)
 

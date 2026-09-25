@@ -14,7 +14,7 @@ from __future__ import annotations
 import pytest
 import torch
 
-from hpmesh.trainer.config import (
+from hpmesh.config import (
     HybridMeshConfig,
     MetricsConfig,
     ModelConfig,

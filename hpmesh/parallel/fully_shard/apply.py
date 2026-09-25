@@ -23,7 +23,7 @@ from __future__ import annotations
 
 import torch
 
-from hpmesh.trainer.config import ParallelConfig
+from hpmesh.config import ParallelConfig
 
 from ...accelerator import dist_utils
 from ..parallel_dims import ParallelDims

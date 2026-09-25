@@ -12,7 +12,7 @@ Four deliberate departures, all subtractions:
 * **The config is not defined here.** torchtitan's ``BaseCheckpointManager``
   carries its own nested config, which is what keeps a manager's defaults next
   to the manager. hpmesh keeps all configuration in one module
-  (``hpmesh.trainer.config``), so the managers take an explicit ``config``
+  (``hpmesh.config``), so the managers take an explicit ``config``
   argument of the type defined there.
 
 * **No tyro.** ``purge_exempt`` was
@@ -73,7 +73,7 @@ from ...utils.logger_utils import get_logger
 logger = get_logger(__name__)
 
 # The state keys are defined in ``utils/checkpoint_keys.py`` so that
-# ``trainer/config.py`` can read them without importing this package; the
+# ``hpmesh/config/`` can read them without importing this package; the
 # import above re-exports them under their long-standing names.
 __all__ = [
     "DATALOADER",
@@ -237,7 +237,7 @@ class BaseCheckpointManager(ABC):
     """Contract every checkpoint manager implements.
 
     The config every manager takes is a ``CheckpointConfig``, defined in
-    ``hpmesh.trainer.config`` alongside every other config in the package.
+    ``hpmesh.config`` alongside every other config in the package.
     Nothing here introspects it -- a manager receives a built instance and reads
     fields off it.
     """

@@ -18,7 +18,7 @@ import pytest
 import torch
 
 from hpmesh.components.loss import IGNORE_INDEX
-from hpmesh.trainer.config import HybridMeshConfig, TrainingConfig, ValidationConfig
+from hpmesh.config import HybridMeshConfig, TrainingConfig, ValidationConfig
 
 
 def _trainer_cls():

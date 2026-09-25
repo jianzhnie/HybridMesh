@@ -33,7 +33,7 @@ Semantics, kept from upstream:
 Departures from upstream, all subtractions:
 
 * **No ``Configurable``.** The knobs are explicit constructor arguments; their
-  validation lives in ``hpmesh.trainer.config.EMAConfig``, where every hpmesh
+  validation lives in ``hpmesh.config.EMAConfig``, where every hpmesh
   config lives, and the trainer passes the fields across.
 * **No ``offload_to_cpu``.** Upstream's offload path is a CUDA side-stream
   H2D/D2H pipeline over pinned memory, tuned for GH200's NVLink-C2C. hpmesh

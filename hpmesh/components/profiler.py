@@ -49,7 +49,7 @@ from typing import TYPE_CHECKING
 import torch
 
 if TYPE_CHECKING:
-    from ..trainer.config import ProfilerConfig
+    from ..config import ProfilerConfig
 
 from ..accelerator.device import device_type
 from ..accelerator.monitoring import read_memory_snapshot, record_memory_history
