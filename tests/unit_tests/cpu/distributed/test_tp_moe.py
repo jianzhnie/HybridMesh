@@ -277,14 +277,69 @@ def test_apply_tp_raises_on_a_shared_expert_block() -> None:
 # -- the combination matrix ---------------------------------------------------
 
 
-def test_tp_and_ep_together_fail_fast_at_the_config() -> None:
-    with pytest.raises(NotImplementedError, match="do not compose"):
-        ParallelConfig(tensor_parallel_size=2, expert_parallel_size=2)
+def test_tp_and_ep_together_are_now_allowed() -> None:
+    # tp x ep, upstream-aligned: TP shards the dense parts, EP owns the
+    # routed experts, the router stays replicated.
+    ParallelConfig(tensor_parallel_size=2, expert_parallel_size=2)
+
+
+def test_tp_ep_cp_together_fail_fast_at_the_config() -> None:
+    with pytest.raises(NotImplementedError, match="tp x ep x cp"):
+        ParallelConfig(
+            tensor_parallel_size=2,
+            expert_parallel_size=2,
+            context_parallel_size=2,
+        )
 
 
 def test_ep_alone_and_tp_alone_are_still_valid_configs() -> None:
     ParallelConfig(expert_parallel_size=2)
     ParallelConfig(tensor_parallel_size=2)
+
+
+def test_apply_tp_defers_the_moe_blocks_to_ep_when_ep_is_on() -> None:
+    """With ep>1, apply_tp must leave HF MoE blocks untouched for the swap."""
+    torch.manual_seed(0)
+    model = _MoeModel()
+    before = {k: v.clone() for k, v in model.state_dict().items()}
+    cfg = ParallelConfig(tensor_parallel_size=2, expert_parallel_size=2)
+    apply_tp(model, mesh=_FakeMesh(2, 0), cfg=cfg)
+
+    block = model.layers[0]["mlp"]
+    # No F-sharding, no boundary mixin, no exclusion marker.
+    assert block.experts.gate_up_proj.shape == (4, 16, 16)
+    assert block.experts.down_proj.shape == (4, 16, 8)
+    assert not hasattr(block, "_tp_sharded_param_ids")
+    assert "_tp_moe_boundary" not in block.__dict__
+    assert not type(block).__name__.startswith("TPMoe")
+    for k, v in model.state_dict().items():
+        assert torch.equal(v, before[k])
+
+
+def test_swap_refuses_a_shared_expert_block_under_tp_x_ep() -> None:
+    from hpmesh.parallel.expert_parallel.swap import swap_hf_moe_blocks
+
+    model = _MoeModel()
+    model.layers[0]["mlp"].shared_expert = nn.Linear(16, 16)
+    with pytest.raises(NotImplementedError, match="shared"):
+        swap_hf_moe_blocks(model, ep_group=None, tp_enabled=True)
+
+
+def test_tp_sharded_param_ids_covers_dense_tp_and_ep_experts_not_router() -> None:
+    from hpmesh.models.common.grouped_experts import GroupedExperts
+    from hpmesh.parallel.tensor_parallel.tp import ColwiseLinear
+    from hpmesh.trainer.trainer import _tp_sharded_param_ids
+
+    grouped = GroupedExperts(dim=8, hidden_dim=4, num_experts=2)
+    router = nn.Linear(8, 2, bias=False)
+    dense_tp = ColwiseLinear(torch.randn(8, 8), tp_size=2, tp_rank=0, group=None)
+    part = nn.ModuleDict({"ge": grouped, "gate": router, "proj": dense_tp})
+
+    ids = _tp_sharded_param_ids([part])
+    assert id(dense_tp.weight) in ids  # dense TP shard
+    for p in grouped.parameters():
+        assert id(p) in ids  # EP expert slice: grad complete per rank
+    assert id(router.weight) not in ids  # replicated: must still be summed
 
 
 def test_tp_one_leaves_a_moe_model_bit_identical() -> None:

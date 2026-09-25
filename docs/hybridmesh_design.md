@@ -304,10 +304,16 @@ all-gather / reduce-scatter 对偶 collective（与 dense TP 同一契约：块�
 流、F 分片，边界回到 T/tp 序列分片）。router 梯度跨 TP 求和复用
 `_allreduce_replicated_tp_grads`（被切专家参数经 `_tp_sharded_param_ids` 排除，
 其 F-shard 梯度天然完备）。state_dict FQN 不变（原地换 Parameter，形状变小，同
-dense TP 约定）；tp=1 逐位不变。组合矩阵：tp>1×ep>1 在 config 校验 loud-raise
-（二维专家切分未实现）；plan 声明 MoE 规格但找不到 HF MoE 块 loud-raise（防静默
-复制）；shared-expert 块 loud-raise（dense realizer 与边界 collective 未组合验
-证）；GPT-OSS 等布局沿用 swap 探针的 NotImplementedError。边界 collective 的真多
+dense TP 约定）；tp=1 逐位不变。组合矩阵（2026-09-25 终态）：**tp>1×ep>1 放行**
+（上游对齐语义：TP 只切 dense，routed 专家由 EP 独占沿专家维切，router
+Replicate——`apply_tp` 在 ep>1 时把 HF MoE 块原样留给 `apply_ep` swap，swap 后
+的块直接消费/产出 T/tp 序列分片，无边界 collective；被切专家参数的梯度排除改
+由 `_tp_sharded_param_ids` 统一判定：dense TP realizer、MoE-under-TP 的 F 分片、
+EP 的 `GroupedExperts` E 切片三类排除，router 等 Replicate 权重仍求和）；
+tp>1×ep>1×cp>1 在 config 校验 loud-raise（未验证）；shared-expert 块 ×
+tp 在两条路径都 loud-raise（ep=1 的边界 collective 未组合验证，tp×ep 的 swap 处
+同样拒绝）；plan 声明 MoE 规格但找不到 HF MoE 块（ep=1）loud-raise（防静默复
+制）；GPT-OSS 等布局沿用 swap 探针的 NotImplementedError。边界 collective 的真多
 卡前后向等价性**环境未覆盖**（本机 torch 2.2.2 无分布式执行栈），待 torch≥2.12
 多卡复跑。不要把未覆盖项写成已验证能力。
 

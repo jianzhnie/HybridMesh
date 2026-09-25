@@ -546,9 +546,15 @@ def apply_tp(
     plan_declares_moe = any(
         isinstance(spec, str) and spec in _MOE_PLAN_SPECS for spec in raw_plan.values()
     )
+    # tp x ep: TP shards only the dense parts and EP owns the routed experts
+    # (the upstream alignment). The HF blocks are left whole here and swapped
+    # for the native MoE stack by apply_ep, which runs next; the swapped block
+    # consumes and produces the T/tp sequence shard directly (all-to-all
+    # dispatch), so no sequence-boundary collectives are installed either.
+    moe_deferred_to_ep = plan_declares_moe and cfg.ep > 1
     moe_blocks: list[tuple[str, nn.Module]] = []
     already_bracketed = False
-    if plan_declares_moe:
+    if plan_declares_moe and not moe_deferred_to_ep:
         from ..expert_parallel.swap import _is_hf_moe_block
 
         for module_path, module in model.named_modules():
@@ -568,7 +574,8 @@ def apply_tp(
                 f"{type(model).__name__}. Refusing to run TP with the experts "
                 "silently replicated."
             )
-    if not targets and not moe_blocks and not already_bracketed:
+    nothing_sharded = not targets and not moe_blocks and not already_bracketed
+    if nothing_sharded and not moe_deferred_to_ep:
         raise ValueError(
             f"apply_tp with tp={cfg.tp}: the plan patterns "
             f"{sorted(sharding_plan)} matched no nn.Linear on "

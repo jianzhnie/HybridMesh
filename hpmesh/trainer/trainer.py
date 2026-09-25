@@ -137,6 +137,7 @@ from ..models.common.aux_loss import (
     collect_aux_loss_metrics,
     register_aux_loss_zero_hook,
 )
+from ..models.common.grouped_experts import GroupedExperts
 from ..models.common.moe import (
     MoE,
     register_moe_load_balancing_hook,
@@ -166,6 +167,45 @@ from .config import HybridMeshConfig, ValidationConfig
 logger = get_logger(__name__)
 
 __all__ = ["Trainer"]
+
+
+def _tp_sharded_param_ids(model_parts: Iterable[torch.nn.Module]) -> set[int]:
+    """Ids of parameters whose gradients must NOT be summed over the TP group.
+
+    Everything not in this set is treated as TP-replicated by
+    ``Trainer._allreduce_replicated_tp_grads`` and summed (each rank's copy
+    earns a token-partial gradient over its T/tp sequence shard). Three kinds
+    of parameters are instead complete on their own rank, and summing them
+    across TP would corrupt them:
+
+    * the dense TP realizers' ``weight`` (``ColwiseLinear`` /
+      ``RowwiseLinear`` / ``ColwiseLinearNoGather``) -- each rank owns a
+      feature shard;
+    * MoE-under-TP expert weights (ep=1): stacked parameters on the HF
+      experts module, F-sharded in place by ``apply_tp``, which records their
+      ids on the block as ``_tp_sharded_param_ids``;
+    * EP expert weights (tp x ep): ``GroupedExperts``'s ``w1/w3/w2``. Each EP
+      rank owns a different slice of the expert COUNT, and its gradient is
+      complete for those experts (the all-to-all dispatch feeds it every
+      token routed to them); summing across TP would mix gradients of
+      different experts. The MoE block's router weight is deliberately NOT
+      excluded: replicated, its token-partial gradient is summed like any
+      other replicated parameter.
+    """
+    sharded_ids = {
+        id(module.weight)
+        for part in model_parts
+        for module in part.modules()
+        if isinstance(module, ColwiseLinear | RowwiseLinear | ColwiseLinearNoGather)
+    }
+    for part in model_parts:
+        for module in part.modules():
+            extra = getattr(module, "_tp_sharded_param_ids", None)
+            if extra:
+                sharded_ids.update(extra)
+            if isinstance(module, GroupedExperts):
+                sharded_ids.update(id(p) for p in module.parameters(recurse=False))
+    return sharded_ids
 
 
 class Trainer:
@@ -998,9 +1038,10 @@ class Trainer:
         tokens. No collective inside the TP modules covers them (the fused
         GEMMs reduce only their own sharded weights' gradients), so without
         this all-reduce the copies train on ``1/tp`` of the tokens and drift
-        apart. The sharded weights are identified by module type: ``apply_tp``
-        realizes every sharded projection as one of the three classes below,
-        and everything else in the model is replicated.
+        apart. The sharded weights are identified by ``_tp_sharded_param_ids``:
+        the dense TP realizer classes, MoE-under-TP's in-place-sharded expert
+        parameters (ep=1), and EP's per-rank expert slices (tp x ep);
+        everything else in the model is replicated.
 
         Sum, not average: each rank's partial gradient covers a disjoint set of
         tokens, and the true gradient is the total. No-op when tp == 1.
@@ -1012,24 +1053,7 @@ class Trainer:
         )
         if tp_mesh is None:
             return
-        sharded_ids = {
-            id(module.weight)
-            for part in self.model_parts
-            for module in part.modules()
-            if isinstance(module, ColwiseLinear | RowwiseLinear | ColwiseLinearNoGather)
-        }
-        # TP-sharded MoE expert weights are not one of the three classes above
-        # (they are stacked parameters on the HF experts module, sharded in
-        # place by apply_tp), so apply_tp records their ids on the block. Each
-        # rank's F-shard gradient is already complete; all-reducing it with a
-        # different shard's gradient would corrupt it. The block's router
-        # weight is NOT in the set: replicated, it is summed like any other
-        # replicated parameter.
-        for part in self.model_parts:
-            for module in part.modules():
-                extra = getattr(module, "_tp_sharded_param_ids", None)
-                if extra:
-                    sharded_ids.update(extra)
+        sharded_ids = _tp_sharded_param_ids(self.model_parts)
         group = tp_mesh.get_group()
         for part in self.model_parts:
             for param in part.parameters():
