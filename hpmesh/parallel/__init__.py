@@ -20,16 +20,30 @@ the stage split and ``apply.py`` builds the schedule over this rank's stages.
 
 from __future__ import annotations
 
-from .context_parallel import apply_cp
-from .expert_parallel import apply_ep
-from .fully_shard.apply import apply_fsdp
-from .parallelize_hf import parallelize_hf_transformers
-from .tensor_parallel import apply_tp
+# Lazy (PEP 562): ``matrix`` is read by ``hpmesh/config``, which must stay
+# importable without the engine layer (context_parallel pulls in the model
+# stack and its spmd surface). Eager re-exports would make any submodule
+# import -- matrix included -- pay for the whole engine.
+_EXPORT_SOURCES = {
+    "apply_cp": "context_parallel",
+    "apply_ep": "expert_parallel",
+    "apply_fsdp": "fully_shard.apply",
+    "apply_tp": "tensor_parallel",
+    "parallelize_hf_transformers": "parallelize_hf",
+}
 
-__all__ = [
-    "apply_cp",
-    "apply_ep",
-    "apply_fsdp",
-    "apply_tp",
-    "parallelize_hf_transformers",
-]
+__all__ = sorted(_EXPORT_SOURCES)
+
+
+def __getattr__(name: str):
+    """Resolve an ``apply_*`` entry point on first touch (PEP 562)."""
+    source = _EXPORT_SOURCES.get(name)
+    if source is None:
+        raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+    import importlib
+
+    return getattr(importlib.import_module(f".{source}", __name__), name)
+
+
+def __dir__() -> list[str]:
+    return sorted(__all__)

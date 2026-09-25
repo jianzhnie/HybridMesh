@@ -7,11 +7,8 @@ from typing import Literal
 
 import torch
 
-from hpmesh.errors import (
-    ConfigError,
-    EnvironmentUnsupportedError,
-    UnsupportedCombinationError,
-)
+from hpmesh.errors import ConfigError
+from hpmesh.parallel import matrix
 
 
 @dataclass(kw_only=True, slots=True)
@@ -330,39 +327,8 @@ class ParallelConfig:
         ):
             if getattr(self, name) < 1:
                 raise ConfigError(f"{name} must be >= 1, got {getattr(self, name)}")
-        if not self.enable_sequence_parallel:
-            # The flag used to be read by no line of the package, so ``False``
-            # was accepted and silently behaved as ``True``. It cannot simply be
-            # honoured instead: hpmesh has one TP realization, and it *is* the
-            # sequence-parallel one (see the field's docstring). Refuse the
-            # configuration rather than train something other than what was
-            # asked for.
-            raise UnsupportedCombinationError(
-                "parallelism.enable_sequence_parallel=false is not supported: "
-                "hpmesh's tensor parallelism is sequence-parallel by "
-                "construction (the fused TP GEMMs gather/scatter the sequence "
-                "and the batch is sharded T/tp). There is no "
-                "replicated-activation TP path to fall back to, so this flag "
-                "has nothing to disable. Leave it true, or set "
-                "tensor_parallel_size=1 to drop TP."
-            )
-        if (
-            self.tensor_parallel_size > 1
-            and self.expert_parallel_size > 1
-            and self.context_parallel_size > 1
-        ):
-            # tp x ep is supported: TP shards the dense parts, EP owns the
-            # routed experts (E-shard), the router stays replicated -- the
-            # upstream alignment. Adding CP on top is unverified (the CP
-            # attention kernel is orthogonal, but the token-count reductions
-            # and dispatcher layouts have not been exercised together), so it
-            # is refused here rather than silently composing.
-            raise UnsupportedCombinationError(
-                "tensor_parallel_size > 1 with expert_parallel_size > 1 and "
-                "context_parallel_size > 1 is not supported: tp x ep x cp is "
-                "unverified. Run tp x ep with context_parallel_size=1, or ep x "
-                "cp with tensor_parallel_size=1."
-            )
+        matrix.sequence_parallel_required(self)
+        matrix.tp_ep_cp(self)
         if self.data_parallel_shard_size < 1 and self.data_parallel_shard_size != -1:
             raise ConfigError(
                 "data_parallel_shard_size must be >= 1 or -1 (derive), got "
@@ -374,32 +340,8 @@ class ParallelConfig:
                 "parallelism.ep_token_dispatcher must be one of: "
                 f"{allowed_dispatchers} (got {self.ep_token_dispatcher!r})"
             )
-        if self.ep_token_dispatcher in ("deepep", "hybridep"):
-            # Registered gap, not a typo: both backends are CUDA-only (they
-            # cannot even be installed on a CPU/NPU box) and their dispatch /
-            # combine drive torchtitan's `distributed/deepep/` wrappers around
-            # the deep_ep / hybridep kernels, which hpmesh does not vendor.
-            # Porting them means vendoring those wrappers AND validating on a
-            # CUDA target device; neither is done, so refuse the configuration
-            # rather than silently run all-to-all. The default 'alltoall'
-            # dispatcher satisfies the same dispatch/combine contract.
-            raise EnvironmentUnsupportedError(
-                f"ep_token_dispatcher={self.ep_token_dispatcher!r} is a "
-                "registered gap, not a supported backend: it is CUDA-only and "
-                "requires the deep_ep/hybridep kernels plus torchtitan's "
-                "distributed/deepep/ wrappers, which hpmesh does not vendor "
-                "(environment not covered; see docs/hpmesh_upstream_map.md "
-                "table D). Unlock conditions: vendor the wrappers, add the "
-                "CUDA-only dependency as an optional extra, and re-validate "
-                "numerics on a CUDA device. Use 'alltoall' meanwhile."
-            )
-        if self.ep_token_dispatcher != "alltoall" and self.expert_parallel_size == 1:
-            raise UnsupportedCombinationError(
-                f"ep_token_dispatcher={self.ep_token_dispatcher!r} has no "
-                "effect at expert_parallel_size=1: the EP swap is the only "
-                "place a token dispatcher is installed and it does not run at "
-                "ep=1. Set expert_parallel_size > 1, or keep 'alltoall'."
-            )
+        matrix.deepep_hybridep(self)
+        matrix.dispatcher_requires_ep(self)
         if self.ep_torchao_pad_multiple < 1:
             raise ConfigError(
                 "ep_torchao_pad_multiple must be >= 1, got "
@@ -417,18 +359,7 @@ class ParallelConfig:
                 f"None, 'headtail', 'ptrr' "
                 f"(got {self.context_parallel_load_balancer!r})"
             )
-        if self.context_parallel_load_balancer == "ptrr":
-            # It is in `allowed` only so that a config naming it is recognized
-            # rather than reported as a typo. Rejecting it here rather than in
-            # the mesh builder moves the failure from the first forward -- after
-            # process groups, model build and dataloader construction -- to the
-            # config, where the message is still about the flag.
-            raise UnsupportedCombinationError(
-                "parallelism.context_parallel_load_balancer='ptrr' is not "
-                "implemented in hpmesh: it derives its schedule from a "
-                "BlockMask, which hpmesh's CP kernel does not consume. Use "
-                "'headtail' or None."
-            )
+        matrix.ptrr_load_balancer(self)
         allowed_strategies = frozenset({"kv_allgather", "ulysses"})
         if self.context_parallel_strategy not in allowed_strategies:
             raise ConfigError(
@@ -436,20 +367,7 @@ class ParallelConfig:
                 f"'kv_allgather', 'ulysses' "
                 f"(got {self.context_parallel_strategy!r})"
             )
-        if (
-            self.context_parallel_strategy == "ulysses"
-            and self.context_parallel_load_balancer is not None
-        ):
-            raise UnsupportedCombinationError(
-                "parallelism.context_parallel_strategy='ulysses' requires "
-                "context_parallel_load_balancer=None: every rank attends the "
-                "full sequence in whatever order the all-to-all delivers, and "
-                "a load balancer's rearrangement would make that a permuted "
-                "corpus. Nothing raises: the attention is over the wrong "
-                "order of the right tokens, so the loss stays finite and the "
-                "run trains a different model. "
-                f"(got {self.context_parallel_load_balancer!r})"
-            )
+        matrix.ulysses_no_load_balancer(self)
         if self.enable_fsdp_symm_mem and (
             not torch.cuda.is_available()
             or (

@@ -51,8 +51,6 @@ import torch
 import torch.nn as nn
 from torch.distributed.device_mesh import DeviceMesh
 
-from hpmesh.errors import UnsupportedCombinationError
-
 from ...accelerator.capabilities import has
 from .linear import (
     AllGatherLinear,
@@ -282,12 +280,9 @@ class _TPMoeSequenceBoundary:
         gathered = all_gather_along(hidden_states, -2, self._tp_seq_group)
         out = super().forward(gathered, *args, **kwargs)
         if not isinstance(out, torch.Tensor):
-            raise UnsupportedCombinationError(
-                f"TP over {type(self).__name__}: the MoE block returned "
-                f"{type(out).__name__}, not a bare hidden-states tensor. The "
-                "boundary reduce-scatter has no defined place to run; refusing "
-                "rather than dropping part of the output."
-            )
+            from .. import matrix
+
+            matrix.tp_moe_non_tensor_output(self, out)
         return reduce_scatter_along(out, -2, self._tp_seq_group)
 
 

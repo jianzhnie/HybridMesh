@@ -12,8 +12,6 @@ import torch
 import torch.distributed as dist
 import torch.nn as nn
 
-from hpmesh.errors import UnsupportedCombinationError
-
 from ...accelerator import dist_utils
 from ...models.common.grouped_experts import GroupedExperts
 from ...models.common.moe import (
@@ -28,6 +26,7 @@ from ...models.common.token_dispatcher import (
     LocalTokenDispatcher,
     TorchAOTokenDispatcher,
 )
+from .. import matrix
 from .probe import (
     _fused_experts_of,
     _read_expert_groups,
@@ -76,12 +75,7 @@ def _convert_block(
     router_gate = _router_of(block)
     assert router_gate is not None  # the probe established this
     if getattr(router_gate, "bias", None) is not None:
-        raise UnsupportedCombinationError(
-            f"{type(router_gate).__name__} carries a router bias, which "
-            "RouterGateLinear has no slot for. Every supported family "
-            "(Qwen3Moe, OLMoE, Mixtral, DeepSeek-V2/V3, GLM4) is bias-free, "
-            "so this fires only on a family the probe does not know."
-        )
+        matrix.router_bias(router_gate)
     experts = _fused_experts_of(block)
     assert experts is not None  # the probe established this
 
@@ -106,17 +100,9 @@ def _convert_block(
         # range derives from their [0, 1] bound) and routes freely over all
         # experts, so a softmax family or a group-limited one cannot adopt it.
         if score_func != "sigmoid":
-            raise UnsupportedCombinationError(
-                f"quantile-balanced routing requires sigmoid router scores, "
-                f"got {score_func!r} for {type(block).__name__}."
-            )
+            matrix.quantile_requires_sigmoid(score_func, block)
         if num_expert_groups is not None and num_expert_groups > 1:
-            raise UnsupportedCombinationError(
-                f"quantile-balanced routing selects a free Top-(K+1) over all "
-                f"experts; {type(block).__name__}'s group-limited routing is "
-                "incompatible with it. (A single group is no restriction and "
-                "is accepted.)"
-            )
+            matrix.quantile_no_group_limit(block)
         router = QuantileBalancedTopKRouter(
             num_experts,
             dim,
@@ -164,19 +150,9 @@ def _convert_block(
         block, "shared_experts", None
     )
     if shared is not None and hasattr(block, "shared_expert_gate"):
-        raise UnsupportedCombinationError(
-            f"{type(block).__name__} gates its shared expert "
-            "(shared_expert_gate); MoE's shared_experts is additive only. "
-            "Qwen3Moe has no shared expert, so this is unreachable there."
-        )
+        matrix.shared_expert_gate(block)
     if shared is not None and tp_enabled:
-        raise UnsupportedCombinationError(
-            f"tp x ep over {type(block).__name__}: the block has a shared "
-            "expert, which the TP plan shards with the dense colwise/rowwise "
-            "realizers. Composing those with the swapped MoE's sequence-"
-            "sharded dispatch layout is unverified; run shared-expert models "
-            "with tp=1 (EP handles the shared expert) or ep=1."
-        )
+        matrix.shared_expert_tp_ep(block)
 
     moe = MoE(
         num_experts=num_experts,

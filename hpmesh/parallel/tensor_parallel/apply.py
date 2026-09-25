@@ -12,8 +12,8 @@ import torch.nn as nn
 from torch.distributed.device_mesh import DeviceMesh
 
 from hpmesh.config import ParallelConfig
-from hpmesh.errors import UnsupportedCombinationError
 
+from .. import matrix
 from .tp import (
     _MOE_PLAN_SPECS,
     ColwiseLinear,
@@ -100,12 +100,7 @@ def apply_tp(
             if _is_hf_moe_block(module):
                 moe_blocks.append((module_path, module))
         if not moe_blocks and not already_bracketed:
-            raise UnsupportedCombinationError(
-                f"apply_tp with tp={cfg.tp}: the plan declares MoE TP specs "
-                "but no HF MoE block was found on "
-                f"{type(model).__name__}. Refusing to run TP with the experts "
-                "silently replicated."
-            )
+            matrix.tp_moe_specs_without_block(cfg.tp, model)
     nothing_sharded = not targets and not moe_blocks and not already_bracketed
     if nothing_sharded and not moe_deferred_to_ep:
         raise ValueError(
@@ -128,13 +123,7 @@ def apply_tp(
         if getattr(block, "shared_expert", None) is not None or (
             getattr(block, "shared_experts", None) is not None
         ):
-            raise UnsupportedCombinationError(
-                f"TP over {module_path} ({type(block).__name__}): the block "
-                "has a shared expert, which the plan shards with the dense "
-                "colwise/rowwise realizers. Composing those with the MoE "
-                "sequence-boundary collectives is unverified; use tp=1, or "
-                "ep > 1 (the EP swap handles shared experts)."
-            )
+            matrix.shared_expert_tp(module_path, block)
         # The sharded expert parameters are excluded from the trainer's
         # replicated-gradient all-reduce through this id set: each rank's
         # F-shard gradient is complete, and summing it with a different

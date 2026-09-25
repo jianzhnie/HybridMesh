@@ -37,10 +37,10 @@ from torch.distributed.pipelining.schedules import (
 )
 
 from hpmesh.config import ParallelConfig
-from hpmesh.errors import UnsupportedCombinationError
 
 from ...components.loss import cross_entropy_loss
 from ...utils.logger_utils import get_logger
+from .. import matrix
 from ..parallel_dims import ParallelDims
 from .pipeline import generate_llm_fqn_per_model_part, split_model_into_stages
 
@@ -256,24 +256,11 @@ def apply_pp(
     schedule over the stages is built separately (``build_pipeline_schedule``).
     """
     if parallel_dims.cp_enabled or parallel_dims.ep_enabled:
-        raise UnsupportedCombinationError(
-            "pp > 1 does not compose with cp > 1 or ep > 1 yet: CP shards the "
-            "batch the schedule consumes and EP swaps MoE blocks per chunk, and "
-            "neither path is wired through the pipeline. Run them separately."
-        )
+        matrix.pp_cp_ep()
     if dataset != "random":
-        raise UnsupportedCombinationError(
-            "pp > 1 supports only the synthetic 'random' corpus: a packed real "
-            "corpus supplies per-token positions, and the pipeline body does "
-            "not thread them through the schedule."
-        )
+        matrix.pp_real_corpus()
     if getattr(model, "enable_weight_tying", False):
-        raise UnsupportedCombinationError(
-            "pp > 1 with tied word embeddings is not supported: the split puts "
-            "the embedding on the first stage and the head on the last, and "
-            "each stage's deep copy would train an independent copy of the "
-            "shared weight."
-        )
+        matrix.pp_weight_tying()
     parallelism = cfg
     pp_mesh = parallel_dims.get_mesh("pp")
     _validate_microbatches(parallel_dims, cfg, global_batch_size)
