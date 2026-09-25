@@ -332,7 +332,12 @@ input_ids/labels/positions 同步切片；BlockMask 只沿 Q 维分片
 `models/common` 的 `MoE`：router gate 与 experts 权重逐元素直拷进
 `TokenChoiceTopKRouter` / `GroupedExperts`；ep>1 时每 rank 切本地 experts 片并接
 `AllToAllTokenDispatcher`（`wire_meshes(ep_group=...)`），ep==1 用
-`LocalTokenDispatcher`。负载均衡 loss 走 router 上的
+`LocalTokenDispatcher`。dispatch 后端可由 `ParallelConfig.ep_token_dispatcher`
+选择：`alltoall`（默认，逐位不变）、`torchao`（可选导入适配层，token 组按
+`ep_torchao_pad_multiple` 补齐供 FP8/MXFP8 量化 grouped GEMM 使用，未装
+torchao 构造期 ImportError 带安装指引，数值环境未覆盖待 CUDA 复跑）；
+`deepep`/`hybridep` 为登记缺口（CUDA-only + 上游 deepep wrappers 未
+vendor），配置期 NotImplementedError 带解锁条件。负载均衡 loss 走 router 上的
 `MicrobatchWiseLoadBalanceLoss`（coeff 取 HF config 的 `router_aux_loss_coef`），
 trainer 以梯度注入 hook 接线，不改主 loss 值。
 

@@ -119,6 +119,8 @@ step 1 恢复 optimizer、scheduler、dataloader 和 train state 后完成并保
 | `aux_loss.AuxLoss.inject/collect_aux_loss_metrics` | `models/common/aux_loss.py` | 去全局 Module registry，使用显式寄存器与 step denominator；与上游逐符号一致（`reduce_mesh="dp"` ↔ hpmesh `"batch"` 是 mesh 命名适配），**通过** |
 | `LocalTokenDispatcher` | `models/common/token_dispatcher.py` | 本地排序、dispatch/combine 与上游同意图，**通过** |
 | `AllToAllTokenDispatcher` | 上游 EP dispatcher | hpmesh 直接操作本地专家切片和 PG，非 MinimalAsyncEP（上游已删除该实验），**通过（适配）** |
+| `TorchAOTokenDispatcher` | 上游同名 dispatcher | 可选导入适配层：`_permute`/`_unpermute` 委托 torchao `permute_and_pad`（expert-major 重排 + token 组 pad 到 `pad_multiple`，EP=1 本地 padded permute 路径一并移植）；构造期 lazy import，未装 torchao loud-raise ImportError 带安装指引；`ParallelConfig.ep_token_dispatcher="torchao"` + `ep_torchao_pad_multiple` 接线，**通过（适配）**，数值**环境未覆盖**（无 torchao/CUDA），待 CUDA 目标设备复跑 |
+| `DeepEPTokenDispatcher` / `HybridEPTokenDispatcher` | 上游同名 dispatcher | **登记缺口（loud-raise）**：CUDA-only（`deep_ep`/`hybridep` 内核）且 dispatch/combine 需上游 `distributed/deepep/` wrappers（1155 行，未 vendor），可选导入无法忠实表达契约；`ParallelConfig.ep_token_dispatcher` 选到即 NotImplementedError（含解锁条件：vendor wrappers + CUDA optional extra + CUDA 设备复跑），swap 入口防御性同语义；`AllToAllTokenDispatcher` 满足同一 dispatch/combine 契约 |
 | `dist_gemm` 三个模块 | `models/common/dist_gemm.py` | 保留 fused collective+GEMM，mesh 从 hpmesh context 获取。上游 e72fd863d 重构为组合式 `Async*Linear`，hpmesh 保持子类式委托 `parallel/tensor_parallel/linear.py`，数学等价，**受限**：需 TP/CUDA 能力 |
 
 ### 4.4 多模态
@@ -318,8 +320,16 @@ step 1 恢复 optimizer、scheduler、dataloader 和 train state 后完成并保
     fail-fast；PP × validation 无 eval 管线通路，构造期 NotImplementedError，
     见 §2 trainer 表）。
 - 2026-09-24 复核新增登记：
-  - `token_dispatcher.py` 的 TorchAO/DeepEP/HybridEP 三个 dispatcher：环境依赖型
-    不移植（torchao 非依赖、DeepEP/HybridEP 为 CUDA-only），理由见文件 docstring。
+  - `token_dispatcher.py` 的 TorchAO/DeepEP/HybridEP 三个 dispatcher：**已对齐**
+    （2026-09-25，§9.1 第 13 项）。TorchAO 落为可选导入适配层
+    `TorchAOTokenDispatcher`（`_permute`/`_unpermute` 委托 torchao
+    `permute_and_pad`，构造期 lazy import，未装 loud-raise ImportError 带
+    `pip install torchao` 指引），DeepEP/HybridEP 保持登记缺口（CUDA-only +
+    上游 `distributed/deepep/` wrappers 未 vendor），配置期
+    NotImplementedError 带解锁条件；`ParallelConfig.ep_token_dispatcher` /
+    `ep_torchao_pad_multiple` 接线，默认 `alltoall` 逐位不变。torchao 数值
+    **环境未覆盖**（本机无 torchao/CUDA，单测以 fake 模块覆盖 sentinel-row
+    padding 契约），解锁条件：CUDA 目标设备装 torchao 复跑。
   - router `_debug_force_load_balance`：纯调试开关，有意不移植。
   - router `_debug_force_load_balance`：**已移植**（批 1，`TokenChoiceTopKRouter`
     同名构造参数，round-robin 语义逐字一致，见 §4.3）。
@@ -401,7 +411,7 @@ step 1 恢复 optimizer、scheduler、dataloader 和 train state 后完成并保
 | `models/common/qkv.py` | fused QKV 与 state hooks | A2，`attention.py` 拆分 |
 | `models/common/rope.py` | RoPE 全家族 | A2，同文件 |
 | `models/common/scatter_add.py` | deterministic scatter-add autograd | A2，`ops/scatter_add.py` |
-| `models/common/token_dispatcher.py` | local/all-to-all dispatchers | A2，同文件 |
+| `models/common/token_dispatcher.py` | local/all-to-all dispatchers + TorchAO 可选导入适配层；DeepEP/HybridEP 登记缺口（config 期 loud-raise） | A2，同文件 |
 | `models/hf_wrapper.py` | HF config/wrapper/forward | B，transformers backend model |
 | `parallel/activation_checkpoint.py` | full/selective AC | A2，distributed AC |
 | `accelerator/collectives.py` | reductions、timeouts、grad norm | C；上游 collective 仅供意图比较 |
