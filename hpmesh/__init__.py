@@ -10,6 +10,9 @@ Two abstractions only:
 Parallelism dimensions are added one at a time; each ``apply_*`` in
 ``hpmesh.parallel`` is a no-op when its degree is 1, so the same training loop
 runs from a single device up to full hybrid parallelism.
+
+Public surface (see docs/hybridmesh_design.md §3.4 for the full policy):
+the stable face is the two names below plus ``hpmesh.config`` and the CLI.
 """
 
 from hpmesh.config import HybridMeshConfig

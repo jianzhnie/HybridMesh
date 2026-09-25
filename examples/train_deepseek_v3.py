@@ -22,15 +22,15 @@ below, and ``arch_overrides`` is ignored so it cannot disagree with the weights.
 
 from __future__ import annotations
 
-from hpmesh.trainer import (
+from hpmesh import Trainer
+from hpmesh.config import (
     HybridMeshConfig,
+    MetricsConfig,
     ModelConfig,
     OptimizerConfig,
     ParallelConfig,
     TrainingConfig,
 )
-from hpmesh.config import MetricsConfig
-from hpmesh.trainer.trainer import Trainer
 
 
 def deepseek_v3_config() -> HybridMeshConfig:

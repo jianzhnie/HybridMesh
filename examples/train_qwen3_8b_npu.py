@@ -18,15 +18,17 @@ import os
 
 import torch
 
-from hpmesh.trainer import (
+from hpmesh import Trainer
+from hpmesh.config import (
+    CheckpointConfig,
+    DataloaderConfig,
     HybridMeshConfig,
+    MetricsConfig,
     ModelConfig,
     OptimizerConfig,
     ParallelConfig,
     TrainingConfig,
 )
-from hpmesh.config import CheckpointConfig, DataloaderConfig, MetricsConfig
-from hpmesh.trainer.trainer import Trainer
 
 MODEL_PATH = "/home/jianzhnie/llmtuner/hfhub/models/Qwen/Qwen3-8B"
 DATASET_PATH = (

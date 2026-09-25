@@ -30,15 +30,15 @@ sizes below are ignored.
 
 from __future__ import annotations
 
-from hpmesh.trainer import (
+from hpmesh import Trainer
+from hpmesh.config import (
     HybridMeshConfig,
+    MetricsConfig,
     ModelConfig,
     OptimizerConfig,
     ParallelConfig,
     TrainingConfig,
 )
-from hpmesh.config import MetricsConfig
-from hpmesh.trainer.trainer import Trainer
 
 
 def qwen3_config() -> HybridMeshConfig:
