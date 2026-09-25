@@ -31,7 +31,12 @@ from .collators import TextCollator
 from .loader import BaseDataLoader, GrainDataLoader
 from .packing import build_concat_then_split_packing, build_first_fit_packing
 from .random_data import RandomTokenDataLoader
-from .text.text import DATASETS, make_local_jsonl, make_local_jsonl_sft
+from .text.text import (
+    DATASETS,
+    make_local_jsonl,
+    make_local_jsonl_sft,
+    make_local_jsonl_sft_multiturn,
+)
 from .types import DatasetBuildContext, DatasetIterationPolicy
 
 if TYPE_CHECKING:
@@ -150,11 +155,26 @@ def build_dataloader(
         if dataset_name == "local_jsonl":
             recipe = make_local_jsonl(path=dataloader_config.dataset_path)
         elif dataset_name == "local_jsonl_sft":
-            recipe = make_local_jsonl_sft(
-                path=dataloader_config.dataset_path,
-                prompt_field=dataloader_config.prompt_field,
-                response_field=dataloader_config.response_field,
-            )
+            if dataloader_config.chat_renderer is not None:
+                # Imported here, not at module scope: the renderers package is
+                # an optional dependency, and a run that leaves chat_renderer
+                # unset must not have to install it.
+                from hpmesh.components.renderer import build_chat_renderer
+
+                recipe = make_local_jsonl_sft_multiturn(
+                    path=dataloader_config.dataset_path,
+                    messages_field=dataloader_config.messages_field,
+                    renderer=build_chat_renderer(
+                        tokenizer=tokenizer,
+                        renderer_name=dataloader_config.chat_renderer,
+                    ),
+                )
+            else:
+                recipe = make_local_jsonl_sft(
+                    path=dataloader_config.dataset_path,
+                    prompt_field=dataloader_config.prompt_field,
+                    response_field=dataloader_config.response_field,
+                )
         else:
             recipe = DATASETS[dataset_name]
         # Both recipes are built the same way and differ only in kind: the

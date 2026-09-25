@@ -1140,6 +1140,23 @@ class DataloaderConfig:
         default="response",
         metadata={"help": "Assistant field used by dataset=local_jsonl_sft."},
     )
+    chat_renderer: str | None = field(
+        default=None,
+        metadata={
+            "help": "Multi-turn SFT via the optional renderers package: name "
+            "of its renderer config class (e.g. 'Qwen3RendererConfig'). Only "
+            "valid with dataset=local_jsonl_sft, whose rows must then carry a "
+            "messages list; replaces the single-turn chat-template path. "
+            "Needs `pip install renderers==0.1.11`."
+        },
+    )
+    messages_field: str = field(
+        default="messages",
+        metadata={
+            "help": "Row field holding the multi-turn conversation. Used only "
+            "when chat_renderer is set."
+        },
+    )
     shuffle: bool = field(
         default=True,
         metadata={"help": "Globally shuffle before sharding across DP ranks"},
@@ -1213,6 +1230,16 @@ class DataloaderConfig:
             not self.prompt_field.strip() or not self.response_field.strip()
         ):
             raise ValueError("local_jsonl_sft field names cannot be empty")
+        if self.chat_renderer is not None:
+            if self.dataset != "local_jsonl_sft":
+                raise ValueError(
+                    f"chat_renderer requires dataset='local_jsonl_sft', got "
+                    f"{self.dataset!r}"
+                )
+            if not self.messages_field.strip():
+                raise ValueError(
+                    "messages_field cannot be empty when chat_renderer is set"
+                )
         # Membership in ``datasets.text.text.DATASETS`` /
         # ``datasets.multimodal.mm_datasets.MM_DATASETS`` is checked by
         # ``datasets/build.py`` at build time, not here: reading the registries
