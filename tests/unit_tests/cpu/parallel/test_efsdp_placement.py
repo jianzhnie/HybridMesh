@@ -25,6 +25,11 @@ Boundary pinned (efsdp axis size 1 on a single-rank mesh, so
 
 from __future__ import annotations
 
+from tests.caps import require_env
+
+require_env('dtensor', 'spmd_types')
+
+
 import math
 
 import pytest

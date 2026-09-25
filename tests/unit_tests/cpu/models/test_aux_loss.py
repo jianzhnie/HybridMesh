@@ -24,6 +24,11 @@ depend on the carrier, ``_TraceableLoss`` does not return it downstream.
 
 from __future__ import annotations
 
+from tests.caps import require_env
+
+require_env('spmd_types')
+
+
 import pytest
 import torch
 import torch.nn.functional as F

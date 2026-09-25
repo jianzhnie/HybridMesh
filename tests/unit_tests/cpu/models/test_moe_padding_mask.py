@@ -14,6 +14,11 @@ Pinned here, mirroring the upstream semantics:
 
 from __future__ import annotations
 
+from tests.caps import require_env
+
+require_env('spmd_types')
+
+
 import pytest
 import torch
 import torch.nn.functional as F

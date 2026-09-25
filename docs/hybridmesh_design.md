@@ -507,6 +507,14 @@ loss (sum 归约, loss mesh) -> backward -> clip_grad_norm_ (跨 PP 归约) -> A
 不是 pytest，`testpaths` 不收集它们，由 `run_all.py` 统一枚举驱动
 （`--list` 列出全部；命令读各脚本 docstring 的 torchrun 行）。
 
+环境门禁是**能力标记**，不是 ignore 清单（2026-09-26 起）：import 级硬依赖
+（DTensor、spmd_types、grain、flex_attention、pipelining、DCP 私有面等）的
+测试模块在文件顶部声明 `require_env(...)`（`tests/caps.py` 探测，sys.modules
+优先——stub 跑法预插的 fake 算"有"），缺失即模块级 skip，理由统一
+`[env] missing: <名字>`，`pytest -rs` 即环境覆盖报告。裸跑
+`python -m pytest tests/unit_tests -q` 在任何环境给出正确的
+passed/skipped，不再有仓外清单。
+
 G4 的兜底是 `integration_tests/` 里那套"分片 == 全量"的等价性测试。它们按拓扑用 2 或
 4 个 gloo rank 启动，自建 mesh、不依赖 trainer 装配（`pp_equivalence.py` 除外，它驱动
 真实 Trainer）：

@@ -8,6 +8,11 @@ loss comparison would notice. Everything here runs on CPU with no process group.
 
 from __future__ import annotations
 
+from tests.caps import require_env
+
+require_env('wandb', 'pipelining', 'flex_attention')
+
+
 import logging
 
 import pytest

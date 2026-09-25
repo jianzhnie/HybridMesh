@@ -15,6 +15,11 @@ environment lacks; re-run on a multi-GPU host before trusting the numerics.
 
 from __future__ import annotations
 
+from tests.caps import require_env
+
+require_env('spmd_types')
+
+
 import pytest
 import torch
 import torch.nn as nn

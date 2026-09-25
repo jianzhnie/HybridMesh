@@ -13,6 +13,11 @@ flipping `_attn_implementation` on the built config.
 
 from __future__ import annotations
 
+from tests.caps import require_env
+
+require_env('flex_attention', 'spmd_types')
+
+
 import pytest
 import torch
 

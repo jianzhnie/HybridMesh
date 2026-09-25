@@ -10,6 +10,11 @@ the tests below pin, because every one of them is a silent-breakage candidate
 
 from __future__ import annotations
 
+from tests.caps import require_env
+
+require_env('spmd_types')
+
+
 import pytest
 import torch
 import torch.nn.functional as F

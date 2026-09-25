@@ -16,6 +16,11 @@ and lives in ``tests/cp_equivalence.py``.
 
 from __future__ import annotations
 
+from tests.caps import require_env
+
+require_env('spmd_types')
+
+
 import pytest
 
 from hpmesh.accelerator.spmd_context import (

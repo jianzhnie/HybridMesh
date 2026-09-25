@@ -15,6 +15,11 @@ carries, which would break the CPU equivalence tests this fallback exists for.
 
 from __future__ import annotations
 
+from tests.caps import require_env
+
+require_env('spmd_types')
+
+
 import pytest
 
 from hpmesh.parallel.context_parallel.cp_kernel import (

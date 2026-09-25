@@ -15,6 +15,11 @@ imports ``av`` lazily, and every video path exercised here goes through
 
 from __future__ import annotations
 
+from tests.caps import require_env
+
+require_env('grain')
+
+
 import base64
 import json
 

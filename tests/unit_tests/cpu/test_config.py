@@ -13,6 +13,11 @@ test cannot pass by the constructor rejecting everything.
 
 from __future__ import annotations
 
+from tests.caps import require_env
+
+require_env('dtensor')
+
+
 import pytest
 
 from hpmesh.components.checkpointer import LR_SCHEDULER, MODEL, OPTIMIZER

@@ -9,6 +9,11 @@ torchao is unverified until the dependency lands and these tests are re-run
 against it; the gating tests (no package installed) run for real.
 """
 
+from tests.caps import require_env
+
+require_env('spmd_types')
+
+
 import sys
 import types
 

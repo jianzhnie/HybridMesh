@@ -11,6 +11,11 @@ Single-rank harness: the TP path only needs ``dist.get_world_size`` /
 counts stands in for a real TP group.
 """
 
+from tests.caps import require_env
+
+require_env('spmd_types')
+
+
 import torch
 import torch.distributed as dist
 from torch.testing._internal.distributed.fake_pg import FakeStore

@@ -28,6 +28,13 @@ unlock conditions.
 
 from __future__ import annotations
 
+from tests.caps import require_env
+
+require_env(
+    'checkpoint_policy', 'functorch_partitioners', 'flex_attention', 'spmd_types'
+)
+
+
 import pytest
 import torch
 from torch.distributed.algorithms._checkpoint.checkpoint_wrapper import (

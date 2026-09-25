@@ -17,6 +17,11 @@ cold Adam has no ``exp_avg`` tensors for DCP to write into.
 
 from __future__ import annotations
 
+from tests.caps import require_env
+
+require_env('dtensor', 'pipelining', 'spmd_types')
+
+
 import weakref
 from contextlib import nullcontext
 from types import SimpleNamespace
