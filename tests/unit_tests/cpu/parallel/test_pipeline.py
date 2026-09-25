@@ -9,6 +9,11 @@ chained forward can be checked without any p2p.
 
 from __future__ import annotations
 
+from tests.caps import require_env
+
+require_env('pipelining', 'flex_attention', 'spmd_types')
+
+
 import pytest
 import torch
 import torch.distributed as dist

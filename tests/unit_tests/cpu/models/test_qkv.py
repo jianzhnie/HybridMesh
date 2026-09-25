@@ -14,6 +14,11 @@ resume, so that round-trip is asserted directly.
 
 from __future__ import annotations
 
+from tests.caps import require_env
+
+require_env('spmd_types')
+
+
 import pytest
 import torch
 

@@ -10,6 +10,11 @@ roll-up depends on.
 
 from __future__ import annotations
 
+from tests.caps import require_env
+
+require_env('torch_param_names')
+
+
 import pytest
 import torch
 import torch.nn as nn

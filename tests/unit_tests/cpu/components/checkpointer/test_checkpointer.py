@@ -9,6 +9,11 @@ or too little, an optimizer wrapper that reports success without restoring.
 
 from __future__ import annotations
 
+from tests.caps import require_env
+
+require_env('dcp', 'dtensor')
+
+
 import torch
 import torch.nn as nn
 

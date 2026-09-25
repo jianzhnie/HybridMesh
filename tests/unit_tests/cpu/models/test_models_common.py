@@ -8,6 +8,11 @@ whatever dtype the model runs in.
 
 from __future__ import annotations
 
+from tests.caps import require_env
+
+require_env('spmd_types')
+
+
 import pytest
 import torch
 import torch.nn as nn

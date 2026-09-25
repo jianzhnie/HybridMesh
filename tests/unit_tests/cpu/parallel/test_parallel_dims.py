@@ -15,6 +15,11 @@ single-rank gloo group -- the same fixture shape as ``test_pipeline.py``.
 
 from __future__ import annotations
 
+from tests.caps import require_env
+
+require_env('spmd_types', 'pipelining')
+
+
 import pytest
 import torch
 import torch.distributed as dist

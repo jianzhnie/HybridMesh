@@ -9,6 +9,11 @@ EP off it must leave the model untouched.
 
 from __future__ import annotations
 
+from tests.caps import require_env
+
+require_env('spmd_types')
+
+
 import pytest
 import torch
 

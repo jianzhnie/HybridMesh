@@ -80,6 +80,9 @@ include = ["hpmesh*"]
 # (every module in it imports ``tests.data_fixtures``, so the repo root has to
 # be the pytest rootdir), and ``integration_tests`` holds the torchrun
 # equivalence scripts -- they are not pytests and are not collected here.
+# Environment gating lives in the modules themselves
+# (``tests/caps.py::require_env`` at the top of import-gated files), so the
+# suite is run bare -- no --ignore list.
 [tool.pytest.ini_options]
 testpaths = ["tests/unit_tests"]
 
@@ -95,4 +98,6 @@ select = ["E", "F", "I", "UP", "B"]
 # `tokenizer` parameters ARE the import from `tests.data_fixtures` -- pytest
 # resolves them by name -- which reads to ruff as redefining the import. The
 # rest of F still applies here. The glob reaches into the nested layout.
-"tests/**/*.py" = ["F811"]
+# E402: gated modules call ``tests.caps.require_env`` before their heavy
+# imports -- that call is the environment gate and must run first.
+"tests/**/*.py" = ["F811", "E402"]

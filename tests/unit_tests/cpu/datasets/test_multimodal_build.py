@@ -13,6 +13,11 @@ which is also the state the missing-dependency test simulates.
 
 from __future__ import annotations
 
+from tests.caps import require_env
+
+require_env('grain')
+
+
 import base64
 import io
 import json

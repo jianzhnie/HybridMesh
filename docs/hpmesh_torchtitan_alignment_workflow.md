@@ -194,8 +194,11 @@ git diff --check
 
 ### 7.2 CPU 单测
 
-先运行受影响模块，再运行完整可运行集合。记录 `passed / failed / skipped /
-deselected`，并单列 optional dependency 或 PyTorch API 不匹配导致的未运行项。
+先运行受影响模块，再裸跑完整套件：`python -m pytest tests/unit_tests -q`
+（无 --ignore；环境门禁在测试模块自身的 `require_env(...)` 声明里，见
+design doc §7）。记录 `passed / failed / skipped`；`[env] missing: ...` 的
+skip 理由（`pytest -rs`）即 optional dependency 或 PyTorch API 不匹配的
+未运行项清单。
 
 "可运行集合通过"不能写成"全套测试通过"。失败项不得在没有证据时归因于环境。
 

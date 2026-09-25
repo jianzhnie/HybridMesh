@@ -12,6 +12,11 @@ runs for real.
 
 from __future__ import annotations
 
+from tests.caps import require_env
+
+require_env('grain')
+
+
 import sys
 import tempfile
 import types

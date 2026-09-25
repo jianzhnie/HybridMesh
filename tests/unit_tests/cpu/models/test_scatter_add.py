@@ -9,6 +9,11 @@ traceability (a fullgraph compile must not break on it).
 
 from __future__ import annotations
 
+from tests.caps import require_env
+
+require_env('spmd_types')
+
+
 import torch
 
 from hpmesh.models.common.scatter_add import deterministic_scatter_add

@@ -26,6 +26,11 @@ which is what makes a bitwise assertion meaningful rather than merely close.
 
 from __future__ import annotations
 
+from tests.caps import require_env
+
+require_env('spmd_types')
+
+
 import pytest
 import torch
 from transformers import AutoConfig

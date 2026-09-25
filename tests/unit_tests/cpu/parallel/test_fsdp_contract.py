@@ -18,6 +18,11 @@ accessors are plain attribute lookups on a tiny offline model.
 
 from __future__ import annotations
 
+from tests.caps import require_env
+
+require_env('flex_attention', 'spmd_types')
+
+
 import pytest
 import torch
 import torch.nn as nn

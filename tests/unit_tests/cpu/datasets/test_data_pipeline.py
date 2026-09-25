@@ -13,6 +13,11 @@ and the corpus are built into a tmp dir by the fixtures in ``data_fixtures``.
 
 from __future__ import annotations
 
+from tests.caps import require_env
+
+require_env('grain')
+
+
 import tempfile
 
 import grain.python as grain

@@ -12,6 +12,11 @@ Two invariants are pinned:
 
 from __future__ import annotations
 
+from tests.caps import require_env
+
+require_env('spmd_types')
+
+
 import torch
 
 from hpmesh.models.common.moe import TokenChoiceTopKRouter
