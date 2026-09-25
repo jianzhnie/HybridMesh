@@ -52,9 +52,12 @@ def apply_ep(
         ep_group=ep_group,
         router_aux_loss_coef=cfg.router_aux_loss_coef,
         quantile_balancing=cfg.moe_quantile_balancing,
+        token_dispatcher=cfg.ep_token_dispatcher,
+        torchao_pad_multiple=cfg.ep_torchao_pad_multiple,
     )
     logger.info(
-        "Applied EP (all-to-all dispatch): swapped %d MoE blocks, degree %d",
+        "Applied EP (%s dispatch): swapped %d MoE blocks, degree %d",
+        cfg.ep_token_dispatcher,
         swapped,
         cfg.ep,
     )

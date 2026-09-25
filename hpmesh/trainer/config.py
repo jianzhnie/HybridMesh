@@ -355,6 +355,34 @@ class ParallelConfig:
     group-limited routing, and ep > 1 (the swap is what installs the router).
     """
 
+    ep_token_dispatcher: str = "alltoall"
+    """
+    EP dispatch backend the MoE swap installs. Options:
+
+    - "alltoall": default. ``AllToAllTokenDispatcher`` -- local reorder plus
+      all-to-all collectives over the EP group.
+    - "torchao": ``TorchAOTokenDispatcher``, same dispatch but each local
+      expert's token group is padded to ``ep_torchao_pad_multiple`` for
+      FP8/MXFP8 quantized grouped GEMMs. Requires the optional ``torchao``
+      package; constructing the dispatcher without it raises ImportError
+      with an install hint. Numerics unverified (no torchao/CUDA on the
+      development machine), awaiting a CUDA-target re-run.
+    - "deepep" / "hybridep": registered gaps, refused here with
+      NotImplementedError. Both are CUDA-only and drive their kernels through
+      torchtitan's ``distributed/deepep/`` wrappers, which are not vendored;
+      ``alltoall`` satisfies the same dispatch/combine contract meanwhile.
+
+    Requires expert_parallel_size > 1 (the EP swap is the only place a
+    dispatcher is installed, and it does not run at ep=1).
+    """
+
+    ep_torchao_pad_multiple: int = 16
+    """
+    Token-group padding multiple for ``ep_token_dispatcher="torchao"``:
+    16 for FP8, 32 for MXFP8 quantized grouped GEMM kernels. Ignored by the
+    other backends.
+    """
+
     def non_dp_sizes(self) -> int:
         """Product of fixed world-mesh degrees: dp_replicate*tp*pp*cp.
 
@@ -460,6 +488,43 @@ class ParallelConfig:
             raise ValueError(
                 "data_parallel_shard_size must be >= 1 or -1 (derive), got "
                 f"{self.data_parallel_shard_size}"
+            )
+        allowed_dispatchers = ("alltoall", "torchao", "deepep", "hybridep")
+        if self.ep_token_dispatcher not in allowed_dispatchers:
+            raise ValueError(
+                "parallelism.ep_token_dispatcher must be one of: "
+                f"{allowed_dispatchers} (got {self.ep_token_dispatcher!r})"
+            )
+        if self.ep_token_dispatcher in ("deepep", "hybridep"):
+            # Registered gap, not a typo: both backends are CUDA-only (they
+            # cannot even be installed on a CPU/NPU box) and their dispatch /
+            # combine drive torchtitan's `distributed/deepep/` wrappers around
+            # the deep_ep / hybridep kernels, which hpmesh does not vendor.
+            # Porting them means vendoring those wrappers AND validating on a
+            # CUDA target device; neither is done, so refuse the configuration
+            # rather than silently run all-to-all. The default 'alltoall'
+            # dispatcher satisfies the same dispatch/combine contract.
+            raise NotImplementedError(
+                f"ep_token_dispatcher={self.ep_token_dispatcher!r} is a "
+                "registered gap, not a supported backend: it is CUDA-only and "
+                "requires the deep_ep/hybridep kernels plus torchtitan's "
+                "distributed/deepep/ wrappers, which hpmesh does not vendor "
+                "(environment not covered; see docs/hpmesh_upstream_map.md "
+                "table D). Unlock conditions: vendor the wrappers, add the "
+                "CUDA-only dependency as an optional extra, and re-validate "
+                "numerics on a CUDA device. Use 'alltoall' meanwhile."
+            )
+        if self.ep_token_dispatcher != "alltoall" and self.expert_parallel_size == 1:
+            raise NotImplementedError(
+                f"ep_token_dispatcher={self.ep_token_dispatcher!r} has no "
+                "effect at expert_parallel_size=1: the EP swap is the only "
+                "place a token dispatcher is installed and it does not run at "
+                "ep=1. Set expert_parallel_size > 1, or keep 'alltoall'."
+            )
+        if self.ep_torchao_pad_multiple < 1:
+            raise ValueError(
+                "ep_torchao_pad_multiple must be >= 1, got "
+                f"{self.ep_torchao_pad_multiple}"
             )
         if self.context_parallel_load_balancer == "":
             raise ValueError(

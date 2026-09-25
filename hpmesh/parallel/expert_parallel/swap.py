@@ -86,8 +86,10 @@ from ...models.common.moe import (
     TokenChoiceTopKRouter,
 )
 from ...models.common.token_dispatcher import (
+    EP_DISPATCHER_BACKENDS,
     AllToAllTokenDispatcher,
     LocalTokenDispatcher,
+    TorchAOTokenDispatcher,
 )
 from ...utils.logger_utils import get_logger
 
@@ -413,6 +415,8 @@ def _convert_block(
     aux_loss_coeff: float | None,
     load_balance_coeff: float | None,
     quantile_balancing: bool,
+    token_dispatcher: str,
+    torchao_pad_multiple: int,
 ) -> MoE:
     """Build the hpmesh MoE for one HF block and move its weights over."""
     ep_size = 1 if ep_group is None else dist_utils.get_world_size(ep_group)
@@ -493,10 +497,16 @@ def _convert_block(
                 else None
             ),
         )
-    if ep_group is None:
+    if token_dispatcher == "torchao":
+        # Optional-import adapter: the constructor raises ImportError with an
+        # install hint when torchao is absent. EP=1 is supported by the
+        # dispatcher itself (local padded permute only).
+        dispatcher = TorchAOTokenDispatcher(num_experts, top_k, torchao_pad_multiple)
+    elif ep_group is None:
         dispatcher = LocalTokenDispatcher(num_experts, top_k)
     else:
         dispatcher = AllToAllTokenDispatcher(num_experts, top_k)
+    if ep_group is not None:
         dispatcher.wire_meshes(ep_group=ep_group)
 
     shared = getattr(block, "shared_expert", None) or getattr(
@@ -634,6 +644,8 @@ def swap_hf_moe_blocks(
     ep_group=None,
     router_aux_loss_coef: float | None = None,
     quantile_balancing: bool = False,
+    token_dispatcher: str = "alltoall",
+    torchao_pad_multiple: int = 16,
 ) -> int:
     """Replace every HF MoE block in ``model`` with hpmesh's MoE, in place.
 
@@ -653,6 +665,11 @@ def swap_hf_moe_blocks(
             optimizer step instead of nudged by the sign rule, and
             ``load_balance_coeff`` is forced off. Requires sigmoid router
             scores and no group-limited routing.
+        token_dispatcher: EP dispatch backend (``"alltoall"`` default,
+            ``"torchao"`` optional-import adapter, ``"deepep"``/``"hybridep"``
+            registered gaps refused here). See
+            ``ParallelConfig.ep_token_dispatcher``.
+        torchao_pad_multiple: padding multiple for the ``"torchao"`` backend.
 
     Returns:
         The number of blocks swapped. Mixed sparse/dense models (e.g.
@@ -672,6 +689,20 @@ def swap_hf_moe_blocks(
         raise TypeError(
             f"swap_hf_moe_blocks expects a model with .layers; got "
             f"{type(model).__name__}."
+        )
+    # Backend gating, before any probing: ParallelConfig.__post_init__ is the
+    # primary gate; this is the defensive copy for callers that reach the swap
+    # directly.
+    if token_dispatcher not in EP_DISPATCHER_BACKENDS:
+        raise ValueError(
+            f"unknown ep_token_dispatcher {token_dispatcher!r}; expected one "
+            f"of {EP_DISPATCHER_BACKENDS}."
+        )
+    if token_dispatcher in ("deepep", "hybridep"):
+        raise NotImplementedError(
+            f"ep_token_dispatcher={token_dispatcher!r} is a registered gap: "
+            "CUDA-only kernels plus torchtitan's distributed/deepep/ wrappers "
+            "that hpmesh does not vendor. Use 'alltoall' meanwhile."
         )
 
     hf_config = getattr(getattr(model, "model", None), "config", None)
@@ -707,6 +738,8 @@ def swap_hf_moe_blocks(
             aux_loss_coeff=aux_loss_coeff,
             load_balance_coeff=load_balance_coeff,
             quantile_balancing=quantile_balancing,
+            token_dispatcher=token_dispatcher,
+            torchao_pad_multiple=torchao_pad_multiple,
         )
         # Replace in the slot the block was actually found in. Writing to a
         # different attribute would leave the original block in place and route
