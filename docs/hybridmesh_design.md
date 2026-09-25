@@ -272,6 +272,37 @@ device.py 本身就是设备注册表）；DTensor/flex_attention/spmd_types 是
 （torch knob）在 §3.2 注册表。`parallel/__init__` 为 PEP 562 懒导出，正是
 为了让 config 层能读 matrix 子模块而不拖入引擎层。
 
+## 3.4 公开 API 面（三级）
+
+重构边界由此划定。**稳定公开面**（examples/用户唯一该用的入口，改名即破坏）：
+
+| 入口 | 路径 |
+|---|---|
+| 聚合配置 | `hpmesh.HybridMeshConfig`（根，eager） |
+| 训练器 | `hpmesh.Trainer`（根，PEP 562 懒加载） |
+| 全部配置类 | `hpmesh.config.*`（16 个，`config/__init__` 全量再导出） |
+| CLI | `python -m hpmesh` / `hpmesh.trainer.train:main` |
+
+`hpmesh.trainer` 的配置再导出是**兼容别名**（旧调用方不炸），新代码不写它。
+
+**次级公开（集成面）**——写扩展/插件触碰，稳定性承诺弱一级（可能随上游对齐
+调整，但变更需说明）：
+
+| 入口 | 路径 |
+|---|---|
+| 装配入口 | `hpmesh.parallel.parallelize_hf_transformers`（懒导出） |
+| 异常三类 | `hpmesh.errors`（ConfigError / UnsupportedCombinationError / EnvironmentUnsupportedError） |
+| 装配 stage 表 | `hpmesh.parallel.stages`（STAGES / STAGE_ORDER / PP_STAGE_ORDER） |
+| 组合矩阵 | `hpmesh.parallel.matrix`（ENTRIES / check_*） |
+| 能力注册表 | `hpmesh.accelerator.capabilities`（has / require / CAPABILITIES） |
+
+`parallelize_hf_transformers` 不提到根：根面只留"配置 + 训练器"两个终端用户
+概念；单独使用装配层的人是扩展作者，属集成面，深路径即定位。
+
+**内部**：其余一切（下划线私有与未列名模块）不承诺稳定。测试不受公开面约束
+（可 import 内部）；examples 必须只用稳定面（已核对：三个例子只 import
+`hpmesh` 与 `hpmesh.config`）。
+
 ## 4. 核心契约（三条缝）
 
 ### 4.1 SEAM 0：唯一配置入口

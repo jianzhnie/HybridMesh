@@ -1,8 +1,9 @@
-"""Trainer subpackage: configuration dataclasses (and the training loop/CLI).
+"""Trainer subpackage: the training loop and CLI entry point.
 
-Only the config is re-exported here. ``Trainer`` and the CLI entry point live in
-``hpmesh.trainer.trainer`` / ``hpmesh.trainer.train`` and are imported lazily to
-avoid a circular import with the model layer.
+The config re-exports below are a compatibility alias kept for existing
+callers; the canonical path is ``hpmesh.config`` (and ``hpmesh.HybridMeshConfig``
+at the package root). ``Trainer`` lives at the root as ``hpmesh.Trainer``
+(lazy); the CLI entry point is ``hpmesh.trainer.train:main``.
 """
 
 from hpmesh.config import (

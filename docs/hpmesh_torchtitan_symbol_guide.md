@@ -439,6 +439,9 @@ step 1 恢复 optimizer、scheduler、dataloader 和 train state 后完成并保
 | `trainer/trainer.py`（+ `builder.py` 装配段 / `validation.py` / `pp_steps.py` / `batch.py`） | 完整训练生命周期 | B，根 `trainer.py` + `training_engine.py` |
 | `utils/batch_invariant.py` | batch-invariant getter/setter | C，上游开关散在 trainer/config |
 
+公开面约定：稳定面 = `hpmesh.HybridMeshConfig` / `hpmesh.Trainer` /
+`hpmesh.config.*` / CLI；集成面与内部分级见 design doc §3.4。
+
 组合判定约定：并行组合的支持/拒绝单一来源是 `parallel/matrix.py`
 （每个组合一个普通函数 + 底部 `ENTRIES` 扁平表一行；config/assembly/probe
 三阶段；配置期 `__post_init__` 原位调用，装配期与 probe 期由守卫点触发、
