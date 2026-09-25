@@ -24,7 +24,7 @@ from .context_parallel import apply_cp
 from .expert_parallel import apply_ep
 from .fully_shard.apply import apply_fsdp
 from .parallelize_hf import parallelize_hf_transformers
-from .tensor_parallel.tp import apply_tp
+from .tensor_parallel import apply_tp
 
 __all__ = [
     "apply_cp",

@@ -19,11 +19,11 @@ import pytest
 import torch
 import torch.nn as nn
 
+from hpmesh.parallel.tensor_parallel import apply_tp
 from hpmesh.parallel.tensor_parallel.tp import (
     _MOE_PLAN_SPECS,
     _resolve_plan,
     _shard_experts_for_tp,
-    apply_tp,
 )
 from hpmesh.trainer import ParallelConfig
 

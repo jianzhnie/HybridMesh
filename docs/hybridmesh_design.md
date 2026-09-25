@@ -229,7 +229,7 @@ HF 拉架构补齐）得到唯一配置对象。
 `HybridMeshConfig`，其它关注点如 `compile` 走显式参数）：
 
 ```python
-def apply_tp(model, mesh, cfg, plan=None) -> nn.Module      # tensor_parallel/tp.py
+def apply_tp(model, mesh, cfg, plan=None) -> nn.Module      # tensor_parallel/apply.py
 def apply_cp(model, mesh, cfg) -> nn.Module                 # context_parallel/apply.py
 def apply_ep(model, cfg, *, ep_group=None) -> nn.Module     # expert_parallel/apply.py
 def apply_fsdp(model, mesh, cfg, parallel_dims) -> nn.Module # fully_shard/
@@ -239,8 +239,9 @@ def apply_fsdp(model, mesh, cfg, parallel_dims) -> nn.Module # fully_shard/
 模型。**顺序即契约**，整个框架的编排知识集中在 `parallel/parallelize_hf.py` 一个文件里：
 
 ```
-pp>1 时转入 pipeline_parallel.apply_pp（切 stage -> 每 part 过 tp/compile/fsdp
--> 建 schedule），返回 PipelineParallelSetup；pp=1 时保持：
+pp>1 时先调 pipeline_parallel.apply_pp（只切 stage），随后由 parallelize_hf
+对每个 part 过 apply_tp -> compile(可选) -> apply_fsdp（与 pp=1 同序、同一
+调用点），最后建 schedule，返回 PipelineParallelSetup；pp=1 时保持：
 apply_tp -> apply_ep -> apply_cp -> apply_ac -> compile(可选) -> apply_fsdp
 # AC 包住已经 TP/EP/CP 改造的层；FSDP 最后，outer wraps inner
 ```
@@ -280,13 +281,16 @@ eval 模式 + `no_grad` 跑一次临时 dataloader，loss 按全局有效 token 
 
 ### 5.2 mesh 与 ParallelDims
 
-`accelerator/mesh.py` 只提供 `build_parallel_dims` / `build_mesh` 两个入口（trainer 的 PG 引导直接调 `accelerator/dist_utils._init_dist_pytorch`；多 launcher 门面 `init_dist` 保留给独立脚本）；
-所有具体视图由 `ParallelDims`（`parallel/parallel_dims.py`）统一构造。world mesh 包含
+`parallel/parallel_dims.py` 是 mesh 构建的单轨：`build_parallel_dims` /
+`build_mesh` 两个薄入口与 `ParallelDims` 同住一个模块（trainer 的 PG 引导直接调
+`accelerator/dist_utils._init_dist_pytorch`；多 launcher 门面 `init_dist` 保留给
+独立脚本）；所有具体视图由 `ParallelDims` 统一构造——它只负责构建/校验，
+运行时 mesh 访问的唯一通道是 `accelerator/spmd_context.py`。world mesh 包含
 PP 外轴，并派生 dataloading、dense storage、dense fwd/bwd、sparse EP、batch、loss 等
 视图。PP 下每个 stage 从同一个 `ParallelDims` 解析自己的 dense 子视图，不能把 PP 简化
 成"完全不在 mesh 中"。
 
-### 5.3 TP（tensor_parallel/tp.py）
+### 5.3 TP（tensor_parallel/tp.py + apply.py 入口）
 
 声明层是纯数据：`ShardingConfig(kind, implementation)` frozen dataclass +
 `colwise()/rowwise()` 工厂。实现层两个 fused collective+GEMM 模块：`ColwiseLinear`
@@ -366,8 +370,9 @@ wrapper 的 `named_children()` 只呈现五部件、看不到它们）同样按�
 当前无真实消费者，属能力就位。
 
 **闭环已落地**：`pipeline_parallel/apply.py` 的 `apply_pp` 按 schedule 类推导 stage 数
-（looped schedule 默认每 rank 2 个），切分后对每个 model_part 依次跑 `apply_tp` →
-`apply_fsdp`（与单卡路径同序）；`build_pipeline_schedule` 建 schedule
+（looped schedule 默认每 rank 2 个）并完成切分；每个 model_part 的
+`apply_tp` → `apply_compile` → `apply_fsdp` 编排已上移 `parallelize_hf.py`
+（与单卡路径同序、同一调用点）；`build_pipeline_schedule` 建 schedule
 （`scale_grads=False`，loss 是 sum 由 trainer 归一）。trainer 侧：
 `_pp_forward_backward_body` 驱动 `schedule.step`——首 stage 收 `input_ids`、末 stage
 收 labels 并返回 detach 求和的 loss 与 token 数、其余 stage 返回哨兵 -1.0；optimizer

@@ -8,8 +8,9 @@ call runs from a single device up to a full hybrid mesh.
 
 PP is the exception to "one model in, one model out": with ``pp > 1`` the model
 is cut into per-stage chunks first (``pipeline_parallel.apply_pp``), each chunk
-goes through TP / compile / FSDP in the same relative order, and the caller gets
-back a ``PipelineParallelSetup`` (stages, chunks, schedule) instead of a model.
+then goes through TP / compile / FSDP here in the same relative order as the
+unsplit path, and the caller gets back a ``PipelineParallelSetup`` (stages,
+chunks, schedule) instead of a model.
 
 On provenance: this is the *orchestration* half of torchtitan's
 ``parallelize_hf_transformers``. The other half was three things; the first
@@ -49,9 +50,9 @@ from .activation_checkpoint import apply_ac
 from .compile import apply_compile
 from .context_parallel import apply_cp
 from .expert_parallel import apply_ep
-from .fully_shard.apply import apply_fsdp
+from .fully_shard import apply_fsdp
 from .pipeline_parallel import PipelineParallelSetup, apply_pp, build_pipeline_schedule
-from .tensor_parallel.tp import apply_tp
+from .tensor_parallel import apply_tp
 
 logger = get_logger(__name__)
 
@@ -96,19 +97,22 @@ def parallelize_hf_transformers(
         if activation_checkpoint != "none":
             raise NotImplementedError(
                 "activation checkpointing is not wired through the pp > 1 path: "
-                "it belongs between apply_tp and compile inside apply_pp's "
-                "per-chunk pipeline, which does not accept it yet."
+                "it belongs between apply_tp and compile in the per-chunk "
+                "pipeline below, which does not accept it yet."
             )
         if global_batch_size is None:
             raise ValueError(
                 "pp > 1 needs global_batch_size for microbatch validation; "
                 "the trainer passes cfg.training.global_batch_size."
             )
-        # PP owns the per-chunk application of the other dimensions: each
-        # stage's chunk goes through tp/(compile)/fsdp inside apply_pp, in the
-        # same relative order as below. The dense (dp, cp, tp) ``mesh`` is not
-        # passed down because it does not cover the world under PP; apply_pp
-        # resolves the per-stage views off parallel_dims itself.
+        # apply_pp is PP-only: stage count, split, and the per-stage views.
+        # The per-chunk application of the other dimensions lives here, so
+        # this file is the single owner of the assembly order on both paths:
+        # each stage's chunk goes through tp/(compile)/fsdp in the same
+        # relative order as the unsplit path below. The dense (dp, cp, tp)
+        # view excludes the pp axis, so it covers exactly this stage's
+        # coordinates -- the mesh the per-part apply_* functions would have
+        # been handed had the model never been split.
         stages, model_parts, has_first_stage, has_last_stage = apply_pp(
             model,
             parallel_dims=parallel_dims,
@@ -116,9 +120,19 @@ def parallelize_hf_transformers(
             device=device if device is not None else next(model.parameters()).device,
             global_batch_size=global_batch_size,
             dataset=dataset,
-            compile=compile,
-            compile_config=compile_config,
         )
+        dense_mesh = parallel_dims.spmd_dense_mesh()
+        tp_mesh = parallel_dims.get_optional_mesh("tp")
+        for i, part in enumerate(model_parts):
+            part = apply_tp(part, dense_mesh, cfg)
+            if compile:
+                part = apply_compile(
+                    part, compile_config=compile_config, tp_mesh=tp_mesh
+                )
+            part = apply_fsdp(part, cfg, parallel_dims)
+            model_parts[i] = part
+            # Rebind the stage's submodule in case a transform replaced the chunk.
+            stages[i].submod = part
         return PipelineParallelSetup(
             schedule=build_pipeline_schedule(stages, cfg=cfg),
             stages=stages,

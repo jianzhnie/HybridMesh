@@ -113,18 +113,18 @@ C 类上会把项目**故意删掉**的抽象又拽回来。
 | `models/hf_wrapper.py` | `experiments/transformers_modeling_backend/model.py` 的包装层；上游另有 `models/*/model.py` 各一份 | 0.059 |
 | `models/hf_state_dict_adapter.py` | `experiments/transformers_modeling_backend/state_dict_adapter.py`；hpmesh 更强：读 safetensors index 做 missing/unexpected 严格校验；上游的 `hf_to_titan_moe_state_dict` 转换对因 hpmesh EP swap 直接搬运 HF 权重（无第二 key 布局）而不需要 | — |
 | `parallel/parallelize_hf.py` | `experiments/transformers_modeling_backend/parallelize.py` + 各 `models/*/parallelize.py` | 0.089 |
-| `parallel/tensor_parallel/tp.py` | 各模型 TP plan；上游 `distributed/tensor_parallel.py` 已随 DTensor 后端删除、无后继文件。hpmesh 是**手写 plan realizer**，不是声明式 `_sharding_config` | 0.056 |
+| `parallel/tensor_parallel/tp.py`（+ `apply.py` 入口） | 各模型 TP plan；上游 `distributed/tensor_parallel.py` 已随 DTensor 后端删除、无后继文件。hpmesh 是**手写 plan realizer**，不是声明式 `_sharding_config` | 0.056 |
 | `parallel/expert_parallel/apply.py` + `swap.py` | `experiments/.../moe_replacement.py` + 各模型 EP parallelize；hpmesh 搬运 HF 权重而非重新初始化 | 0.036–0.146 |
 | `parallel/fully_shard/apply.py` | 各 `models/*/parallelize.py` 的 FSDP driver；HF 五部件适配 | 0.155 |
 | `parallel/pipeline_parallel/apply.py` | `distributed/pipeline_parallel.py`；hpmesh 直接消费 HF stage 部件 | 0.130 |
 | `trainer/trainer.py` | `trainer.py`，基本重写 | 0.065 |
 | `config/`（顶层配置包） | `config/configs.py` | 0.189 |
 | `trainer/train.py` | `train.py` | 0.186 |
-| `accelerator/mesh.py` | `distributed/parallel_dims.py` + `trainer.py` 中分散的 mesh 逻辑 | 0.111 |
+| `parallel/parallel_dims.py`（`build_parallel_dims` / `build_mesh` 自 `accelerator/mesh.py` 并入） | `distributed/parallel_dims.py` + `trainer.py` 中分散的 mesh 逻辑 | 0.111 |
 | `models/common/grouped_experts.py` | `models/common/grouped_experts.py` + `models/gpt_oss/moe.py` | 0.119 |
 | `utils/gc.py` | `tools/utils.py` 的 GC helper，去 structured logger | 0.211 |
 
-**注意 `accelerator/mesh.py`**：上游没有单一对应物——mesh 逻辑散在 `distributed/parallel_dims.py`
+**注意 mesh 构建（原 `accelerator/mesh.py`，现并入 `parallel/parallel_dims.py`）**：上游没有单一对应物——mesh 逻辑散在 `distributed/parallel_dims.py`
 和 `trainer.py` 里，不是某个文件的移植。
 
 ## C —— hpmesh 独有（不要对齐上游）
@@ -228,7 +228,7 @@ Ulysses 拒绝（per-head sinks 只走 TP 分片）不适用：hpmesh 尚无 GPT
 **已从 D 移除**（2026-09-24 批 8 移植）：`distributed/compile.py`——四件互相独立的
 能力全部落 `hpmesh/parallel/compile.py::apply_compile`，由
 `config/training.py::CompileConfig`（`training.compile_config`，默认全关）驱动，
-装配顺序不变（AC 之后、FSDP 之前；PP 下每 chunk 经 `apply_pp` 同一函数）：
+装配顺序不变（AC 之后、FSDP 之前；PP 下每 chunk 由 `parallelize_hf` 过同一函数）：
 
 * **逐 block compile**（`per_block=True`）：每个 decoder layer `block.compile(
   backend=..., fullgraph=True)`（`Module.compile` 就地，state-dict 键与 FSDP 包装

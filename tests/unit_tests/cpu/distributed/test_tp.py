@@ -15,6 +15,7 @@ import pytest
 import torch
 import torch.nn as nn
 
+from hpmesh.parallel.tensor_parallel import apply_tp
 from hpmesh.parallel.tensor_parallel.tp import (
     ColwiseLinear,
     ColwiseLinearNoGather,
@@ -22,7 +23,6 @@ from hpmesh.parallel.tensor_parallel.tp import (
     ShardingConfig,
     _match,
     _resolve_plan,
-    apply_tp,
     colwise,
     rowwise,
 )
