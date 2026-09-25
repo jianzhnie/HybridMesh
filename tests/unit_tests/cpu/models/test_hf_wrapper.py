@@ -17,13 +17,13 @@ import pytest
 import torch
 
 from hpmesh.components.loss import IGNORE_INDEX, next_token_targets
-from hpmesh.models.hf_wrapper import (
+from hpmesh.models.hf_factory import (
     _ATTN_IMPLEMENTATION,
-    HFTransformerModel,
     build_model_config,
     build_model_config_for,
     materialize_meta_model,
 )
+from hpmesh.models.hf_wrapper import HFTransformerModel
 from hpmesh.trainer import HybridMeshConfig, TrainingConfig
 
 _HIDDEN = 32
@@ -330,7 +330,7 @@ def test_a_composite_config_carries_the_mask_type_down_to_the_text_stack() -> No
     """
     from transformers import AutoConfig
 
-    from hpmesh.models.hf_wrapper import _unwrap_text_config
+    from hpmesh.models.hf_factory import _unwrap_text_config
 
     for name in ("llava", "gemma3"):
         top = AutoConfig.for_model(name)
@@ -358,7 +358,7 @@ def test_a_composite_without_the_flag_stays_unset() -> None:
     """
     from transformers import AutoConfig
 
-    from hpmesh.models.hf_wrapper import _unwrap_text_config
+    from hpmesh.models.hf_factory import _unwrap_text_config
 
     top = AutoConfig.for_model("llava")
     assert not hasattr(top, "attn_mask_type")

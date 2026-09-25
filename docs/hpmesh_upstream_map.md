@@ -110,7 +110,7 @@ C 类上会把项目**故意删掉**的抽象又拽回来。
 
 | hpmesh | 替代掉的上游 | ratio |
 | --- | --- | --- |
-| `models/hf_wrapper.py` | `experiments/transformers_modeling_backend/model.py` 的包装层；上游另有 `models/*/model.py` 各一份 | 0.059 |
+| `models/hf_wrapper.py`（+ `hf_factory.py` 构建侧） | `experiments/transformers_modeling_backend/model.py` 的包装层；上游另有 `models/*/model.py` 各一份 | 0.059 |
 | `models/hf_state_dict_adapter.py` | `experiments/transformers_modeling_backend/state_dict_adapter.py`；hpmesh 更强：读 safetensors index 做 missing/unexpected 严格校验；上游的 `hf_to_titan_moe_state_dict` 转换对因 hpmesh EP swap 直接搬运 HF 权重（无第二 key 布局）而不需要 | — |
 | `parallel/parallelize_hf.py` | `experiments/transformers_modeling_backend/parallelize.py` + 各 `models/*/parallelize.py` | 0.089 |
 | `parallel/tensor_parallel/tp.py`（+ `apply.py` 入口） | 各模型 TP plan；上游 `distributed/tensor_parallel.py` 已随 DTensor 后端删除、无后继文件。hpmesh 是**手写 plan realizer**，不是声明式 `_sharding_config` | 0.056 |
@@ -275,8 +275,9 @@ stage 0；已被切分占有的 FQN 与重复 FQN loud-raise，缺失模块跳�
 接线），属"能力就位 + 契约测试"；多 stage 真跑待目标设备（torch≥2.12）复跑。
 
 **已从 D 移除**（2026-09-24 批 4 移植）：validation 循环——上游
-`components/validate.py::Validator` 落 `trainer/trainer.py` 的
-`Trainer.validate`/`should_validate`/`_check_validation_feasibility` +
+`components/validate.py::Validator` 落 `trainer/validation.py`
+（`Trainer.validate`/`should_validate`/`_check_validation_feasibility` 的
+薄委托背后）+
 `config/training.py::ValidationConfig`（`training.validation_config`，默认
 None 关闭，关闭时训练循环逐位不变；programmatic-only，同 `ema_config`）。
 语义对齐：eval 模式 + `no_grad`、结束恢复 train；loss 按全局有效 token 数

@@ -49,7 +49,8 @@ from __future__ import annotations
 import torch
 import torch.distributed as dist
 
-from hpmesh.models.hf_wrapper import HFTransformerModel, build_model_config_for
+from hpmesh.models.hf_factory import build_model_config_for
+from hpmesh.models.hf_wrapper import HFTransformerModel
 from hpmesh.parallel.context_parallel import (
     apply_cp,
     shard_batch_for_cp,

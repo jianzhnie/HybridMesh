@@ -32,7 +32,7 @@ from hpmesh.config import (
 from hpmesh.config import (
     MetricsConfig as Config,
 )
-from hpmesh.models.hf_wrapper import num_flops_per_token
+from hpmesh.models.hf_factory import num_flops_per_token
 
 
 class _RecordingLogger(BaseLogger):

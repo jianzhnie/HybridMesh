@@ -416,7 +416,7 @@ step 1 恢复 optimizer、scheduler、dataloader 和 train state 后完成并保
 | `models/common/rope.py` | RoPE 全家族 | A2，同文件 |
 | `models/common/scatter_add.py` | deterministic scatter-add autograd | A2，`ops/scatter_add.py` |
 | `models/common/token_dispatcher.py` | local/all-to-all dispatchers + TorchAO 可选导入适配层；DeepEP/HybridEP 登记缺口（config 期 loud-raise） | A2，同文件 |
-| `models/hf_wrapper.py` | HF config/wrapper/forward | B，transformers backend model |
+| `models/hf_wrapper.py` + `models/hf_factory.py` | wrapper/forward 与 config 构建/类解析/meta materialize/FLOPs | B，transformers backend model |
 | `parallel/activation_checkpoint.py` | full/selective AC | A2，distributed AC |
 | `accelerator/collectives.py` | reductions、timeouts、grad norm | C；上游 collective 仅供意图比较 |
 | `parallel/context_parallel/apply.py` | `apply_cp` | C，独立 HF 编排层 |
@@ -436,7 +436,7 @@ step 1 恢复 optimizer、scheduler、dataloader 和 train state 后完成并保
 | `parallel/tensor_parallel/tp.py` + `apply.py` | HF plan realizer 与 `apply_tp` 入口 | B，各模型 TP plan（上游 `distributed/tensor_parallel.py` 已删除，无后继） |
 | `config/`（顶层配置包） | 全部配置 dataclass | B，`config/configs.py` + 嵌套 Config |
 | `trainer/train.py` | parse/main | B，根 `train.py` |
-| `trainer/trainer.py` | 完整训练生命周期 | B，根 `trainer.py` + `training_engine.py` |
+| `trainer/trainer.py`（+ `validation.py` / `pp_steps.py` 抽出的 validation 与 PP microbatch 段） | 完整训练生命周期 | B，根 `trainer.py` + `training_engine.py` |
 | `utils/batch_invariant.py` | batch-invariant getter/setter | C，上游开关散在 trainer/config |
 | `utils/checkpoint_keys.py` | checkpoint state key 常量 | C |
 | `accelerator/device.py` | 设备发现、backend 选择、厂商谓词、峰值显存查询 | C |

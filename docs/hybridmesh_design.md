@@ -167,8 +167,10 @@ hpmesh/
   __main__.py / __init__.py     入口: python -m hpmesh
   config/       8 模块          model/parallel/optimizer/checkpoint/data/
                                 training/root.py + __init__(全量再导出)
-  trainer/      3 模块          trainer.py / train.py
-  models/      19 模块          hf_wrapper.py + common/{rope,masks,qkv,moe,...}
+  trainer/      5 模块          trainer.py / train.py / validation.py /
+                                pp_steps.py（validation 与 PP microbatch 段）
+  models/      20 模块          hf_wrapper.py + hf_factory.py（config 构建/类解析/
+                                meta materialize/FLOPs）+ common/{rope,masks,qkv,moe,...}
   parallel/    20 模块          tensor_parallel/
                                 fully_shard/ pipeline_parallel/ context_parallel/
                                 expert_parallel/

@@ -144,13 +144,13 @@ from ..models.common.moe import (
     register_moe_load_balancing_hook,
     register_moe_quantile_balancing_hook,
 )
-from ..models.hf_state_dict_adapter import HFTransformerStateDictAdapter
-from ..models.hf_wrapper import (
-    HFTransformerModel,
+from ..models.hf_factory import (
     build_model_config_for,
     materialize_meta_model,
     num_flops_per_token,
 )
+from ..models.hf_state_dict_adapter import HFTransformerStateDictAdapter
+from ..models.hf_wrapper import HFTransformerModel
 from ..parallel.parallel_dims import ParallelDims, build_mesh, build_parallel_dims
 from ..parallel.pipeline_parallel import PipelineParallelSetup
 from ..parallel.tensor_parallel.tp import (
@@ -161,6 +161,8 @@ from ..parallel.tensor_parallel.tp import (
 from ..utils.gc import GarbageCollection
 from ..utils.logger_utils import get_logger
 from ..utils.seed import derive_distinct_seed
+from . import pp_steps
+from . import validation as validation_pass
 
 # Rank-aware: the helper installs a handler on rank 0 only, so a torchrun run
 # logs one line per step instead of one per rank.
@@ -907,45 +909,14 @@ class Trainer:
             logits.float(), labels, reduction="sum", ignore_index=IGNORE_INDEX
         )
 
+    # -- pipeline-parallel steps (bodies live in pp_steps.py) -------------------
+
     def _pp_microbatches(self, batch: Batch | TrainerBatch) -> list[dict[str, Any]]:
         """Split the rank's batch into the schedule's micro-batches.
 
-        Rows are split, never tokens: each micro-batch is collapsed with the
-        same semantics as the non-PP body, so every micro-batch holds whole
-        documents and its loss is the same summed CE. Divisibility is enforced
-        at setup (``apply_pp``), so ``chunk`` never leaves a short final piece.
-
-        The split happens here rather than inside ``preprocess_inputs``, which
-        is a deliberate divergence from the reference: torchtitan's protocol
-        returns a *list* of micro-batches, but hpmesh's PP path row-chunks one
-        batch after the model has already collapsed it, and splitting inside the
-        model would make every other caller of that method carry a batch dim it
-        does not want. Keeping the loop holding rows also means the model's
-        seam has exactly one shape contract.
+        The body lives in ``pp_steps.py``; see there for the contract.
         """
-        raw = batch.labels if isinstance(batch, Batch) else batch["labels"]
-        num_microbatches = self.cfg.parallel.num_pp_microbatches
-        if isinstance(batch, dict):
-            total_rows = raw.shape[0]
-            rows_per_mb = total_rows // num_microbatches
-            mbs = []
-            for index in range(num_microbatches):
-                chunk = {
-                    key: (
-                        value[index * rows_per_mb : (index + 1) * rows_per_mb]
-                        if isinstance(value, torch.Tensor) and value.ndim > 0
-                        else value
-                    )
-                    for key, value in batch.items()
-                }
-                mbs.append(chunk)
-            return mbs
-        input_chunks = batch.input_ids.chunk(num_microbatches, dim=0)
-        label_chunks = batch.labels.chunk(num_microbatches, dim=0)
-        return [
-            Batch(input_ids=ids, labels=labels)
-            for ids, labels in zip(input_chunks, label_chunks, strict=True)
-        ]
+        return pp_steps._pp_microbatches(self, batch)
 
     def _pp_forward_backward_body(
         self,
@@ -955,79 +926,11 @@ class Trainer:
     ) -> torch.Tensor:
         """The pipeline-parallel body: drive the schedule instead of the model.
 
-        Only the first stage is handed the inputs (``arg_mbs``) and only the
-        last the labels (``target_mbs``); intermediate stages receive the
-        previous stage's activations over the schedule's p2p channel. Every
-        stage preprocesses its own micro-batches, because a non-first stage's
-        chunk holds hidden states rather than token ids and only the model knows
-        which of the two it is looking at.
-
-        The schedule's loss is the same summed next-token CE the non-PP body
-        computes (``pipeline_parallel/apply.py:_scalar_loss_fn``), so the return
-        keeps the caller's normalization unchanged: the sum over the last
-        stage's micro-batches. That sum is over the last stage's *own* shard of
-        the sequence, which is why the caller's denominator -- counted before
-        the sequence was cut up -- is the right one.
-
-        ``global_valid_tokens`` is threaded to the schedule through
-        ``loss_kwargs``, where the loss function divides by it before the
-        schedule's backward. The losses the schedule reports are therefore
-        sum/G, and they are multiplied back by G here so the caller keeps
-        receiving the raw sum it normalizes and reports.
-
-        The token count is not taken here: the caller needs it before the
-        micro-batches are cut, and a stage's count would be over its own slice.
+        The body lives in ``pp_steps.py``; see there for the contract.
         """
-        arg_mbs: list[tuple[torch.Tensor, ...]] = []
-        kwarg_mbs: list[dict[str, Any]] = []
-        target_mbs: list[torch.Tensor] | None = [] if self.pp_has_last_stage else None
-        for mb in self._pp_microbatches(batch):
-            inputs, labels, extra_kwargs = self._preprocess({"batch": mb})
-            if self.pp_has_first_stage:
-                arg_mbs.append((inputs,))
-            kwarg_mbs.append(extra_kwargs)
-            if target_mbs is not None:
-                target_mbs.append(labels)
-
-        losses: list[torch.Tensor] | None = [] if self.pp_has_last_stage else None
-        with self._param_context(), spmd_context(self.parallel_dims):
-            # ``_step_microbatches`` is the Torch 2.10-compatible equivalent
-            # of the older public ``step(arg_mbs=..., kwarg_mbs=...)`` seam.
-            # The public API would split the already-split lists as kwargs and
-            # attempts to shard scalar loss kwargs along dimension 0.
-            if hasattr(self.pp_schedule, "_step_microbatches"):
-                self.pp_schedule._hpmesh_global_valid_tokens = global_valid_tokens
-                self.pp_schedule._step_microbatches(
-                    arg_mbs if self.pp_has_first_stage else None,
-                    kwarg_mbs,
-                    target_mbs,
-                    losses,
-                    return_outputs=False,
-                )
-            else:
-                self.pp_schedule.step(
-                    arg_mbs=arg_mbs if self.pp_has_first_stage else None,
-                    kwarg_mbs=kwarg_mbs,
-                    target_mbs=target_mbs,
-                    losses=losses,
-                    loss_kwargs={"global_valid_tokens": global_valid_tokens},
-                    return_outputs=False,
-                )
-
-        if self.pp_has_last_stage:
-            assert losses is not None
-            assert global_valid_tokens is not None
-            # Backward has consumed these losses. Report detached views, then
-            # release the originals and their autograd graphs.
-            detached_losses = [loss.detach() for loss in losses]
-            losses.clear()
-            return torch.sum(torch.stack(detached_losses)) * global_valid_tokens
-        # Not the last stage: there is no loss here, and the caller's own loss
-        # sum must stay a real sum on every rank so the finiteness reduction --
-        # which every rank joins -- sees the same shape everywhere. Finite by
-        # construction, and never logged, because the metrics rank is a
-        # last-stage rank.
-        return self._pp_loss_sentinel
+        return pp_steps._pp_forward_backward_body(
+            self, batch, global_valid_tokens=global_valid_tokens
+        )
 
     def _allreduce_replicated_tp_grads(self) -> None:
         """Sum the gradients of TP-*replicated* parameters across the TP group.
@@ -1396,7 +1299,7 @@ class Trainer:
             "would be garbage.",
         )
 
-    # -- validation ---------------------------------------------------------------
+    # -- validation (bodies live in validation.py) ------------------------------
 
     @staticmethod
     def _check_validation_feasibility(
@@ -1408,208 +1311,34 @@ class Trainer:
     ) -> None:
         """Reject the validation configurations that cannot terminate cleanly.
 
-        Runs at trainer build time, where the real parallel degrees are known
-        (config-level ``__post_init__`` cannot see them: ``dp_shard`` defaults
-        to the derive-me marker ``-1``). Each rejected combination would
-        otherwise fail later and worse:
-
-        * ``steps=-1`` consumes the finite dataset once, so every rank stops
-          when its own shard is exhausted. With DP > 1 the ranks can exhaust at
-          different iterations and hang on the pass's collectives (the token
-          and loss reductions every rank must enter together).
-        * ``steps=-1`` against the synthetic corpus has no exhaustion at all:
-          the random source is infinite, so "one finite pass" never ends.
-        * Pipeline parallelism drives the schedule through a train-shaped seam
-          (the loss is computed and backwarded *inside* the schedule step);
-          there is no eval-only pipeline path to run a validation pass
-          through, so the combination loud-raises rather than silently
-          skipping validation or training on the pass.
+        The body lives in ``validation.py``; see there for the rationale.
         """
-        if pp_enabled:
-            raise NotImplementedError(
-                "validation with pipeline parallelism is not supported: "
-                "hpmesh drives the pipeline schedule through its training "
-                "seam, where the last stage's loss is computed and backwarded "
-                "inside the schedule step. There is no eval-only pipeline "
-                "path; run validation with pipeline_parallel_size=1."
-            )
-        if validation.steps != -1:
-            return
-        if dp_world_size > 1:
-            raise ValueError(
-                "validation.steps=-1 runs one finite pass over the dataset "
-                "(the loader is built with repeat=False). With data-parallel "
-                f"degree > 1 ({dp_world_size}), ranks can exhaust at different "
-                "iterations and hang on the validation collectives. Set "
-                "validation.steps to a positive count so every rank runs the "
-                "same number of batches, or run with data-parallel degree 1."
-            )
-        dataset = (
-            training_dataset if validation.dataset is None else validation.dataset
+        validation_pass._check_validation_feasibility(
+            validation,
+            pp_enabled=pp_enabled,
+            dp_world_size=dp_world_size,
+            training_dataset=training_dataset,
         )
-        if dataset == "random":
-            raise ValueError(
-                "validation.steps=-1 consumes the dataset once, but the "
-                "'random' corpus is an infinite synthetic source that never "
-                "exhausts. Set validation.steps to a positive count, or name a "
-                "finite validation dataset."
-            )
 
     def should_validate(self, step: int) -> bool:
         """Whether a validation pass runs at the end of ``step``.
 
-        Step 1 always validates (a run sees its first eval number immediately,
-        which is the cheap sanity check that the eval path works at all);
-        after that, every ``validation.freq`` steps.
+        The body lives in ``validation.py``; see there for the gating rule.
         """
-        validation = self.cfg.validation
-        return validation is not None and (
-            step == 1 or step % validation.freq == 0
-        )
+        return validation_pass.should_validate(self, step)
 
-    @torch.no_grad()
     def validate(self, step: int) -> None:
         """Run one eval-mode, gradient-free pass and log its loss.
 
-        The reported number is the pass's summed next-token cross-entropy
-        divided by the *global* valid-token count -- the same normalization as
-        the training loss, over the same two meshes (tokens reduced across DP,
-        the loss sum across the dp*cp*tp ``loss`` view), so the eval and train
-        numbers are directly comparable and identical on every rank.
-
-        The pass is a pure observer: the model runs in eval mode (restored to
-        train mode afterwards, even on error), no gradients are computed, no
-        optimizer or scheduler state moves, and ``ntokens_seen`` -- the
-        checkpointed training counter -- is not touched.
-
-        The dataloader is built fresh per pass and closed when the pass ends:
-        it is a temporary read over the corpus, not training state, so it is
-        neither checkpointed nor shared with the training loader. ``steps=-1``
-        reads it to exhaustion (built with repeat=False); a positive ``steps``
-        bounds the pass (built repeating, so the bound is always reachable).
-
-        Two outcomes are loud errors rather than a silently skipped report: a
-        pass that read zero batches (the dataset supplied less than one batch
-        of tokens on this rank, which concat-then-split packing turns into no
-        rows at all), and a pass over zero valid tokens (every label masked),
-        which has no average to report.
+        The body lives in ``validation.py`` (gradient-free via its own
+        ``torch.no_grad``); see there for the reporting contract.
         """
-        validation = self.cfg.validation
-        assert validation is not None, "validate() is gated by should_validate"
-
-        for part in self.model_parts:
-            part.eval()
-        try:
-            self._validate_body(validation, step)
-        finally:
-            for part in self.model_parts:
-                part.train()
+        validation_pass.validate(self, step)
 
     def _validate_body(self, validation: ValidationConfig, step: int) -> None:
-        parallel_dims = self.parallel_dims
-        # The same mesh split as ``train_step``: the token count is taken from
-        # the unsharded batch, so it is summed over the dp axis alone; the loss
-        # is summed over each rank's own slice of the batch, so it is reduced
-        # over the dp*cp*tp ``loss`` view when the sequence is sharded at all.
-        dp_mesh = (
-            None if parallel_dims is None else parallel_dims.get_optional_mesh("dp")
-        )
-        loss_sharded = parallel_dims is not None and (
-            parallel_dims.dp_cp_enabled or parallel_dims.tp_enabled
-        )
-        loss_mesh = (
-            None
-            if parallel_dims is None
-            else (
-                parallel_dims.get_optional_mesh("loss") if loss_sharded else dp_mesh
-            )
-        )
+        """The pass itself; the body lives in ``validation.py``."""
+        validation_pass._validate_body(self, validation, step)
 
-        dp_rank, dp_world_size = self._dp_rank_world_size()
-        batch_size_per_rank = self._batch_size_per_rank(dp_world_size)
-        validation_dataloader = build_dataloader(
-            self.cfg,
-            dp_rank=dp_rank,
-            dp_world_size=dp_world_size,
-            num_tokens_per_batch=batch_size_per_rank * self.cfg.max_seq_len,
-            repeat=validation.steps != -1,
-            dataset=validation.dataset,
-        )
-
-        accumulated_loss: torch.Tensor | None = None
-        total_global_valid_tokens = torch.zeros(
-            (), dtype=torch.int64, device=self.device
-        )
-        num_steps = 0
-        try:
-            data_iterator = iter(validation_dataloader)
-            while validation.steps == -1 or num_steps < validation.steps:
-                try:
-                    batch = next(data_iterator)
-                except (DataLoaderExhausted, StopIteration):
-                    break
-                labels = batch.labels if isinstance(batch, Batch) else batch["labels"]
-                # Throughput accounting only, mirroring ``batch_generator``:
-                # every label the loader produced counts, whether or not it is
-                # predictable. ``ntokens_seen`` is deliberately not touched --
-                # it is the checkpointed *training* counter.
-                self.metrics.add_tokens(labels.numel())
-                # Counted from the unsharded batch, exactly as in training, so
-                # the dp-axis reduction below counts the whole batch once even
-                # when CP later slices the sequence.
-                local_valid_tokens = self._count_valid_tokens(batch)
-                global_valid_tokens = torch.tensor(
-                    local_valid_tokens, dtype=torch.int64, device=self.device
-                )
-                if dp_mesh is not None:
-                    all_reduce(global_valid_tokens, group=dp_mesh.get_group())
-                if isinstance(batch, dict):
-                    # ``num_valid_tokens`` is the trainer's bookkeeping; a
-                    # plain int among tensors would be splatted into the model
-                    # forward as a kwarg.
-                    batch.pop("num_valid_tokens", None)
-                inputs, labels, extra_kwargs = self._example_model.preprocess_inputs(
-                    self._to_device(batch),
-                    parallel_dims=self.parallel_dims,
-                    parallelism=self.cfg.parallel,
-                    max_context_length=self.cfg.max_seq_len,
-                )
-                with self._param_context(), spmd_context(self.parallel_dims):
-                    logits = self._example_model(inputs, **extra_kwargs)
-                    loss_sum = self._loss_sum(logits, labels)
-                if accumulated_loss is None:
-                    accumulated_loss = loss_sum.clone()
-                else:
-                    accumulated_loss.add_(loss_sum)
-                total_global_valid_tokens.add_(global_valid_tokens)
-                num_steps += 1
-        finally:
-            # Releases the Grain prefetch thread; a no-op for loaders without
-            # one. The loader is temporary, so nothing else holds it open.
-            validation_dataloader.close()
-
-        if accumulated_loss is None:
-            raise ValueError(
-                "Validation ran zero batches on this rank. This happens when "
-                "the validation dataset supplies fewer than one batch of "
-                "tokens on this rank, because concat-then-split packing drops "
-                "partially filled batches. Decrease the per-rank batch size or "
-                "use a larger validation dataset."
-            )
-        num_global_valid_tokens = int(total_global_valid_tokens.item())
-        if num_global_valid_tokens == 0:
-            raise ValueError(
-                "Validation ran on zero valid tokens; cannot compute an "
-                "average validation loss. Ensure the validation batches "
-                "contain unmasked labels."
-            )
-        if loss_mesh is not None:
-            global_loss_sum = accumulated_loss.clone()
-            all_reduce(global_loss_sum, group=loss_mesh.get_group())
-        else:
-            global_loss_sum = accumulated_loss
-        global_avg_loss = float(global_loss_sum) / num_global_valid_tokens
-        self.metrics.log_validation(loss=global_avg_loss, step=step)
 
     # -- the loop ---------------------------------------------------------------
 

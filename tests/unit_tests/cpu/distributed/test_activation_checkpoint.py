@@ -41,7 +41,8 @@ from hpmesh.config import (
     SelectiveACConfig,
     TrainingConfig,
 )
-from hpmesh.models.hf_wrapper import HFTransformerModel, build_model_config
+from hpmesh.models.hf_factory import build_model_config
+from hpmesh.models.hf_wrapper import HFTransformerModel
 from hpmesh.parallel.activation_checkpoint import (
     VALID_AC_MODES,
     _get_default_save_ops,

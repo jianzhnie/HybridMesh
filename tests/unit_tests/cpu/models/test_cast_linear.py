@@ -20,7 +20,8 @@ from hpmesh.models.common.cast_linear import (
     CastLinear,
     to_cast_linear,
 )
-from hpmesh.models.hf_wrapper import HFTransformerModel, build_model_config
+from hpmesh.models.hf_factory import build_model_config
+from hpmesh.models.hf_wrapper import HFTransformerModel
 
 
 def _tiny_qwen3_config(compute_dtype: str | None = None):

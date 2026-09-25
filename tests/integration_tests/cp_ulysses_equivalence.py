@@ -47,7 +47,8 @@ from torch.distributed.device_mesh import init_device_mesh
 from torch.nn.attention.flex_attention import create_block_mask
 
 from hpmesh.models.common.masks import get_causal_mask_mod
-from hpmesh.models.hf_wrapper import HFTransformerModel, build_model_config_for
+from hpmesh.models.hf_factory import build_model_config_for
+from hpmesh.models.hf_wrapper import HFTransformerModel
 from hpmesh.parallel.context_parallel import (
     apply_cp,
     shard_attention_mask_for_cp,

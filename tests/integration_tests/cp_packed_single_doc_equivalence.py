@@ -32,7 +32,8 @@ import torch
 import torch.distributed as dist
 from torch.distributed.device_mesh import init_device_mesh
 
-from hpmesh.models.hf_wrapper import HFTransformerModel, build_model_config_for
+from hpmesh.models.hf_factory import build_model_config_for
+from hpmesh.models.hf_wrapper import HFTransformerModel
 from hpmesh.parallel.context_parallel import apply_cp, shard_batch_for_cp
 from hpmesh.trainer import (
     HybridMeshConfig,

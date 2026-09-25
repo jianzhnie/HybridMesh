@@ -59,7 +59,8 @@ from hpmesh.datasets.random_data import (
     RandomTokenSource,
     batch_iterator,
 )
-from hpmesh.models.hf_wrapper import HFTransformerModel, build_model_config
+from hpmesh.models.hf_factory import build_model_config
+from hpmesh.models.hf_wrapper import HFTransformerModel
 from hpmesh.trainer.trainer import Trainer
 
 
