@@ -85,7 +85,7 @@ C 类上会把项目**故意删掉**的抽象又拽回来。
 | `datasets/text/text.py` | `hf_datasets/text_datasets.py` | 0.767 | 路径与 processor 构造契约已适配 |
 | `datasets/types.py` | `components/data/types.py` | 0.506 | 去 Configurable 后重塑 build context 与 iteration policy |
 | `models/common/aux_loss.py` | `models/common/aux_loss.py` | 0.682 | |
-| `models/common/dist_gemm.py` | `models/common/dist_gemm.py` | 0.527 | |
+| `models/common/dist_gemm.py` | `models/common/async_linear.py`（9e159aed7 自 dist_gemm.py 改名） | 0.527 | |
 | `models/common/feed_forward.py` | `models/common/feed_forward.py` | 0.560 | **曾写完又被退**，不要在没有明确指令时重新引入 |
 | `models/common/linear.py` | `models/common/linear.py` | 0.620 | |
 | `models/common/masks.py` | `models/common/attention.py` | 0.380 | 拆出了 mask 部分 |
@@ -100,7 +100,7 @@ C 类上会把项目**故意删掉**的抽象又拽回来。
 | `parallel/fully_shard/fsdp.py` | `distributed/fsdp.py` | 0.815 | 多轴 mesh 重建、HF decoder 与 MoE placement 是 hpmesh 适配 |
 | `parallel/parallel_dims.py` | `distributed/parallel_dims.py` | 0.772 | hpmesh 扩展 world/loss/sparse mesh 视图，不能按旧 A1 结构覆盖 |
 | `parallel/pipeline_parallel/pipeline.py` | `experiments/transformers_modeling_backend/pipeline.py` | 0.686 | `None` → `nn.Identity`；每 stage 追加 `rotary_emb`；stage 内 layer 保留原始索引（不重新编号），避免多 stage state-dict FQN 冲突 |
-| `parallel/tensor_parallel/linear.py` | `models/common/dist_gemm.py`（原 `distributed/linear.py`，上游 e72fd863d 搬迁并改名 `Async*`，数学不变） | 0.511 | 保留 fused/fallback 数学意图，但运行时上下文和 autograd 形状已适配 hpmesh |
+| `parallel/tensor_parallel/linear.py` | `models/common/async_linear.py`（原 `distributed/linear.py` → e72fd863d 搬入 dist_gemm.py → 9e159aed7 改名，数学不变） | 0.511 | 保留 fused/fallback 数学意图，但运行时上下文和 autograd 形状已适配 hpmesh |
 | `accelerator/collectives.py` | `distributed/utils.py`（vendored `set_pg_timeouts` 与 EP 感知 `clip_grad_norm_` 两个符号） | 部分 | 2026-09-24 从 `parallel/` 迁入 `accelerator/`；EP 裁剪按物理本地 expert 参数适配（免 DTensor "ep" 轴断言）；同日复核后由 C 改标 A2 |
 
 ## B —— 适配层（读意图，不要抄形状）
@@ -383,12 +383,22 @@ hpmesh 侧是 `datasets/multimodal/mm_image.py`），本表的 hpmesh 列是唯�
 - 本文最近一次人工审计工作树：hpmesh `5749d19`（+本轮改动），TorchTitan `b64103072`；
   详细验证记录见
   `hpmesh_torchtitan_alignment_audit_2026-09-23.md`（不在当前工作区）。
+- 2026-09-26 增量审计：基线推进至 TorchTitan `9e159aed7`（审计时上游 HEAD 附近），
+  hpmesh 工作树 HEAD `1a955d7`（+本轮文档改动）。`b64103072..9e159aed7` 间三个
+  提交的处理结论：
+
+  | 提交 | 结论 |
+  |---|---|
+  | `9e159aed7` TP projection 后端重构（#4704） | **语义已对齐，无代码动作**。通信角色不变量在 hpmesh 已成立：column 拥有 input collective（`ColwiseLinear` 融合 all-gather）、row 拥有 output collective（`RowwiseLinear` 融合 reduce-scatter）；共享输入多投影在父模块一次性 gather（`_GatherSequenceFirst` + `ColwiseLinearNoGather`，同上游"父模块持有、子投影为 plain Linear"语义）。`_linear()` seam 服务 LoRA/量化（hpmesh 裁剪面，不移植）；`PartialBiasRowwiseLinear` 上游删除并并入 `RowParallelLinear`，hpmesh 同名类的 bias I→P 语义本就一致，保留（仅测试使用）。AsyncTensorParallelTransform 重写是上游 Module-registry 面的模块替换实现，hpmesh async TP 走 inductor `_micro_pipeline_tp` + symm-mem，机制不受影响；"转换后（LoRA/量化）投影不支持 async TP"的约束在 hpmesh 无对应面（两者均裁剪），不登记守卫。上游 `dist_gemm.py` 改名 `async_linear.py`，本文映射随之更新。 |
+  | `847f98a6f` RegionAC AllToAll remat regions（#4837） | **随 RegionAC/DeepEP 缺口锁定，解锁条件不变**（torch_remat + CUDA deep_ep 核）。TokenDispatcher 变 Module 是 remat region 机制的载体，hpmesh 无消费方。可独立移植的语义——dispatch/combine 恒 SAVE——经核对**已在 hpmesh 成立**：selective AC 的 save set 含 `_c10d_functional.all_to_all_single`（`activation_checkpoint.py` 的 `comm_ops`），即 hpmesh AllToAllTokenDispatcher 用的原语，无需动作。 |
+  | `090c0c931` graph_trainer none AC MemoryPolicy（#4476） | **实验目录，不适用**。`experiments/graph_trainer/` 无 hpmesh 对应面；等义语义 hpmesh 已有（`activation_checkpoint_mode='none'`）。 |
   上一轮审计（hpmesh `8a2f269` × TorchTitan `c6e416bbd`）引用的
   `hpmesh_torchtitan_alignment_audit_2026-09-21.md` 不在当前工作区。
-- 检查后续漂移：`git -C <torchtitan> log b64103072..HEAD -- torchtitan/`。
+- 检查后续漂移：`git -C <torchtitan> log 9e159aed7..HEAD -- torchtitan/`。
 - 2026-09-23 映射修订：上游 `distributed/linear.py` 已删除、内容迁入
   `models/common/dist_gemm.py`（改名 `AsyncAllGatherLinear`/`AsyncLinearReduceScatter`，
-  数学不变），此后上游 dist_gemm.py 同时对应 hpmesh 的 `parallel/tensor_parallel/linear.py`
+  数学不变；上游 9e159aed7 再把该文件改名 `async_linear.py`），此后上游
+  async_linear.py 同时对应 hpmesh 的 `parallel/tensor_parallel/linear.py`
   （autograd 原语）与 `models/common/dist_gemm.py`（模块层），一对二；
   `distributed/tensor_parallel.py` 已随 DTensor 后端整体删除、无后继。
 - 早前基线：hpmesh `8a2f269`，TorchTitan `c6e416bbd`。
