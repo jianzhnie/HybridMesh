@@ -104,7 +104,7 @@ def _make_trainer(
         log_validation=lambda loss, step: logged.update(loss=loss, step=step),
     )
     monkeypatch.setattr(
-        "hpmesh.trainer.trainer.build_dataloader", lambda *a, **k: loader
+        "hpmesh.trainer.validation.build_dataloader", lambda *a, **k: loader
     )
     return trainer, logged
 

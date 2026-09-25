@@ -46,7 +46,8 @@ from hpmesh.components.loss import IGNORE_INDEX, cross_entropy_loss
 from hpmesh.components.metrics import get_metrics_rank
 from hpmesh.config import MetricsConfig
 from hpmesh.datasets.random_data import RandomTokenSource, batch_iterator
-from hpmesh.models.hf_wrapper import HFTransformerModel, build_model_config_for
+from hpmesh.models.hf_factory import build_model_config_for
+from hpmesh.models.hf_wrapper import HFTransformerModel
 from hpmesh.trainer import (
     HybridMeshConfig,
     ModelConfig,

@@ -23,7 +23,8 @@ import torch
 import torch.nn as nn
 from torch.nn import ModuleDict, ModuleList
 
-from hpmesh.models.hf_wrapper import HFTransformerModel, build_model_config
+from hpmesh.models.hf_factory import build_model_config
+from hpmesh.models.hf_wrapper import HFTransformerModel
 from hpmesh.parallel.fully_shard import apply
 from hpmesh.parallel.fully_shard.fsdp import iter_transformer_layers
 

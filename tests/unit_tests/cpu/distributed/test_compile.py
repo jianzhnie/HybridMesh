@@ -41,7 +41,8 @@ from hpmesh.config import (
 try:
     from torch._dynamo import OptimizedModule
 
-    from hpmesh.models.hf_wrapper import HFTransformerModel, build_model_config
+    from hpmesh.models.hf_factory import build_model_config
+    from hpmesh.models.hf_wrapper import HFTransformerModel
     from hpmesh.parallel import compile as compile_mod
     from hpmesh.parallel.compile import apply_compile, maybe_regional_inductor
 

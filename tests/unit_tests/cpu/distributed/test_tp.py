@@ -115,7 +115,8 @@ def test_a_wrapper_tp_plan_matches_the_modules_it_exposes() -> None:
 
     Checked on the real wrapper so the path spelling is the real one.
     """
-    from hpmesh.models.hf_wrapper import HFTransformerModel, build_model_config
+    from hpmesh.models.hf_factory import build_model_config
+    from hpmesh.models.hf_wrapper import HFTransformerModel
 
     config = build_model_config(
         "llama",
@@ -160,7 +161,8 @@ def test_qwen3_plan_resolves_rather_than_raising_on_its_qk_norms() -> None:
     ``Trainer._allreduce_replicated_tp_grads``), while the projections still
     resolve to real realizers.
     """
-    from hpmesh.models.hf_wrapper import HFTransformerModel, build_model_config
+    from hpmesh.models.hf_factory import build_model_config
+    from hpmesh.models.hf_wrapper import HFTransformerModel
 
     config = build_model_config(
         "qwen3",

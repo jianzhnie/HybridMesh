@@ -15,7 +15,8 @@ import torch.distributed as dist
 import torch.nn as nn
 from torch.distributed.device_mesh import init_device_mesh
 
-from hpmesh.models.hf_wrapper import HFTransformerModel, build_model_config
+from hpmesh.models.hf_factory import build_model_config
+from hpmesh.models.hf_wrapper import HFTransformerModel
 from hpmesh.parallel.parallel_dims import ParallelDims
 from hpmesh.parallel.pipeline_parallel.apply import (
     _prepend_first_stage_modules,
