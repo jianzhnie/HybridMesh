@@ -148,6 +148,7 @@ from ..models.hf_factory import (
 )
 from ..models.hf_state_dict_adapter import HFTransformerStateDictAdapter
 from ..models.hf_wrapper import HFTransformerModel
+from ..parallel import matrix
 from ..parallel.parallel_dims import ParallelDims, build_mesh, build_parallel_dims
 from ..parallel.pipeline_parallel import PipelineParallelSetup
 from ..parallel.tensor_parallel.tp import (
@@ -322,13 +323,7 @@ class Trainer:
             and self.parallel_dims.ep_enabled
             and cfg.checkpoint.enable
         ):
-            raise NotImplementedError(
-                f"expert_parallel_size={self.parallel_dims.ep} with checkpointing "
-                "is not supported: expert weights are rank-heterogeneous plain "
-                "tensors and the current checkpoint backends treat them as "
-                "replicated. Disable checkpointing until EP-aware expert state "
-                "serialization is implemented."
-            )
+            matrix.ep_checkpoint(self.parallel_dims.ep)
         # Chunked loss + PP is rejected up front: under PP the last stage's
         # loss is computed inside the schedule
         # (``pipeline_parallel/apply.py:_scalar_loss_fn``), which receives logits
@@ -341,12 +336,8 @@ class Trainer:
             and self.parallel_dims is not None
             and self.parallel_dims.pp_enabled
         ):
-            raise NotImplementedError(
-                f"chunked_loss_num_chunks={self._chunked_loss_num_chunks} with "
-                f"pipeline_parallel_size={self.parallel_dims.pp} is not "
-                "supported: the pipeline last stage's loss runs inside the "
-                "schedule on materialized logits. Run chunked loss without "
-                "pipeline parallelism."
+            matrix.chunked_loss_pp(
+                self._chunked_loss_num_chunks, self.parallel_dims.pp
             )
         hf_model_config = build_model_config_for(cfg)
         load_hf_weights = bool(

@@ -44,9 +44,9 @@ from hpmesh.config import (
     ParallelConfig,
     SelectiveACConfig,
 )
-from hpmesh.errors import UnsupportedCombinationError
 
 from ..utils.logger_utils import get_logger
+from . import matrix
 from .activation_checkpoint import apply_ac
 from .compile import apply_compile
 from .context_parallel import apply_cp
@@ -96,11 +96,7 @@ def parallelize_hf_transformers(
     """
     if parallel_dims is not None and parallel_dims.pp_enabled:
         if activation_checkpoint != "none":
-            raise UnsupportedCombinationError(
-                "activation checkpointing is not wired through the pp > 1 path: "
-                "it belongs between apply_tp and compile in the per-chunk "
-                "pipeline below, which does not accept it yet."
-            )
+            matrix.pp_activation_checkpoint()
         if global_batch_size is None:
             raise ValueError(
                 "pp > 1 needs global_batch_size for microbatch validation; "

@@ -173,7 +173,7 @@ import trainer 或读取全局 run config；跨 models/parallel 的依赖必须�
 引擎层（TP/CP fused kernel、FSDP、`spmd_context`、checkpoint 的 PG 生命周期）直连
 `torch.distributed` 与 `_functional_collectives` 等私有 API。
 
-目录结构（110 个 Python 模块，约 28.0k 行；2026-09-25 批 6 终稿 + 能力注册表实测）：
+目录结构（111 个 Python 模块，约 28.2k 行；2026-09-25 终稿实测）：
 
 ```
 hpmesh/
@@ -186,10 +186,10 @@ hpmesh/
   models/      22 模块          hf_wrapper.py + hf_factory.py（config 构建/类解析/
                                 meta materialize/FLOPs）+ common/{rope,masks,qkv,
                                 moe/routers/balancing,...}
-  parallel/    24 模块          tensor_parallel/(tp+apply+linear)
+  parallel/    25 模块          tensor_parallel/(tp+apply+linear)
                                 fully_shard/ pipeline_parallel/ context_parallel/
                                 expert_parallel/(swap+probe+convert)
-                                activation_checkpoint.py compile.py
+                                activation_checkpoint.py compile.py matrix.py
                                 parallel_dims.py parallelize_hf.py
   accelerator/  8 模块          device.py（设备发现/backend 选择）
                                 capabilities.py（能力注册表）
@@ -248,6 +248,27 @@ torch 版本/环境探测（`hasattr` 私有 knob、守卫 import）集中于单
 device.py 本身就是设备注册表）；DTensor/flex_attention/spmd_types 是无回退
 硬 import，没有可探测的降级路径；`linear.py` 的 functional-collectives
 改名回退是版本兼容 shim，不是守卫。
+
+## 3.3 组合矩阵单一来源（parallel/matrix.py）
+
+"哪些组合支持/拒绝"只有一份答案：`hpmesh/parallel/matrix.py` 的声明式条目
+（`ENTRIES`）。每行 = 组合名 / 判定（异常类型）/ 理由与解锁条件 / 判定阶段 /
+守卫位置。三个阶段：
+
+* **config**：配置期可判（tp×ep×cp、deepep/hybridep、dispatcher@ep=1、ptrr、
+  ulysses×load balancer、sequence_parallel、region AC、memory_budget×compile、
+  cp 整除 seq_len、async_tp×{compile,tp}）。条目自带谓词与文案，
+  `config/*` 的 `__post_init__` 在原位调用（首错顺序不变）；
+  `check_config/check_training/check_root` 供一致性测试与文档全量重放。
+* **assembly**：需模型/运行时信息（PP×AC、PP×validation、EP×checkpoint、
+  chunked×PP、pp×{cp,ep,dataset,tying}、shared-expert×tp、quantile@ep=1 等）。
+  触发条件留在守卫点，判定（类型+文案）由条目 `reject` 给出，双写不可能。
+* **probe**：需 HF 布局（GPT-OSS、group_limited_greedy、router bias、
+  shared_expert_gate、quantile×softmax/group、shared-expert×tp×ep）。同上。
+
+字段值校验（sizes、allowed 值域）不是组合知识，留在各 config；能力探测
+（torch knob）在 §3.2 注册表。`parallel/__init__` 为 PEP 562 懒导出，正是
+为了让 config 层能读 matrix 子模块而不拖入引擎层。
 
 ## 4. 核心契约（三条缝）
 
@@ -521,7 +542,8 @@ vocab-parallel embedding 的全局 `padding_idx` 越界/梯度抑制（上游 #4
 `ntokens_seen` 在 CP/TP>1 下虚高 cp×tp 倍、HSDP 下专家分片度误选 `Shard(1)`（上游
 4b5023b80 同源）。
 
-剩余边界（均为 loud-raise，不静默错）：
+剩余边界（均为 loud-raise，不静默错；判定的单一来源是 §3.3 组合矩阵
+`parallel/matrix.py`，下列条目与矩阵行一一对应）：
 
 1. pp+cp / pp+ep 组合未接线；PP+activation checkpoint、PP+chunked loss 与 tied
    embeddings 的 PP 均明确拒绝；PP × validation 同样构造期拒绝（无 eval-only

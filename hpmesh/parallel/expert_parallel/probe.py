@@ -79,10 +79,9 @@ from typing import NamedTuple
 import torch
 import torch.nn as nn
 
-from hpmesh.errors import UnsupportedCombinationError
-
 from ...models.common.moe import MOE_LAYER_ATTRS
 from ...utils.logger_utils import get_logger
+from .. import matrix
 
 logger = get_logger(__name__)
 
@@ -150,14 +149,7 @@ def _fused_experts_of(block: nn.Module) -> _FusedExperts | None:
     if gate_up.shape[0] != down.shape[0]:
         return None
     if hasattr(experts, "gate_up_proj_bias") or hasattr(experts, "down_proj_bias"):
-        raise UnsupportedCombinationError(
-            f"{type(experts).__name__} carries per-expert bias vectors, which "
-            "hpmesh's GroupedExperts has no slot for. Only GPT-OSS has them, "
-            "and it differs further: its gate_up_proj is transposed to "
-            "(E, D, 2F) and its activation is a hardcoded clamped sigmoid-GLU "
-            "rather than a module. Support needs a bias-bearing expert module "
-            "with its own activation seam, not a wider copy here."
-        )
+        matrix.gpt_oss_layout(experts)
     num_experts, double_hidden, dim = gate_up.shape
     # down_proj is (E, D, F) with the *same* D: the token dim must agree on both
     # sides. Its trailing dim is F, which equals ``double_hidden / 2`` only for
@@ -368,13 +360,7 @@ def _read_expert_groups(
     if topk_method == "greedy":
         return None, None
     if _ignores_norm_topk_prob(block, router):
-        raise UnsupportedCombinationError(
-            "DeepSeek-V2's group_limited_greedy scores a group by its single "
-            "best expert (max); the implemented rule sums the group's top-2 "
-            "(DeepSeek-V3/GLM4). Routing this checkpoint with that rule picks "
-            "different experts, so refusing is the point -- add a group-scoring "
-            "option to TokenChoiceTopKRouter to support it."
-        )
+        matrix.group_limited_greedy()
     return num_groups, _read_int_attr(block, router, "topk_group")
 
 

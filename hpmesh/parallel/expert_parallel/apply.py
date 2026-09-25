@@ -6,9 +6,9 @@ import torch.distributed as dist
 import torch.nn as nn
 
 from hpmesh.config import ParallelConfig
-from hpmesh.errors import UnsupportedCombinationError
 
 from ...utils.logger_utils import get_logger
+from .. import matrix
 from .swap import swap_hf_moe_blocks
 
 logger = get_logger(__name__)
@@ -34,11 +34,7 @@ def apply_ep(
     """
     if cfg.ep == 1:
         if cfg.moe_quantile_balancing:
-            raise UnsupportedCombinationError(
-                "moe_quantile_balancing is installed by the EP swap, which "
-                "ep=1 never runs -- there is no hpmesh MoE to balance. Run "
-                "with ep > 1 to use it."
-            )
+            matrix.quantile_requires_ep()
         return model
 
     if ep_group is None or ep_group.size() != cfg.ep:

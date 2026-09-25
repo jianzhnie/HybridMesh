@@ -14,7 +14,7 @@ from __future__ import annotations
 import torch
 
 from hpmesh.config import ValidationConfig
-from hpmesh.errors import UnsupportedCombinationError
+from hpmesh.parallel import matrix
 
 from ..accelerator.dist import all_reduce
 from ..accelerator.spmd_context import spmd_context
@@ -50,34 +50,16 @@ def _check_validation_feasibility(
           skipping validation or training on the pass.
         """
     if pp_enabled:
-        raise UnsupportedCombinationError(
-            "validation with pipeline parallelism is not supported: "
-            "hpmesh drives the pipeline schedule through its training "
-            "seam, where the last stage's loss is computed and backwarded "
-            "inside the schedule step. There is no eval-only pipeline "
-            "path; run validation with pipeline_parallel_size=1."
-        )
+        matrix.pp_validation()
     if validation.steps != -1:
         return
     if dp_world_size > 1:
-        raise ValueError(
-            "validation.steps=-1 runs one finite pass over the dataset "
-            "(the loader is built with repeat=False). With data-parallel "
-            f"degree > 1 ({dp_world_size}), ranks can exhaust at different "
-            "iterations and hang on the validation collectives. Set "
-            "validation.steps to a positive count so every rank runs the "
-            "same number of batches, or run with data-parallel degree 1."
-        )
+        matrix.validation_once_requires_dp1(dp_world_size)
     dataset = (
         training_dataset if validation.dataset is None else validation.dataset
     )
     if dataset == "random":
-        raise ValueError(
-            "validation.steps=-1 consumes the dataset once, but the "
-            "'random' corpus is an infinite synthetic source that never "
-            "exhausts. Set validation.steps to a positive count, or name a "
-            "finite validation dataset."
-        )
+        matrix.validation_once_requires_finite_corpus()
 
 def should_validate(self, step: int) -> bool:
     """Whether a validation pass runs at the end of ``step``.
