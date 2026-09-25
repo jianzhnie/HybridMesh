@@ -13,7 +13,8 @@ authors = [{ name = "jianzhnie" }]
 keywords = ["distributed-training", "pytorch", "fsdp", "tensor-parallel", "pipeline-parallel", "device-mesh"]
 dependencies = [
     # The floor is set by `torch.distributed.fsdp.DataParallelMeshDims`, which
-    # parallel/fsdp.py imports at module scope and which first shipped in 2.12.
+    # parallel/fully_shard/fsdp.py imports at module scope and which first
+    # shipped in 2.12.
     # 2.11 has no `dp_mesh_dims` argument on `fully_shard` at all, so there is
     # no shim that would let the package run on it.
     # Caveat this line cannot express: `GroupedExperts(use_grouped_mm=True)`
@@ -30,7 +31,8 @@ dependencies = [
     # Direct import in utils/logger_utils.py (reached from trainer/config.py) --
     # undeclared until now, and pulled in only transitively by transformers.
     "colorama>=0.4",
-    # Used by the SPMD type-checker and by the mesh helpers in utils/spmd_context.py.
+    # Used by the SPMD type-checker and by the mesh helpers in
+    # accelerator/spmd_context.py.
     # Pinned exactly the way torchtitan pins it -- the API is still moving.
     "spmd_types==0.2.5",
     # The dataset graph in datasets/ is built on Grain. Pinned exactly, the way
@@ -53,6 +55,9 @@ dependencies = [
     "einops",
     "torchvision",
     "requests",
+    # Direct import in datasets/ (dataset, packing, text, multimodal) and
+    # accelerator/dist.py -- previously pulled in only transitively.
+    "numpy",
 ]
 
 [project.optional-dependencies]

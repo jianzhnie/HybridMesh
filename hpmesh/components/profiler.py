@@ -32,8 +32,8 @@ Departures from torchtitan, each a subtraction or a device-portability fix:
   ``cuda`` or ``cpu``; there is no third case to ask about.
 
 * **Memory history is recorded through the device module, not ``torch``.** See
-  ``utils/monitoring.record_memory_history`` -- torchtitan's non-CUDA branch
-  calls ``torch.memory``, which does not exist.
+  ``accelerator/monitoring.record_memory_history`` -- torchtitan's non-CUDA
+  branch calls ``torch.memory``, which does not exist.
 
 One addition: the rank comes from ``utils/logger_utils``, so a single-process
 run has a rank without a process group, the same way metrics does it.

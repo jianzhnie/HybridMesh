@@ -31,7 +31,7 @@ Departures from torchtitan, all subtractions:
   set to is a branch nothing can exercise.
 
 * **Colour is vetoed by the terminal, not only by the config.** See
-  ``utils/monitoring.colors_enabled``.
+  ``accelerator/monitoring.colors_enabled``.
 
 * **MFU is suppressed when the device is unknown**, rather than assuming A100
   peak. A ratio measured against the wrong denominator is worse than no ratio,
