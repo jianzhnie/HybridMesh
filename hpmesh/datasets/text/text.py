@@ -38,6 +38,7 @@ __all__ = [
     "TextProcessor",
     "make_local_jsonl",
     "make_local_jsonl_sft",
+    "make_local_jsonl_sft_multiturn",
 ]
 
 
@@ -103,15 +104,27 @@ def _require_token_prefix(full_tokens: list[int], prompt_tokens: list[int]) -> N
 
 
 class ChatProcessor(SampleProcessor):
-    """Tokenizes one single-turn chat sample and masks prompt labels."""
+    """Tokenizes chat samples and masks labels outside assistant responses.
+
+    Two mutually exclusive paths, chosen at construction. ``renderer=None``
+    (the default) is the single-turn chat-template path: the prompt/response
+    boundary is located by prefix re-tokenization, and the tokenizer must
+    have an EOS id. A ``renderers`` renderer switches to the multi-turn
+    path: the renderer owns the token sequence and the per-token loss mask
+    (every assistant turn supervised, prompts and non-content tokens
+    masked), so no EOS inference or prefix property is needed. A renderer
+    and the template path never combine -- the renderer replaces the
+    template render entirely.
+    """
 
     def __init__(
         self,
         *,
         context: DatasetBuildContext,
         messages_fn: Callable[[dict[str, Any]], list[dict[str, str]]],
+        renderer: Any | None = None,
     ) -> None:
-        if context.tokenizer.eos_id is None:
+        if renderer is None and context.tokenizer.eos_id is None:
             raise ValueError(
                 "Tokenizer does not have an eos_id set. "
                 "ChatProcessor requires a tokenizer with a valid EOS token."
@@ -120,14 +133,15 @@ class ChatProcessor(SampleProcessor):
         self._eos_id = context.tokenizer.eos_id
         self._max_context_length = context.max_context_length
         self._messages_fn = messages_fn
+        self._renderer = renderer
         self._logged_first_sample = False
 
     @staticmethod
     def _validate_messages(messages: list[dict[str, str]]) -> None:
         """Validate that messages are a single-turn [user, assistant] pair."""
-        # TODO(data-sft-multiturn): Multi-turn needs per-turn spans that survive
-        # templates which rewrite earlier turns, so prefix re-rendering is not
-        # enough. See the RFC in #3304 and the implementation in #2769.
+        # Multi-turn conversations go through the renderer path instead: the
+        # per-turn spans it computes survive templates that rewrite earlier
+        # turns, which prefix re-rendering cannot.
         if len(messages) != 2:
             raise ValueError(
                 f"Expected single-turn [user, assistant], got {len(messages)} messages"
@@ -196,10 +210,58 @@ class ChatProcessor(SampleProcessor):
             labels=labels,
         )
 
+    def _tokenize_with_renderer(self, messages: list[dict[str, str]]):
+        """Tokenize a multi-turn conversation through the renderer.
+
+        Semantics (kept from upstream): ``build_training_sample`` with
+        ``ensure_final_stop=True`` renders the whole conversation and
+        guarantees a terminal stop token; the returned ``loss_mask`` marks
+        the tokens the model is trained on (assistant content), and it is
+        shifted with the labels because label ``j`` predicts token
+        ``j + 1``.
+        """
+        from renderers import build_training_sample
+
+        if not messages or messages[-1]["role"] != "assistant":
+            raise ValueError("Chat samples must end with an assistant message.")
+        # TODO(data-sft-supervision): Support per-turn loss weighting.
+        rendered = build_training_sample(
+            self._renderer, messages, ensure_final_stop=True
+        )
+        if rendered.multi_modal_data is not None:
+            raise ValueError("ChatProcessor supports text-only samples.")
+
+        if not self._logged_first_sample:
+            full_text = self._tokenizer.decode(
+                list(rendered.token_ids), skip_special_tokens=False
+            )
+            logger.info(f"[ChatProcessor] First sample full:\n{full_text}")
+            self._logged_first_sample = True
+
+        # TODO(data-sft-overflow): Consider truncating oversized examples instead.
+        # Causal loss remains valid for the retained response prefix.
+        # Drop oversized examples rather than truncating.
+        if len(rendered.token_ids) - 1 > self._max_context_length:
+            logger.debug(
+                "Dropping sample: token count exceeds "
+                f"max_context_length={self._max_context_length}"
+            )
+            return None
+
+        tokens = np.asarray(rendered.token_ids, dtype=np.int64)
+        labels = tokens[1:].copy()
+        labels[~np.asarray(rendered.loss_mask[1:], dtype=bool)] = IGNORE_INDEX
+        return TextSequence(
+            input_ids=tokens[:-1],
+            labels=labels,
+        )
+
     def __call__(
         self, sample: dict[str, Any], rng: np.random.Generator
     ) -> TextSequence | None:
         del rng
+        if self._renderer is not None:
+            return self._tokenize_with_renderer(self._messages_fn(sample))
         return self._tokenize_sample(sample)
 
 
@@ -245,6 +307,49 @@ def make_local_jsonl_sft(
     return SingleDataset(
         source=IndexedJsonlSource(patterns=(path,)),
         processor=_LocalJsonlChatProcessor,
+        post_filters=(lambda sample: sample is not None,),
+    )
+
+
+def make_local_jsonl_sft_multiturn(
+    *, path: str, messages_field: str, renderer: Any
+) -> SingleDataset:
+    """Build a multi-turn supervised-chat recipe from a local JSONL file.
+
+    Each row's ``messages_field`` holds the conversation as a list of
+    ``{"role": ..., "content": ...}`` messages ending with an assistant
+    turn. ``renderer`` is a built ``renderers`` renderer (see
+    ``components/renderer.build_chat_renderer``); it owns tokenization and
+    the per-turn loss mask.
+    """
+
+    class _LocalJsonlMultiTurnChatProcessor(ChatProcessor):
+        def __init__(self, *, context: DatasetBuildContext) -> None:
+            def messages(sample: dict[str, Any]) -> list[dict[str, str]]:
+                try:
+                    conversation = sample[messages_field]
+                except KeyError as exc:
+                    raise KeyError(
+                        "local_jsonl_sft row lacks configured messages field "
+                        f"{exc.args[0]!r}"
+                    ) from exc
+                if not isinstance(conversation, list) or not all(
+                    isinstance(message, dict) and "role" in message
+                    for message in conversation
+                ):
+                    raise TypeError(
+                        "local_jsonl_sft messages field must be a list of "
+                        "message dicts with a 'role' key"
+                    )
+                return conversation
+
+            super().__init__(
+                context=context, messages_fn=messages, renderer=renderer
+            )
+
+    return SingleDataset(
+        source=IndexedJsonlSource(patterns=(path,)),
+        processor=_LocalJsonlMultiTurnChatProcessor,
         post_filters=(lambda sample: sample is not None,),
     )
 

@@ -294,9 +294,23 @@ step 1 恢复 optimizer、scheduler、dataloader 和 train state 后完成并保
     `apply_cp` 对该组合的 fail-fast 移除。2-rank 等价性测试
     `cp_ulysses_varlen_equivalence.py` 已写，本机 torch 2.2.2 无 flex，环境未覆盖
     待复跑。详见 upstream map"已从 D 移除"。
-  - 多轮对话 SFT 的 renderer 路径（4a0d8dab3）：依赖 `renderers==0.1.11` 与上游
-    `components/renderer.py`；`datasets/text/text.py` 的 `TODO(data-sft-multiturn)`
-    仍有效。
+  - 多轮对话 SFT 的 renderer 路径（4a0d8dab3）：**已适配为可选路径**
+    （2026-09-25，第 12 项）。B 类语义适配：不复制 Configurable 外形、不新增
+    硬依赖。上游 `components/renderer.py::RenderersLibraryConfig.build` →
+    hpmesh `components/renderer.py::build_chat_renderer`（renderer 名以 CLI
+    字符串传入，lazy `importlib` 探测；`auto`/`default` 两个 renderer 同样
+    loud-refuse）；上游 `RendererTokenizerWrapper` → hpmesh 同名类（逐字，
+    适配 `HuggingFaceTokenizer`）；上游 `ChatProcessor.Config.renderer` /
+    `_tokenize_with_renderer` → hpmesh `ChatProcessor(renderer=...)` /
+    `_tokenize_with_renderer`（`build_training_sample(..., ensure_final_stop=True)`、
+    mask 随 label 移位、超长丢弃、文本限定，语义逐字）；renderer 路径与
+    chat-template 路径互斥（构造期二选一），renderer 在时不再要求 eos_id。
+    接线：`DataloaderConfig.chat_renderer`/`messages_field`（仅
+    `dataset=local_jsonl_sft`）→ `datasets/build.py` →
+    `make_local_jsonl_sft_multiturn`。未装 `renderers` 时启用 ImportError
+    带 `pip install renderers==0.1.11` 指引；默认关闭逐位不变。真实库数值
+    未验证（本机无 renderers，单测用 sys.modules fake 模块覆盖），解锁条件：
+    pyproject 加 optional extra 后复跑。
   - validation 循环：**已移植**（批 4，`Trainer.validate`/`should_validate` +
     `ValidationConfig`，上游 `components/validate.py::Validator` 对应物；上游
     6c2dadbb3 的零 batch/零有效 token 报错与 90b25912f 的 dp>1 拒绝
