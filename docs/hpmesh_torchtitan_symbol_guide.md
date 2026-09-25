@@ -111,7 +111,7 @@ step 1 恢复 optimizer、scheduler、dataloader 和 train state 后完成并保
 | hpmesh 符号 | TorchTitan 对应符号 | 差异与正确性 |
 |---|---|---|
 | `RouterGateLinear`, `_RouterGateLinearFunction` | `models/common/linear.py` 同名实现 | 前向 FP32 输出、后向 FP32 GEMM；CUDA bf16 使用 `out_dtype`，其他设备安全提升，**通过** |
-| `TokenChoiceTopKRouter.forward` | `models/common/moe.py` router | hpmesh 参数化而非 Config 构建，保留 softmax/sigmoid、group limit、route norm，**通过（适配）**。上游 e07084202 抽出可覆写 hooks，hpmesh 以 `_select_experts` 为覆写 seam，数学一致。2026-09-24 起 `_debug_force_load_balance` 调试开关已移植（构造参数，round-robin `(t*K+k)%E`，gating 值仍取真实 score，bias/group 限制均绕过——与上游逐字一致） |
+| `TokenChoiceTopKRouter.forward` | `models/common/routers.py` router | hpmesh 参数化而非 Config 构建，保留 softmax/sigmoid、group limit、route norm，**通过（适配）**。上游 e07084202 抽出可覆写 hooks，hpmesh 以 `_select_experts` 为覆写 seam，数学一致。2026-09-24 起 `_debug_force_load_balance` 调试开关已移植（构造参数，round-robin `(t*K+k)%E`，gating 值仍取真实 score，bias/group 限制均绕过——与上游逐字一致） |
 | `RoutedExperts.forward`, `MoE.forward` | 上游同名逻辑 | hpmesh 专家权重是 EP swap 后的本地切片，不是上游 SPMD DTensor，**通过（适配）**。2026-09-24 起 `MoE.set_padding_mask` 一次性暂存通道（上游 d34a13fdf 同源）：mask（True=padding）只过滤负载均衡统计（`tokens_per_expert_E`、aux loss f/p、quantile 直方图），routing 决策/dispatch/expert compute 始终跑完整 token 流，无 mask 逐位不变；CP/TP 由 `shard_padding_mask_for_cp/tp` 与 token 流同序切分 |
 | `QuantileBalancedTopKRouter`, `QuantileBalancer`, `register_moe_quantile_balancing_hook` | 上游 f8bb599a7 同名实现 | 训练时 biased top-(K+1)：前 K dispatch、第 K+1 个 biased 分为 cutoff；1000-bin int32 直方图（non-persistent）按 token 分片轴 all-reduce 后取 `top_k/num_experts` 分位数（bin 内插值），mean-centred 覆写 `expert_bias_E`；与 sign-based bias 互斥（同层构造 raise、跨层 hook raise、全 quantile 时 LB hook 自动不注册）；`ParallelConfig.moe_quantile_balancing` 启用，**通过（适配）** |
 | `MoE.update_expert_bias` | 上游 expert bias 更新 | 在 optimizer step hook 执行；跨 PP part 汇总，**通过**。2026-09-24 起注册严格性与上游对齐：所有 MoE层 `load_balance_coeff` 混合配置（部分为 None）即 `ValueError`（上游 `_should_register_moe_balancing_hook` 同源），coeff 全 None 时不注册 hook（免每步无谓 collective） |
@@ -272,7 +272,7 @@ step 1 恢复 optimizer、scheduler、dataloader 和 train state 后完成并保
   shared-expert×tp 保持 loud-raise。真多卡前后向等价性环境未覆盖，待 torch≥2.12
   复跑。符号对应：上游
   `expert_param_placement_sparse`（EP 轴 S(0) 声明）→ hpmesh EP swap 的 per-rank
-  experts 切片（`parallel/expert_parallel/swap.py::_convert_block`)；上游
+  experts 切片（`parallel/expert_parallel/convert.py::_convert_block`)；上游
   `dense_param_placement(tp=R)` 的 router Replicate 声明 → hpmesh router 不切 +
   `_allreduce_replicated_tp_grads` 求和；上游
   `_moe_sharding_config` 的块边界 in/out 声明（ep=1 时 Replicate）→
@@ -409,7 +409,7 @@ step 1 恢复 optimizer、scheduler、dataloader 和 train state 后完成并保
 | `models/common/grouped_experts.py` | `GroupedExperts` | B，common + gpt_oss MoE |
 | `models/common/linear.py` | router/partial-bias linear | A2，同文件 |
 | `models/common/masks.py` | mask mods、varlen metadata | A2，`attention.py` 拆分 |
-| `models/common/moe.py` | router、experts、MoE、balance loss | A2，同文件 |
+| `models/common/moe.py`（MoE 本体/experts/balance loss）+ `routers.py` + `balancing.py` | router、experts、MoE、balance loss、bias 更新钩子 | A2，同文件 |
 | `models/common/multimodal.py` | vision/text fusion helpers | A2，同文件 |
 | ~~`models/common/param_init.py`~~ | init context/std helper | 已于 2026-09-25 删除（死代码） |
 | `models/common/qkv.py` | fused QKV 与 state hooks | A2，`attention.py` 拆分 |
@@ -425,7 +425,7 @@ step 1 恢复 optimizer、scheduler、dataloader 和 train state 后完成并保
 | `accelerator/dist.py` | object collectives、all_reduce/gather、collect_results | C，vendored 自 OpenMMLab `mmengine.dist`（非 torchtitan 来源），已去 mmengine 化 |
 | `accelerator/dist_utils.py` | init_dist 多 launcher（后端字符串由 `device.py` 单源驱动）、rank/group 查询、`cast_data_device` | C，同上 |
 | `parallel/expert_parallel/apply.py` | `apply_ep` | B，模型 EP parallelize |
-| `parallel/expert_parallel/swap.py` | HF MoE 探测、权重搬运与 swap | B，transformers backend `moe_replacement.py` |
+| `parallel/expert_parallel/swap.py`（编排）+ `probe.py`（探测）+ `convert.py`（转换） | HF MoE 探测、权重搬运与 swap | B，transformers backend `moe_replacement.py` |
 | `parallel/fully_shard/fsdp.py` | FSDP engine、mesh 与 placement | A2，`distributed/fsdp.py` |
 | `parallel/fully_shard/apply.py` | `apply_fsdp` HF driver | B，各模型 parallelize |
 | `parallel/parallel_dims.py` | `ParallelDims` 与 mesh accessors | A2，distributed parallel dims |

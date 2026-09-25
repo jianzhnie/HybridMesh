@@ -167,10 +167,12 @@ hpmesh/
   __main__.py / __init__.py     入口: python -m hpmesh
   config/       8 模块          model/parallel/optimizer/checkpoint/data/
                                 training/root.py + __init__(全量再导出)
-  trainer/      5 模块          trainer.py / train.py / validation.py /
-                                pp_steps.py（validation 与 PP microbatch 段）
-  models/      20 模块          hf_wrapper.py + hf_factory.py（config 构建/类解析/
-                                meta materialize/FLOPs）+ common/{rope,masks,qkv,moe,...}
+  trainer/      6 模块          trainer.py / train.py / validation.py /
+                                pp_steps.py / batch.py（validation、PP microbatch
+                                与 batch 预处理段）
+  models/      22 模块          hf_wrapper.py + hf_factory.py（config 构建/类解析/
+                                meta materialize/FLOPs）+ common/{rope,masks,qkv,
+                                moe/routers/balancing,...}
   parallel/    20 模块          tensor_parallel/
                                 fully_shard/ pipeline_parallel/ context_parallel/
                                 expert_parallel/
@@ -341,7 +343,7 @@ preprocessing 路径调用：`context_parallel/input_shard.py` 的 `shard_batch_
 input_ids/labels/positions 同步切片；BlockMask 只沿 Q 维分片
 （`shard_attention_mask_for_cp`）。loss/token 归约走含 cp 轴的 `loss` mesh。
 
-**EP 已接线**。`parallel/expert_parallel/swap.py` 的 `swap_hf_moe_blocks` 以形状和属性
+**EP 已接线**。`parallel/expert_parallel/swap.py`（编排；探测在 `probe.py`、转换在 `convert.py`）的 `swap_hf_moe_blocks` 以形状和属性
 探测 Qwen3Moe、OLMoE、Mixtral、DeepSeek-V2/V3、GLM4 等共同布局，并替换为
 `models/common` 的 `MoE`：router gate 与 experts 权重逐元素直拷进
 `TokenChoiceTopKRouter` / `GroupedExperts`；ep>1 时每 rank 切本地 experts 片并接
