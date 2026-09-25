@@ -54,6 +54,7 @@ def apply_ep(
         quantile_balancing=cfg.moe_quantile_balancing,
         token_dispatcher=cfg.ep_token_dispatcher,
         torchao_pad_multiple=cfg.ep_torchao_pad_multiple,
+        tp_enabled=cfg.tp > 1,
     )
     logger.info(
         "Applied EP (%s dispatch): swapped %d MoE blocks, degree %d",

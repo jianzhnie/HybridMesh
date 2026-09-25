@@ -1132,8 +1132,7 @@ class MicrobatchWiseLoadBalanceLoss(AuxLoss):
         # MoE-under-TP (tp>1, ep=1) no reduction is needed: the block-boundary
         # all-gather means the router already sees the full token stream, and
         # the aux loss only exists on the hpmesh MoE stack, which the TP path
-        # does not install. The tp term stays dormant rather than wrong:
-        # dropping it would under-reduce if TP+EP ever ran.
+        # does not install.
         axes = ("cp", "tp") if spmd_sparse_mesh() is not None else ("cp",)
 
         # Eq. 18: per-expert routing counts, then f_i = E * counts_i /

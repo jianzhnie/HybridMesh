@@ -417,6 +417,7 @@ def _convert_block(
     quantile_balancing: bool,
     token_dispatcher: str,
     torchao_pad_multiple: int,
+    tp_enabled: bool = False,
 ) -> MoE:
     """Build the hpmesh MoE for one HF block and move its weights over."""
     ep_size = 1 if ep_group is None else dist_utils.get_world_size(ep_group)
@@ -517,6 +518,14 @@ def _convert_block(
             f"{type(block).__name__} gates its shared expert "
             "(shared_expert_gate); MoE's shared_experts is additive only. "
             "Qwen3Moe has no shared expert, so this is unreachable there."
+        )
+    if shared is not None and tp_enabled:
+        raise NotImplementedError(
+            f"tp x ep over {type(block).__name__}: the block has a shared "
+            "expert, which the TP plan shards with the dense colwise/rowwise "
+            "realizers. Composing those with the swapped MoE's sequence-"
+            "sharded dispatch layout is unverified; run shared-expert models "
+            "with tp=1 (EP handles the shared expert) or ep=1."
         )
 
     moe = MoE(
@@ -646,6 +655,7 @@ def swap_hf_moe_blocks(
     quantile_balancing: bool = False,
     token_dispatcher: str = "alltoall",
     torchao_pad_multiple: int = 16,
+    tp_enabled: bool = False,
 ) -> int:
     """Replace every HF MoE block in ``model`` with hpmesh's MoE, in place.
 
@@ -670,6 +680,11 @@ def swap_hf_moe_blocks(
             registered gaps refused here). See
             ``ParallelConfig.ep_token_dispatcher``.
         torchao_pad_multiple: padding multiple for the ``"torchao"`` backend.
+        tp_enabled: the model is also tensor-parallelized (tp x ep). Used only
+            for fail-fast validation of unverified combinations (currently a
+            shared expert): the swap itself is layout-identical either way --
+            the swapped block consumes and produces the T/tp sequence shard
+            directly, which is the layout upstream's ep+sp MoE uses.
 
     Returns:
         The number of blocks swapped. Mixed sparse/dense models (e.g.
@@ -740,6 +755,7 @@ def swap_hf_moe_blocks(
             quantile_balancing=quantile_balancing,
             token_dispatcher=token_dispatcher,
             torchao_pad_multiple=torchao_pad_multiple,
+            tp_enabled=tp_enabled,
         )
         # Replace in the slot the block was actually found in. Writing to a
         # different attribute would leave the original block in place and route

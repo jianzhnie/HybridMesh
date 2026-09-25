@@ -266,14 +266,18 @@ step 1 恢复 optimizer、scheduler、dataloader 和 train state 后完成并保
 - `models/common/moe_sharding.py`：**部分移除**（2026-09-25）。TP×MoE 组合能力的
   声明层与装配层已就位（B 类适配，见 upstream map"已从 D 移除（部分）"）：
   `apply_tp` 接受 `moe_tp_experts` 等规格并结构性地实现 MoE-under-TP——专家权重
-  F 维原地切分、router Replicate、块边界 AG/RS;tp×ep 组合 config 级 fail-fast。
-  真多卡前后向等价性环境未覆盖，待 torch≥2.12 复跑。符号对应：上游
+  F 维原地切分、router Replicate、块边界 AG/RS;**tp×ep 同日起按上游语义放行**
+  （TP 只切 dense、EP 独占 routed 专家、router Replicate;`apply_tp` 在 ep>1 时把
+  MoE 块留给 swap，专家梯度排除由 `_tp_sharded_param_ids` 统一判定）;tp×ep×cp 与
+  shared-expert×tp 保持 loud-raise。真多卡前后向等价性环境未覆盖，待 torch≥2.12
+  复跑。符号对应：上游
   `expert_param_placement_sparse`（EP 轴 S(0) 声明）→ hpmesh EP swap 的 per-rank
   experts 切片（`parallel/expert_parallel/swap.py::_convert_block`)；上游
-  `dense_param_placement(tp=R)` 的 router Replicate 声明 → hpmesh MoE-under-TP
-  下 router 不切 + `_allreduce_replicated_tp_grads` 求和；上游
-  `_moe_sharding_config` 的块边界 in/out 声明 →
-  `tensor_parallel/tp.py::_TPMoeSequenceBoundary`;HF 侧
+  `dense_param_placement(tp=R)` 的 router Replicate 声明 → hpmesh router 不切 +
+  `_allreduce_replicated_tp_grads` 求和；上游
+  `_moe_sharding_config` 的块边界 in/out 声明（ep=1 时 Replicate）→
+  `tensor_parallel/tp.py::_TPMoeSequenceBoundary`;ep>1 时的 sequence-parallel 布局
+  → swap 后 MoE 直接消费/产出 T/tp 分片（无边界 collective);HF 侧
   `packed_colwise`/`moe_tp_experts` 规格 → `_shard_experts_for_tp`。
 - RegionAC：依赖 `torch_remat` 包与上游 `Module.configure_remat_regions` 协议，hpmesh
   两者皆无，不引入该依赖；配置 `activation_checkpoint_mode='region'` 在 config 校验与

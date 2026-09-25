@@ -167,7 +167,7 @@ C 类上会把项目**故意删掉**的抽象又拽回来。
 | 上游 | 影响 |
 | --- | --- |
 | `distributed/compile.py` | **已移植**（2026-09-24，批 8）：逐 block compile、async TP `_micro_pipeline_tp`、`regional_inductor`、`capture_scalar_outputs` 四件全部落 `hpmesh/parallel/compile.py` + `CompileConfig`，见下"已从 D 移除" |
-| `models/common/moe_sharding.py` | **部分移除**（2026-09-25）。其载荷 MoE-under-TP 已在 `parallel/tensor_parallel/tp.py` 落 B 类适配：HF plan 的 `packed_colwise`/`packed_rowwise`/`moe_tp_experts` 规格不再 raise，专家权重沿 F 维原地切分、router Replicate、块边界 AG/RS 对偶 collective；tp×ep 组合 config 级 fail-fast。声明层+装配层就位并有 CPU 单测，但真多卡前后向等价性**环境未覆盖**（本机 torch 2.2.2 无分布式执行栈），待 torch≥2.12 多卡复跑后方可视为完整移除。见下"已从 D 移除（部分）" |
+| `models/common/moe_sharding.py` | **部分移除**（2026-09-25）。其载荷 MoE-under-TP 已在 `parallel/tensor_parallel/tp.py` 落 B 类适配：HF plan 的 `packed_colwise`/`packed_rowwise`/`moe_tp_experts` 规格不再 raise，专家权重沿 F 维原地切分、router Replicate、块边界 AG/RS 对偶 collective；**tp×ep 同日起按上游语义放行**（TP 只切 dense、EP 独占 routed 专家沿 E 切、router Replicate，`apply_tp` 在 ep>1 时把块留给 swap，专家梯度排除由 `_tp_sharded_param_ids` 统一判定；tp×ep×cp 与 shared-expert×tp 保持 loud-raise）。声明层+装配层就位并有 CPU 单测，但真多卡前后向等价性**环境未覆盖**（本机 torch 2.2.2 无分布式执行栈），待 torch≥2.12 多卡复跑后方可视为完整移除。见下"已从 D 移除（部分）" |
 | `components/optimizer/ema.py`（2026-09 新增，515 行） | **已移植**（2026-09-24，`hpmesh/components/optimizer/ema.py`）：在线 EMA 模型平均，config/trainer/checkpointer 三侧接线完成，见下"已从 D 移除" |
 | Ulysses CP × varlen/packed（baff3c681） | **已移植**（2026-09-25，批 5）：`apply_cp` 不再 fail-fast，wrapper 全长透传文档 mask、kernel 按 mask Q 长度分派，见下"已从 D 移除" |
 | 多轮对话 SFT 的 renderer 路径（4a0d8dab3） | **已适配为可选路径**（2026-09-25，§9.1 第 12 项）：不引入硬依赖、不复制 Configurable 外形。`components/renderer.py` 为可选导入适配层（`build_chat_renderer` + `RendererTokenizerWrapper`），`ChatProcessor(renderer=...)` 走多-turn renderer 分支，`--chat_renderer`/`--messages_field` 接线 `local_jsonl_sft`；未装 `renderers` 时启用 loud-raise（ImportError 带安装指引），默认关闭逐位不变。真实库数值**未验证**（本机无 renderers，单测以 fake 模块覆盖接口与 mask 移位语义）；解锁条件：pyproject 加 optional extra `renderers==0.1.11` 后装包复跑 |
@@ -186,12 +186,23 @@ gate/up 两半各自切 dim 1,router 不动）+ `_TPMoeSequenceBoundary`（`__cl
 安装块边界 sequence all-gather / reduce-scatter，与 dense TP 同一对偶契约，序列维
 -2)。梯度语义：边界 collective 的注册反向互为对偶；router 权重 Replicate，梯度由
 `_allreduce_replicated_tp_grads` 求和；被切专家参数经块上 `_tp_sharded_param_ids`
-从该归约排除。state_dict FQN 不变、tp=1 逐位不变。组合矩阵：tp>1×ep>1 在
-`ParallelConfig.__post_init__` fail-fast；plan 声明 MoE 规格但探针找不到块
-loud-raise;shared-expert 块与 GPT-OSS 布局 loud-raise。测试
+从该归约排除。state_dict FQN 不变、tp=1 逐位不变。**tp×ep（同日第二段）**：按上游
+语义放行——TP 只切 dense,routed 专家由 EP 独占沿专家维 E 切，router Replicate;
+`apply_tp` 在 `cfg.ep > 1` 时跳过 MoE 块扫描/分片/边界安装（块留给 `apply_ep`
+swap,swap 后的原生 MoE 直接消费/产出 T/tp 序列分片，即上游 ep+sp 的
+sequence-parallel 布局，无边界 collective);trainer 的排除判定抽为模块级
+`_tp_sharded_param_ids`（三类：dense TP realizer、MoE-under-TP 的 F 分片、EP 的
+`GroupedExperts` E 切片；EP 专家梯度按 rank 完备，跨 TP 求和会混不同专家的梯度）。
+组合矩阵终态：tp>1×ep>1（cp=1）放行；tp>1×ep>1×cp>1 在
+`ParallelConfig.__post_init__` fail-fast（未验证）;shared-expert 块 ×tp 两条路径均
+loud-raise(ep=1 边界处、tp×ep 的 swap `_convert_block` 处）;plan 声明 MoE 规格但
+探针找不到块（ep=1）loud-raise;GPT-OSS 布局 loud-raise。aux loss / padding-mask
+LB / quantile hook 的归约轴此前已按 ep_enabled 含 tp 书写，放行后不重复计数、无需
+改动。测试
 `tests/unit_tests/cpu/distributed/test_tp_moe.py`：规格解析、分片重建、单进程
-partial-sum 等价（reduce-scatter 求和的算术内容，无进程组）、FQN 稳定、幂等、组合
-矩阵各拒绝格。**未覆盖**：真多卡 forward/backward 等价（本机 torch 2.2.2 无
+partial-sum 等价（reduce-scatter 求和的算术内容，无进程组）、FQN 稳定、幂等、
+ep>1 时 apply_tp 原样放行 MoE 块、shared-expert×tp×ep 拒绝、梯度排除规则、组合
+矩阵各格。**未覆盖**：真多卡 forward/backward 等价（本机 torch 2.2.2 无
 DTensor/spmd 执行栈，gloo 下功能 collective 未验证）——待 torch≥2.12 多卡复跑。
 
 **已从 D 移除**（2026-09-25 批 5 移植）：Ulysses CP × varlen/packed（上游

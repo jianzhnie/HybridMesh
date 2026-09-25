@@ -325,10 +325,10 @@ class ParallelConfig:
     EP borrows ranks from FSDP and TP: efsdp = dp_shard * cp * tp / ep.
     pp and dp_replicate are outer dimensions unaffected by this constraint.
 
-    Not composable with tensor_parallel_size > 1 (rejected in
-    ``__post_init__``): MoE-under-TP shards each expert's hidden dim, EP
-    shards the expert count, and the two-dimensional combination is not
-    implemented.
+    Not composable with context_parallel_size > 1 when tensor_parallel_size >
+    1 (rejected in ``__post_init__``, the tp x ep x cp combination is
+    unverified). tp x ep itself IS supported: TP shards only the dense parts
+    and EP owns the routed experts.
     """
 
     router_aux_loss_coef: float | None = None
@@ -467,22 +467,22 @@ class ParallelConfig:
                 "has nothing to disable. Leave it true, or set "
                 "tensor_parallel_size=1 to drop TP."
             )
-        if self.tensor_parallel_size > 1 and self.expert_parallel_size > 1:
-            # The two MoE strategies do not compose yet: apply_tp shards each
-            # expert's hidden dim F across the TP group (tensor_parallel/tp.py,
-            # MoE-under-TP), while the EP swap slices the expert count E across
-            # the EP group and installs all-to-all dispatch. Combining them is
-            # a two-dimensional expert sharding (upstream's EDP-style mesh)
-            # that neither path is written or verified against, and apply_tp
-            # runs BEFORE apply_ep, so the swap would either see TP-sharded
-            # weights it cannot slice correctly or find no HF block at all.
-            # Refuse at the config, before any mesh is built.
+        if (
+            self.tensor_parallel_size > 1
+            and self.expert_parallel_size > 1
+            and self.context_parallel_size > 1
+        ):
+            # tp x ep is supported: TP shards the dense parts, EP owns the
+            # routed experts (E-shard), the router stays replicated -- the
+            # upstream alignment. Adding CP on top is unverified (the CP
+            # attention kernel is orthogonal, but the token-count reductions
+            # and dispatcher layouts have not been exercised together), so it
+            # is refused here rather than silently composing.
             raise NotImplementedError(
-                "tensor_parallel_size > 1 with expert_parallel_size > 1 is not "
-                "supported: MoE-under-TP (experts sharded on the F dim) and EP "
-                "(experts sharded on the E count) do not compose in hpmesh. "
-                "Run MoE models with tp>1 and ep=1 (MoE-under-TP) or ep>1 and "
-                "tp=1 (EP)."
+                "tensor_parallel_size > 1 with expert_parallel_size > 1 and "
+                "context_parallel_size > 1 is not supported: tp x ep x cp is "
+                "unverified. Run tp x ep with context_parallel_size=1, or ep x "
+                "cp with tensor_parallel_size=1."
             )
         if self.data_parallel_shard_size < 1 and self.data_parallel_shard_size != -1:
             raise ValueError(
