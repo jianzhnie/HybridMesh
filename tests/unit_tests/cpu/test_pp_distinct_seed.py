@@ -1,4 +1,4 @@
-"""PP per-stage seed derivation (hpmesh.utils.seed).
+"""PP per-stage seed derivation (hpmesh.trainer.seed).
 
 trainer.py is not importable in a minimal CPU environment, so the derivation
 lives in a dependency-free helper; these tests pin the seed semantics the
@@ -8,7 +8,7 @@ and bit-identical behavior when pp == 1.
 
 import torch
 
-from hpmesh.utils.seed import derive_distinct_seed
+from hpmesh.trainer.seed import derive_distinct_seed
 
 
 def _rng_snapshot(seed: int) -> torch.Tensor:

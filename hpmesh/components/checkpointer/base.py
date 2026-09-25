@@ -58,8 +58,10 @@ from torch.distributed.checkpoint.stateful import Stateful
 from torch.distributed.tensor import DTensor
 
 from ...accelerator import dist_utils
-from ...utils import filesystem
-from ...utils.checkpoint_keys import (
+from ...utils.gc import GarbageCollection
+from ...utils.logger_utils import get_logger
+from . import filesystem
+from .checkpoint_keys import (
     DATALOADER,
     EMA,
     LR_SCHEDULER,
@@ -67,12 +69,10 @@ from ...utils.checkpoint_keys import (
     OPTIMIZER,
     TRAIN_STATE,
 )
-from ...utils.gc import GarbageCollection
-from ...utils.logger_utils import get_logger
 
 logger = get_logger(__name__)
 
-# The state keys are defined in ``utils/checkpoint_keys.py`` so that
+# The state keys are defined in ``checkpointer/checkpoint_keys.py`` so that
 # ``hpmesh/config/`` can read them without importing this package; the
 # import above re-exports them under their long-standing names.
 __all__ = [

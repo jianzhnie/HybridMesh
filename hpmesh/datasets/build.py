@@ -159,7 +159,7 @@ def build_dataloader(
                 # Imported here, not at module scope: the renderers package is
                 # an optional dependency, and a run that leaves chat_renderer
                 # unset must not have to install it.
-                from hpmesh.components.renderer import build_chat_renderer
+                from hpmesh.datasets.text.renderer import build_chat_renderer
 
                 recipe = make_local_jsonl_sft_multiturn(
                     path=dataloader_config.dataset_path,

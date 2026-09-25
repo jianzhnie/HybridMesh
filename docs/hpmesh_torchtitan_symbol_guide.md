@@ -303,7 +303,7 @@ step 1 恢复 optimizer、scheduler、dataloader 和 train state 后完成并保
   - 多轮对话 SFT 的 renderer 路径（4a0d8dab3）：**已适配为可选路径**
     （2026-09-25，第 12 项）。B 类语义适配：不复制 Configurable 外形、不新增
     硬依赖。上游 `components/renderer.py::RenderersLibraryConfig.build` →
-    hpmesh `components/renderer.py::build_chat_renderer`（renderer 名以 CLI
+    hpmesh `datasets/text/renderer.py::build_chat_renderer`（renderer 名以 CLI
     字符串传入，lazy `importlib` 探测；`auto`/`default` 两个 renderer 同样
     loud-refuse）；上游 `RendererTokenizerWrapper` → hpmesh 同名类（逐字，
     适配 `HuggingFaceTokenizer`）；上游 `ChatProcessor.Config.renderer` /
@@ -339,7 +339,7 @@ step 1 恢复 optimizer、scheduler、dataloader 和 train state 后完成并保
     同名构造参数，round-robin 语义逐字一致，见 §4.3）。
   - `CastLinear`：**已移植**（批 1，`models/common/cast_linear.py` +
     `ModelConfig.compute_dtype`，state-dict FQN 不变，默认关闭，见 §4.1）。
-  - PP per-stage seed：**已移植**（批 1，`utils/seed.py::derive_distinct_seed` +
+  - PP per-stage seed：**已移植**（批 1，`trainer/seed.py::derive_distinct_seed` +
     trainer 接线；DTensor RNG tracker 不移植）。
   - `pipeline_with_first_stage_modules`：**已移植**（批 4，`apply_pp` 的
     `first_stage_module_fqns` 参数 + `_prepend_first_stage_modules`；
@@ -438,9 +438,9 @@ step 1 恢复 optimizer、scheduler、dataloader 和 train state 后完成并保
 | `trainer/train.py` | parse/main | B，根 `train.py` |
 | `trainer/trainer.py`（+ `validation.py` / `pp_steps.py` 抽出的 validation 与 PP microbatch 段） | 完整训练生命周期 | B，根 `trainer.py` + `training_engine.py` |
 | `utils/batch_invariant.py` | batch-invariant getter/setter | C，上游开关散在 trainer/config |
-| `utils/checkpoint_keys.py` | checkpoint state key 常量 | C |
+| `components/checkpointer/checkpoint_keys.py` | checkpoint state key 常量 | C |
 | `accelerator/device.py` | 设备发现、backend 选择、厂商谓词、峰值显存查询 | C |
-| `utils/filesystem.py` | path/storage helpers | A1，`tools/filesystem.py` |
+| `components/checkpointer/filesystem.py` | path/storage helpers | A1，`tools/filesystem.py` |
 | `utils/gc.py` | `GarbageCollection` | B，`tools/utils.py` |
 | `utils/logger_utils.py` | `get_logger`（彩色 formatter + 发射时 rank 过滤）、`get_distributed_rank` | C |
 | `accelerator/monitoring.py` | device/memory/FLOPS helpers | C；部分意图可参考 `tools/utils.py` |

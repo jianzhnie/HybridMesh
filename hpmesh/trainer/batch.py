@@ -20,7 +20,8 @@ import torch
 from ..components.loss import IGNORE_INDEX, next_token_targets
 from ..datasets import build_dataloader
 from ..datasets.loader import BaseDataLoader, DataloaderExhaustedError, TrainerBatch
-from ..datasets.random_data import Batch, DataLoaderExhausted, RandomTokenDataLoader
+from ..datasets.random_data import DataLoaderExhausted, RandomTokenDataLoader
+from ..datasets.types import Batch
 
 
 def _dp_rank_world_size(self) -> tuple[int, int]:

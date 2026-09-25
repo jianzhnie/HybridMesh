@@ -50,31 +50,38 @@ hpmesh fills in the first two plus whatever the caller passes in ``states``:
   the average from the just-loaded weights (see ``dcp.CheckpointManager``).
 """
 
-from .base import (
-    DATALOADER,
-    EMA,
-    LR_SCHEDULER,
-    MODEL,
-    OPTIMIZER,
-    TRAIN_STATE,
-    BaseCheckpointManager,
-    CheckpointStorage,
-    ModelWrapper,
-)
-from .dcp import AsyncMode, CheckpointManager
-from .utils import canonical_fqn
+# Lazy (PEP 562): ``checkpoint_keys`` / ``filesystem`` live in this package and
+# are read by ``hpmesh/config``, which must stay importable without the
+# torch.distributed surface ``base``/``dcp`` pull in (DTensor & friends are
+# absent on older torch). Eager re-exports would make any submodule import pay
+# for the backends.
+_EXPORT_SOURCES = {
+    "BaseCheckpointManager": "base",
+    "CheckpointStorage": "base",
+    "ModelWrapper": "base",
+    "DATALOADER": "base",
+    "EMA": "base",
+    "LR_SCHEDULER": "base",
+    "MODEL": "base",
+    "OPTIMIZER": "base",
+    "TRAIN_STATE": "base",
+    "AsyncMode": "dcp",
+    "CheckpointManager": "dcp",
+    "canonical_fqn": "utils",
+}
 
-__all__ = [
-    "AsyncMode",
-    "BaseCheckpointManager",
-    "CheckpointManager",
-    "CheckpointStorage",
-    "DATALOADER",
-    "EMA",
-    "LR_SCHEDULER",
-    "MODEL",
-    "ModelWrapper",
-    "OPTIMIZER",
-    "TRAIN_STATE",
-    "canonical_fqn",
-]
+__all__ = sorted(_EXPORT_SOURCES)
+
+
+def __getattr__(name: str):
+    """Resolve backend names on first touch (PEP 562 lazy re-export)."""
+    source = _EXPORT_SOURCES.get(name)
+    if source is None:
+        raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+    import importlib
+
+    return getattr(importlib.import_module(f".{source}", __name__), name)
+
+
+def __dir__() -> list[str]:
+    return sorted(__all__)

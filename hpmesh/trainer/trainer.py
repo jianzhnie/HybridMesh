@@ -129,7 +129,7 @@ from ..components.optimizer import (
 )
 from ..components.profiler import Profiler
 from ..datasets.loader import BaseDataLoader, DataloaderExhaustedError, TrainerBatch
-from ..datasets.random_data import Batch
+from ..datasets.types import Batch
 from ..models.common.aux_loss import (
     AuxLoss,
     collect_aux_loss_metrics,
@@ -157,10 +157,10 @@ from ..parallel.tensor_parallel.tp import (
 )
 from ..utils.gc import GarbageCollection
 from ..utils.logger_utils import get_logger
-from ..utils.seed import derive_distinct_seed
 from . import batch as batch_mod
 from . import pp_steps
 from . import validation as validation_pass
+from .seed import derive_distinct_seed
 
 # Rank-aware: the helper installs a handler on rank 0 only, so a torchrun run
 # logs one line per step instead of one per rank.

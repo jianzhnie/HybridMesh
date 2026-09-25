@@ -20,11 +20,6 @@ import numpy as np
 import pytest
 
 from hpmesh.components.loss import IGNORE_INDEX
-from hpmesh.components.renderer import (
-    RENDERERS_INSTALL_HINT,
-    RendererTokenizerWrapper,
-    build_chat_renderer,
-)
 from hpmesh.components.tokenizer import HuggingFaceTokenizer
 from hpmesh.config import (
     DataloaderConfig,
@@ -33,6 +28,11 @@ from hpmesh.config import (
     TrainingConfig,
 )
 from hpmesh.datasets.build import build_dataloader
+from hpmesh.datasets.text.renderer import (
+    RENDERERS_INSTALL_HINT,
+    RendererTokenizerWrapper,
+    build_chat_renderer,
+)
 from hpmesh.datasets.text.text import ChatProcessor
 from tests.data_fixtures import (
     make_context,

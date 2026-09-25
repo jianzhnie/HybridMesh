@@ -20,7 +20,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
-    from .tokenizer import HuggingFaceTokenizer
+    from ...components.tokenizer import HuggingFaceTokenizer
 
 __all__ = ["RENDERERS_INSTALL_HINT", "RendererTokenizerWrapper", "build_chat_renderer"]
 
