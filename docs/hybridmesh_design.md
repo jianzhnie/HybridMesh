@@ -173,7 +173,7 @@ import trainer 或读取全局 run config；跨 models/parallel 的依赖必须�
 引擎层（TP/CP fused kernel、FSDP、`spmd_context`、checkpoint 的 PG 生命周期）直连
 `torch.distributed` 与 `_functional_collectives` 等私有 API。
 
-目录结构（94 个 Python 模块，约 27.4k 行；2026-09-25 实测）：
+目录结构（109 个 Python 模块，约 27.9k 行；2026-09-25 批 6 终稿实测）：
 
 ```
 hpmesh/
@@ -186,23 +186,28 @@ hpmesh/
   models/      22 模块          hf_wrapper.py + hf_factory.py（config 构建/类解析/
                                 meta materialize/FLOPs）+ common/{rope,masks,qkv,
                                 moe/routers/balancing,...}
-  parallel/    20 模块          tensor_parallel/
+  parallel/    24 模块          tensor_parallel/(tp+apply+linear)
                                 fully_shard/ pipeline_parallel/ context_parallel/
-                                expert_parallel/
+                                expert_parallel/(swap+probe+convert)
+                                activation_checkpoint.py compile.py
                                 parallel_dims.py parallelize_hf.py
-  accelerator/  8 模块          device.py（设备发现/backend 选择）
-                                mesh.py（build_parallel_dims / build_mesh）
+  accelerator/  7 模块          device.py（设备发现/backend 选择）
                                 collectives.py（归约/超时/grad norm）
                                 monitoring.py（显存监控/peak FLOPS）
                                 spmd_context.py（SPMD mesh 作用域 + 轴查询, 最底层）
                                 + dist.py/dist_utils.py（vendored mmengine.dist 工具箱）
-  components/  13 模块          loss / checkpointer(DCP; 含 checkpoint_keys
+                                （mesh 构建在 parallel/parallel_dims.py，单轨）
+  components/  17 模块          loss / checkpointer(DCP; 含 checkpoint_keys
                                 与 filesystem) / metrics / profiler / optimizer
   datasets/    18 模块          Grain 数据图 + random_data + types.py(Batch)
                                 + {text(含 renderer),multimodal}
-  utils/        3 模块          logger_utils / gc / batch_invariant
+  utils/        4 模块          logger_utils / gc / batch_invariant
                                 （filesystem 与 checkpoint_keys 归
                                 components/checkpointer/；seed 归 trainer/）
+
+tests/unit_tests/cpu/ 镜像包结构：accelerator/ components/(含 checkpointer/、
+optimizer/) datasets/ models/ parallel/ utils/，目录名 = 被测包名；
+tests/integration_tests/ 下 25 个 torchrun 脚本由 run_all.py 统一驱动。
 ```
 
 ## 4. 核心契约（三条缝）
@@ -432,9 +437,11 @@ loss (sum 归约, loss mesh) -> backward -> clip_grad_norm_ (跨 PP 归约) -> A
 
 ## 7. 正确性验证策略
 
-目录沿用 torchtitan 的分法：`tests/unit_tests/cpu/` 是 pytest 套件（把子系统建目录），
-`tests/integration_tests/` 放 torchrun 起的等价性脚本——后者不是 pytest，`testpaths`
-不收集它们。
+目录沿用 torchtitan 的分法：`tests/unit_tests/cpu/` 是 pytest 套件，子目录镜像包结构
+（`parallel/`、`models/`、`datasets/`、`components/`、`accelerator/`、`utils/`，
+目录名 = 被测包名）；`tests/integration_tests/` 放 torchrun 起的等价性脚本——后者
+不是 pytest，`testpaths` 不收集它们，由 `run_all.py` 统一枚举驱动
+（`--list` 列出全部；命令读各脚本 docstring 的 torchrun 行）。
 
 G4 的兜底是 `integration_tests/` 里那套"分片 == 全量"的等价性测试。它们按拓扑用 2 或
 4 个 gloo rank 启动，自建 mesh、不依赖 trainer 装配（`pp_equivalence.py` 除外，它驱动
@@ -449,9 +456,9 @@ G4 的兜底是 `integration_tests/` 里那套"分片 == 全量"的等价性测�
 | `tests/integration_tests/ep_fsdp_equivalence.py` | EP×FSDP：ep=2+dp_shard=4 经 `parallelize_hf_transformers` 的 loss/梯度 == 单卡全批参照；专家参数必须落在 efsdp mesh（`moe_enabled` 回归钉） |
 | `tests/integration_tests/moe_aux_loss_grad_equivalence.py` | MoE aux loss：cp=2 归约的 forward all-reduce / backward identity 语义；router 梯度 == 单卡拼接流参照 |
 | `tests/integration_tests/pp_equivalence.py` | PP 闭环：pp=2 经真实 Trainer 跑 4 步，loss 轨迹逐位 == 同 chunking 单卡参照 |
-| `tests/unit_tests/cpu/distributed/test_ep_swap.py` | MoE 替换单测：权重逐位直拷、logits 等价、aux loss 注入 |
-| `tests/unit_tests/cpu/distributed/test_tp.py` | TP 声明层 / 权重布局 / plan 解析（CPU 单测） |
-| `tests/unit_tests/cpu/distributed/test_pipeline.py` | PP 切分算术 + `split_model_into_stages` 部件归属 / 级联 forward 等价 |
+| `tests/unit_tests/cpu/parallel/test_ep_swap.py` | MoE 替换单测：权重逐位直拷、logits 等价、aux loss 注入 |
+| `tests/unit_tests/cpu/parallel/test_tp.py` | TP 声明层 / 权重布局 / plan 解析（CPU 单测） |
+| `tests/unit_tests/cpu/parallel/test_pipeline.py` | PP 切分算术 + `split_model_into_stages` 部件归属 / 级联 forward 等价 |
 | `tests/unit_tests/cpu/test_trainer.py` | loss / 数据迭代器 / checkpoint / collectives |
 | `tests/unit_tests/cpu/utils/test_spmd_context.py` | ambient 上下文的 no-op 与恢复语义 |
 
