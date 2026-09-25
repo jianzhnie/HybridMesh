@@ -6,6 +6,7 @@ import math
 from dataclasses import dataclass, field
 from typing import Any, Literal
 
+from hpmesh.errors import ConfigError
 from hpmesh.utils.logger_utils import get_logger
 
 logger = get_logger(__name__)
@@ -62,13 +63,13 @@ class LRSchedulerConfig:
 
     def __post_init__(self) -> None:
         if self.warmup_steps < 0:
-            raise ValueError(f"warmup_steps must be >= 0, got {self.warmup_steps}")
+            raise ConfigError(f"warmup_steps must be >= 0, got {self.warmup_steps}")
         if self.total_steps is not None and self.total_steps < 1:
-            raise ValueError(f"total_steps must be >= 1, got {self.total_steps}")
+            raise ConfigError(f"total_steps must be >= 1, got {self.total_steps}")
         if not 0.0 <= self.decay_ratio <= 1.0:
-            raise ValueError(f"decay_ratio must be in [0, 1], got {self.decay_ratio}")
+            raise ConfigError(f"decay_ratio must be in [0, 1], got {self.decay_ratio}")
         if not 0.0 <= self.min_lr_factor < 1.0:
-            raise ValueError(
+            raise ConfigError(
                 f"min_lr_factor must be in [0, 1), got {self.min_lr_factor}"
             )
 
@@ -161,12 +162,12 @@ class OptimizerConfig:
         # than a one-element betas that torch rejects deep in a step.
         betas = tuple(self.betas)
         if len(betas) != 2:
-            raise ValueError(
+            raise ConfigError(
                 f"betas must have exactly 2 entries (beta1, beta2), got "
                 f"{len(betas)}: {betas}. Pass both: --betas 0.9 0.95."
             )
         if not all(0.0 <= beta < 1.0 for beta in betas):
-            raise ValueError(f"betas must each be in [0, 1), got {betas}")
+            raise ConfigError(f"betas must each be in [0, 1), got {betas}")
         self.betas = betas
 
         # The degenerate grouping: no explicit param_groups means one catch-all
@@ -239,20 +240,20 @@ class EMAConfig:
 
     def __post_init__(self) -> None:
         if self.update_every_n_steps < 1:
-            raise ValueError("ema.update_every_n_steps must be greater than 0.")
+            raise ConfigError("ema.update_every_n_steps must be greater than 0.")
         if not math.isfinite(self.half_life_fraction):
-            raise ValueError("ema.half_life_fraction must be finite.")
+            raise ConfigError("ema.half_life_fraction must be finite.")
         if self.half_life_fraction <= 0:
-            raise ValueError("ema.half_life_fraction must be greater than 0.")
+            raise ConfigError("ema.half_life_fraction must be greater than 0.")
         if self.step_bias < 0:
-            raise ValueError(
+            raise ConfigError(
                 "ema.step_bias must not be negative; it is added to the firing "
                 "count, and a non-positive count has no decay."
             )
         if self.decay is not None and not (
             math.isfinite(self.decay) and 0 <= self.decay < 1
         ):
-            raise ValueError(
+            raise ConfigError(
                 "ema.decay must be finite and in [0, 1); "
                 "decay=1 never updates the EMA."
             )

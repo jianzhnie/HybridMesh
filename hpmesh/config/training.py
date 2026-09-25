@@ -7,6 +7,7 @@ from dataclasses import dataclass, field
 from hpmesh.config.checkpoint import CheckpointConfig
 from hpmesh.config.data import DataloaderConfig
 from hpmesh.config.optimizer import EMAConfig
+from hpmesh.errors import ConfigError, EnvironmentUnsupportedError
 
 
 @dataclass(kw_only=True)
@@ -44,7 +45,7 @@ class MetricsConfig:
 
     def __post_init__(self) -> None:
         if self.log_freq <= 0:
-            raise ValueError("metrics.log_freq must be greater than 0.")
+            raise ConfigError("metrics.log_freq must be greater than 0.")
 
 
 @dataclass(kw_only=True)
@@ -105,7 +106,7 @@ class ProfilerConfig:
         if self.enable_profiling and self.profile_freq < (
             self.profiler_warmup + self.profiler_active
         ):
-            raise ValueError(
+            raise ConfigError(
                 "profiler.profile_freq must be greater than or equal to "
                 "profiler_warmup + profiler_active."
             )
@@ -223,7 +224,7 @@ class MemoryBudgetACConfig:
 
     def __post_init__(self) -> None:
         if not 0 <= self.memory_budget <= 1:
-            raise ValueError(
+            raise ConfigError(
                 "memory_budget must be finite and between 0 and 1, got "
                 f"{self.memory_budget}"
             )
@@ -275,7 +276,7 @@ class CompileConfig:
 
     def __post_init__(self) -> None:
         if not self.backend:
-            raise ValueError("compile.backend cannot be empty.")
+            raise ConfigError("compile.backend cannot be empty.")
 
 
 @dataclass(kw_only=True)
@@ -310,9 +311,9 @@ class ValidationConfig:
 
     def __post_init__(self) -> None:
         if self.freq <= 0:
-            raise ValueError(f"validation.freq must be positive, got {self.freq}")
+            raise ConfigError(f"validation.freq must be positive, got {self.freq}")
         if not (self.steps > 0 or self.steps == -1):
-            raise ValueError(
+            raise ConfigError(
                 f"validation.steps must be positive or -1, got {self.steps}"
             )
 
@@ -501,25 +502,25 @@ class TrainingConfig:
 
     def __post_init__(self) -> None:
         if self.global_batch_size < 1:
-            raise ValueError(
+            raise ConfigError(
                 f"global_batch_size must be >= 1, got {self.global_batch_size}"
             )
         if self.max_seq_len < 1:
-            raise ValueError(f"max_seq_len must be >= 1, got {self.max_seq_len}")
+            raise ConfigError(f"max_seq_len must be >= 1, got {self.max_seq_len}")
         if self.steps < 1:
-            raise ValueError(f"steps must be >= 1, got {self.steps}")
+            raise ConfigError(f"steps must be >= 1, got {self.steps}")
         if self.gradient_accumulation_steps < 1:
-            raise ValueError(
+            raise ConfigError(
                 "gradient_accumulation_steps must be >= 1, got "
                 f"{self.gradient_accumulation_steps}"
             )
         if self.chunked_loss_num_chunks < 1:
-            raise ValueError(
+            raise ConfigError(
                 "chunked_loss_num_chunks must be >= 1 (1 disables chunking), "
                 f"got {self.chunked_loss_num_chunks}"
             )
         if self.activation_checkpoint_mode == "region":
-            raise NotImplementedError(
+            raise EnvironmentUnsupportedError(
                 "training.activation_checkpoint_mode='region' (upstream "
                 "RegionAC) needs torch_remat and model-declared remat "
                 "regions, which hpmesh has no equivalent of; see "
@@ -531,13 +532,13 @@ class TrainingConfig:
             "selective",
             "memory_budget",
         ):
-            raise ValueError(
+            raise ConfigError(
                 "training.activation_checkpoint_mode must be one of: 'none', "
                 "'full', 'selective', 'memory_budget' (got "
                 f"{self.activation_checkpoint_mode!r})"
             )
         if self.activation_checkpoint_mode == "memory_budget" and not self.compile:
-            raise ValueError(
+            raise ConfigError(
                 "training.activation_checkpoint_mode='memory_budget' requires "
                 "training.compile=True: the budget is consumed by the compile "
                 "partitioner, so without compile it would silently do nothing."

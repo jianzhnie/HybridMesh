@@ -12,6 +12,7 @@ from hpmesh.components.checkpointer.checkpoint_keys import (
     MODEL,
     OPTIMIZER,
 )
+from hpmesh.errors import ConfigError
 from hpmesh.utils.logger_utils import get_logger
 
 logger = get_logger(__name__)
@@ -99,25 +100,25 @@ class CheckpointConfig:
 
     def __post_init__(self) -> None:
         if not self.folder.strip():
-            raise ValueError("The 'folder' field cannot be empty.")
+            raise ConfigError("The 'folder' field cannot be empty.")
         if self.interval < 1:
-            raise ValueError("Checkpoint interval needs to be at least 1 step.")
+            raise ConfigError("Checkpoint interval needs to be at least 1 step.")
         if self.load_step < -1:
-            raise ValueError("load_step must be -1 or non-negative.")
+            raise ConfigError("load_step must be -1 or non-negative.")
         if self.keep_latest_k < 0:
-            raise ValueError("keep_latest_k cannot be negative.")
+            raise ConfigError("keep_latest_k cannot be negative.")
         if self.keep_latest_k == 1:
-            raise ValueError(
+            raise ConfigError(
                 "We need to maintain at least 2 checkpoint replicas, "
                 "as the last one may be in the process of being saved."
             )
         if MODEL in self.exclude_from_loading:
-            raise ValueError(f"{MODEL} key shouldn't be in exclude_from_loading.")
+            raise ConfigError(f"{MODEL} key shouldn't be in exclude_from_loading.")
         if (
             OPTIMIZER in self.exclude_from_loading
             and LR_SCHEDULER not in self.exclude_from_loading
         ):
-            raise ValueError(
+            raise ConfigError(
                 f"{LR_SCHEDULER} must be excluded when {OPTIMIZER} is excluded."
             )
 
@@ -127,32 +128,32 @@ class CheckpointConfig:
                 self.initial_load_path.startswith("/")
                 or filesystem.is_remote(self.initial_load_path)
             ):
-                raise ValueError(
+                raise ConfigError(
                     "initial_load_path must be an absolute path or a remote "
                     f"URI (e.g. gs://...): {self.initial_load_path}"
                 )
         if self.initial_load_in_hf and not self.initial_load_model_only:
-            raise ValueError("initial_load_in_hf requires initial_load_model_only.")
+            raise ConfigError("initial_load_in_hf requires initial_load_model_only.")
         if self.initial_load_in_hf_quantized and not (
             self.initial_load_in_hf and self.initial_load_path
         ):
-            raise ValueError(
+            raise ConfigError(
                 "initial_load_in_hf_quantized requires initial_load_in_hf "
                 "and initial_load_path."
             )
         if self.last_save_in_hf and not self.last_save_model_only:
-            raise ValueError("last_save_in_hf requires last_save_model_only=True.")
+            raise ConfigError("last_save_in_hf requires last_save_model_only=True.")
 
         async_lowered = self.async_mode.lower()
         if async_lowered not in ("disabled", "async", "async_with_pinned_mem"):
-            raise ValueError(f"Invalid async_mode: {async_lowered}")
+            raise ConfigError(f"Invalid async_mode: {async_lowered}")
         self.async_mode = async_lowered
 
         # Remote (fsspec) checkpoint IO supports only the native DCP format. HF
         # safetensors read/write to a remote URI is not implemented, so reject
         # the combination up front instead of failing deep inside DCP.
         if self.last_save_in_hf and filesystem.is_remote(self.folder):
-            raise ValueError(
+            raise ConfigError(
                 "last_save_in_hf is not supported with a remote "
                 f"checkpoint.folder: {self.folder}"
             )
@@ -161,7 +162,7 @@ class CheckpointConfig:
             and self.initial_load_path
             and filesystem.is_remote(self.initial_load_path)
         ):
-            raise ValueError(
+            raise ConfigError(
                 "initial_load_in_hf is not supported with a remote "
                 f"initial_load_path: {self.initial_load_path}"
             )

@@ -70,6 +70,8 @@ from __future__ import annotations
 
 import torch.nn as nn
 
+from hpmesh.errors import EnvironmentUnsupportedError
+
 from ...models.common.token_dispatcher import EP_DISPATCHER_BACKENDS
 from ...utils.logger_utils import get_logger
 from .convert import _convert_block, _restore_fp32_state_buffers
@@ -152,7 +154,7 @@ def swap_hf_moe_blocks(
             f"of {EP_DISPATCHER_BACKENDS}."
         )
     if token_dispatcher in ("deepep", "hybridep"):
-        raise NotImplementedError(
+        raise EnvironmentUnsupportedError(
             f"ep_token_dispatcher={token_dispatcher!r} is a registered gap: "
             "CUDA-only kernels plus torchtitan's distributed/deepep/ wrappers "
             "that hpmesh does not vendor. Use 'alltoall' meanwhile."

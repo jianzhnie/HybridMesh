@@ -37,6 +37,7 @@ from torch.distributed.pipelining.schedules import (
 )
 
 from hpmesh.config import ParallelConfig
+from hpmesh.errors import UnsupportedCombinationError
 
 from ...components.loss import cross_entropy_loss
 from ...utils.logger_utils import get_logger
@@ -255,19 +256,19 @@ def apply_pp(
     schedule over the stages is built separately (``build_pipeline_schedule``).
     """
     if parallel_dims.cp_enabled or parallel_dims.ep_enabled:
-        raise NotImplementedError(
+        raise UnsupportedCombinationError(
             "pp > 1 does not compose with cp > 1 or ep > 1 yet: CP shards the "
             "batch the schedule consumes and EP swaps MoE blocks per chunk, and "
             "neither path is wired through the pipeline. Run them separately."
         )
     if dataset != "random":
-        raise NotImplementedError(
+        raise UnsupportedCombinationError(
             "pp > 1 supports only the synthetic 'random' corpus: a packed real "
             "corpus supplies per-token positions, and the pipeline body does "
             "not thread them through the schedule."
         )
     if getattr(model, "enable_weight_tying", False):
-        raise NotImplementedError(
+        raise UnsupportedCombinationError(
             "pp > 1 with tied word embeddings is not supported: the split puts "
             "the embedding on the first stage and the head on the last, and "
             "each stage's deep copy would train an independent copy of the "

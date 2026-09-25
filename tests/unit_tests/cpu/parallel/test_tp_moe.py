@@ -19,6 +19,7 @@ import pytest
 import torch
 import torch.nn as nn
 
+from hpmesh.errors import UnsupportedCombinationError
 from hpmesh.parallel.tensor_parallel import apply_tp
 from hpmesh.parallel.tensor_parallel.tp import (
     _MOE_PLAN_SPECS,
@@ -261,7 +262,7 @@ def test_apply_tp_raises_when_moe_specs_match_no_block() -> None:
             self.proj = nn.Linear(4, 4)
 
     cfg = ParallelConfig(tensor_parallel_size=2)
-    with pytest.raises(ValueError, match="no HF MoE block"):
+    with pytest.raises(UnsupportedCombinationError, match="no HF MoE block"):
         apply_tp(Dense(), mesh=object(), cfg=cfg)
 
 

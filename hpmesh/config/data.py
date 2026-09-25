@@ -5,6 +5,8 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Literal
 
+from hpmesh.errors import ConfigError
+
 
 @dataclass(kw_only=True)
 class DataloaderConfig:
@@ -131,24 +133,24 @@ class DataloaderConfig:
 
     def __post_init__(self) -> None:
         if self.dataset != "random" and not self.tokenizer_path:
-            raise ValueError(
+            raise ConfigError(
                 f"tokenizer_path is required for dataset '{self.dataset}'. "
                 "Only 'random' runs without a tokenizer."
             )
         if self.dataset in {"local_jsonl", "local_jsonl_sft"} and not self.dataset_path:
-            raise ValueError(f"dataset_path is required for dataset {self.dataset!r}")
+            raise ConfigError(f"dataset_path is required for dataset {self.dataset!r}")
         if self.dataset == "local_jsonl_sft" and (
             not self.prompt_field.strip() or not self.response_field.strip()
         ):
-            raise ValueError("local_jsonl_sft field names cannot be empty")
+            raise ConfigError("local_jsonl_sft field names cannot be empty")
         if self.chat_renderer is not None:
             if self.dataset != "local_jsonl_sft":
-                raise ValueError(
+                raise ConfigError(
                     f"chat_renderer requires dataset='local_jsonl_sft', got "
                     f"{self.dataset!r}"
                 )
             if not self.messages_field.strip():
-                raise ValueError(
+                raise ConfigError(
                     "messages_field cannot be empty when chat_renderer is set"
                 )
         # Membership in ``datasets.text.text.DATASETS`` /
@@ -156,9 +158,9 @@ class DataloaderConfig:
         # ``datasets/build.py`` at build time, not here: reading the registries
         # would import the datasets package into the config layer.
         if self.max_num_documents is not None and self.max_num_documents <= 0:
-            raise ValueError("max_num_documents must be positive")
+            raise ConfigError("max_num_documents must be positive")
         # Validated here even though only 'first_fit' reads it: the field is
         # always parsed, so a bad value would otherwise be accepted silently
         # under the default recipe and only fail after switching to first_fit.
         if self.num_packing_bins <= 0:
-            raise ValueError("num_packing_bins must be positive")
+            raise ConfigError("num_packing_bins must be positive")

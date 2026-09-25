@@ -438,6 +438,11 @@ step 1 恢复 optimizer、scheduler、dataloader 和 train state 后完成并保
 | `trainer/train.py` | parse/main | B，根 `train.py` |
 | `trainer/trainer.py`（+ `validation.py` / `pp_steps.py` 抽出的 validation 与 PP microbatch 段） | 完整训练生命周期 | B，根 `trainer.py` + `training_engine.py` |
 | `utils/batch_invariant.py` | batch-invariant getter/setter | C，上游开关散在 trainer/config |
+
+错误处理约定：fail-fast 类型层级在 `hpmesh/errors.py`——`ConfigError`
+（配置非法，兼 `ValueError`）、`UnsupportedCombinationError`（组合拒绝，兼
+`NotImplementedError`）、`EnvironmentUnsupportedError`（依赖缺失、文案带解锁
+条件，兼 `NotImplementedError`）；可选包缺失保持 `ImportError`。
 | `components/checkpointer/checkpoint_keys.py` | checkpoint state key 常量 | C |
 | `accelerator/device.py` | 设备发现、backend 选择、厂商谓词、峰值显存查询 | C |
 | `components/checkpointer/filesystem.py` | path/storage helpers | A1，`tools/filesystem.py` |

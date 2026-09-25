@@ -22,6 +22,7 @@ from hpmesh.config import (
     ParallelConfig,
     TrainingConfig,
 )
+from hpmesh.errors import UnsupportedCombinationError
 
 # -- ParallelConfig ----------------------------------------------------------
 
@@ -118,7 +119,9 @@ def test_ulysses_cannot_share_a_load_balancer() -> None:
     ``'headtail'``, so selecting ``ulysses`` on its own is already the illegal
     pairing -- the user has to actively turn the balancer off.
     """
-    with pytest.raises(ValueError, match="requires.*load_balancer=None"):
+    with pytest.raises(
+        UnsupportedCombinationError, match="requires.*load_balancer=None"
+    ):
         ParallelConfig(context_parallel_strategy="ulysses")
 
     cfg = ParallelConfig(

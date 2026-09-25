@@ -44,6 +44,7 @@ from hpmesh.config import (
     ParallelConfig,
     SelectiveACConfig,
 )
+from hpmesh.errors import UnsupportedCombinationError
 
 from ..utils.logger_utils import get_logger
 from .activation_checkpoint import apply_ac
@@ -95,7 +96,7 @@ def parallelize_hf_transformers(
     """
     if parallel_dims is not None and parallel_dims.pp_enabled:
         if activation_checkpoint != "none":
-            raise NotImplementedError(
+            raise UnsupportedCombinationError(
                 "activation checkpointing is not wired through the pp > 1 path: "
                 "it belongs between apply_tp and compile in the per-chunk "
                 "pipeline below, which does not accept it yet."
