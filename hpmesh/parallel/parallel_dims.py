@@ -5,7 +5,7 @@ from enum import StrEnum
 
 from torch.distributed.device_mesh import DeviceMesh, init_device_mesh
 
-from hpmesh.config import ParallelConfig
+from hpmesh.config import HybridMeshConfig, ParallelConfig
 
 from ..accelerator.device import device_type
 from ..utils.logger_utils import get_logger
@@ -14,8 +14,11 @@ logger = get_logger(__name__)
 
 
 __all__ = [
+    "MESH_AXES",
     "MeshAxisName",
     "ParallelDims",
+    "build_mesh",
+    "build_parallel_dims",
 ]
 
 
@@ -470,3 +473,68 @@ class ParallelDims:
     @property
     def non_data_parallel_size(self):
         return self.cp * self.tp * self.pp
+
+
+# Mesh axis names. `axis` names a specific DeviceMesh axis; `dim` is for shapes.
+# These are the axes of the dense mesh the parallel layer is handed; ``pp`` is
+# not among them because pipeline stages live on disjoint rank sets -- the PP
+# path resolves its own views off ParallelDims instead (see
+# parallel/pipeline_parallel/apply.py).
+MESH_AXES = ("dp", "cp", "tp")
+
+
+def build_parallel_dims(cfg: HybridMeshConfig, world_size: int) -> ParallelDims | None:
+    """Resolve the parallelism degrees against ``world_size`` (torchtitan class).
+
+    Single-process (step 0, no torchrun) -> ``None``: no process group, no
+    parallelism, so downstream code guards on ``parallel_dims is None``.
+    """
+    if world_size == 1:
+        return None
+    return ParallelDims.from_config(cfg.parallel, world_size)
+
+
+def build_mesh(parallel_dims: ParallelDims | None):
+    """The dense ``(dp, cp, tp)`` mesh the parallel ``apply_*`` functions index.
+
+    Takes the *already-resolved* ``ParallelDims`` (see ``build_parallel_dims``)
+    rather than a config, so a run has exactly one degree-resolution object --
+    and therefore one set of process groups. ``None`` in, ``None`` out: there is
+    no process group and no parallelism to describe.
+
+    Aliases ``ParallelDims.spmd_dense_mesh()``, which is the same object the
+    SPMD context registers, so ``apply_tp``'s ``mesh["tp"]`` and a component's
+    ``spmd_mesh_group("tp")`` resolve to the very same process group.
+
+    ``build_mesh`` deliberately does NOT call ``init_device_mesh`` itself. The
+    parallelism layer needs more than one view of the same ranks -- FSDP wants
+    ``(dp_replicate, dp_shard, cp, tp)``, SPMD type checking wants ``(dp, cp,
+    tp)`` with the two DP axes folded and singletons dropped, EP wants a
+    separate sparse mesh -- and those views have to come from ONE unflatten of
+    the world mesh or they end up with disjoint process groups covering the
+    same ranks. ``ParallelDims`` owns that unflatten; this function just hands
+    back the dense view the parallel ``apply_*`` functions index.
+    """
+    if parallel_dims is None:
+        return None
+    mesh = parallel_dims.spmd_dense_mesh()
+    if mesh.mesh_dim_names != MESH_AXES:
+        raise ValueError(
+            f"dense mesh axes {mesh.mesh_dim_names} != expected {MESH_AXES}; the "
+            "parallel layer indexes these names directly"
+        )
+    # The dense mesh spans dp * cp * tp ranks. PP is not an axis of it, so a
+    # ``pp > 1`` run must not be handed this mesh as if it covered the world:
+    # the trainer takes the per-stage dense view off ``parallel_dims`` instead.
+    covered = (
+        parallel_dims.dp_replicate
+        * parallel_dims.dp_shard
+        * parallel_dims.cp
+        * parallel_dims.tp
+    )
+    if covered != parallel_dims.world_size:
+        raise ValueError(
+            f"dense mesh (dp*cp*tp = {covered}) does not cover the world "
+            f"({parallel_dims.world_size} ranks); is pp > 1?"
+        )
+    return mesh

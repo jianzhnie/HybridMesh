@@ -4,12 +4,13 @@
 driver around it, vendored in shape from torchtitan's
 ``distributed/pipeline_parallel.pipeline_llm``:
 
-* ``apply_pp`` -- decides the stage count from the schedule class, splits the
-  model, and runs each chunk through the same per-model parallelisms the
-  unsplit path applies (TP, then FSDP, in ``parallelize_hf``'s order). Its
-  ``first_stage_module_fqns`` option is torchtitan's
-  ``pipeline_with_first_stage_modules``: extra top-level modules co-located
-  with stage 0 (see ``_prepend_first_stage_modules``).
+* ``apply_pp`` -- decides the stage count from the schedule class and splits
+  the model into this rank's stages. Parallelizing the resulting chunks (TP,
+  compile, FSDP) is the caller's job: ``parallelize_hf`` owns that assembly
+  order for both the split and the unsplit path, so this module never imports
+  a sibling parallelism family. Its ``first_stage_module_fqns`` option is
+  torchtitan's ``pipeline_with_first_stage_modules``: extra top-level modules
+  co-located with stage 0 (see ``_prepend_first_stage_modules``).
 * ``build_pipeline_schedule`` -- instantiates the torch pipelining schedule
   over this rank's stages, with the summed next-token CE the trainer
   normalizes, wrapped down to the bare scalar a schedule requires.
@@ -35,14 +36,11 @@ from torch.distributed.pipelining.schedules import (
     get_schedule_class,
 )
 
-from hpmesh.config import CompileConfig, ParallelConfig
+from hpmesh.config import ParallelConfig
 
 from ...components.loss import cross_entropy_loss
 from ...utils.logger_utils import get_logger
-from ..compile import apply_compile
-from ..fully_shard.apply import apply_fsdp
 from ..parallel_dims import ParallelDims
-from ..tensor_parallel.tp import apply_tp
 from .pipeline import generate_llm_fqn_per_model_part, split_model_into_stages
 
 logger = get_logger(__name__)
@@ -228,17 +226,15 @@ def apply_pp(
     device: torch.device,
     global_batch_size: int,
     dataset: str = "random",
-    compile: bool = False,
-    compile_config: CompileConfig | None = None,
     first_stage_module_fqns: Sequence[str] | None = None,
 ) -> tuple[list[PipelineStage], list[nn.Module], bool, bool]:
-    """Split ``model`` into this rank's pipeline stages and parallelize them.
+    """Split ``model`` into this rank's pipeline stages.
 
-    Each chunk goes through the same per-model parallelisms the unsplit path
-    applies, in the same relative order as ``parallelize_hf_transformers``:
-    TP, then (if configured) ``torch.compile``, then FSDP. The chunk a stage
-    object holds is rebound afterwards, so a wrapping transform (compile)
-    cannot leave the stage running the pre-wrap module.
+    The chunks come back unparallelized: running each through TP, (optionally)
+    ``torch.compile`` and FSDP -- and rebinding ``stage.submod`` afterwards, so
+    a wrapping transform cannot leave the stage running the pre-wrap module --
+    is ``parallelize_hf_transformers``'s job, which owns that assembly order
+    for the split and unsplit paths alike.
 
     ``global_batch_size`` and ``dataset`` are training-side values the PP
     guards need; they are explicit parameters rather than reads off a
@@ -319,20 +315,6 @@ def apply_pp(
         device,
         module_names_per_stage,
     )
-
-    # The dense view excludes the pp axis, so it covers exactly this stage's
-    # coordinates -- the mesh the per-part apply_* functions would have been
-    # handed had the model never been split.
-    dense_mesh = parallel_dims.spmd_dense_mesh()
-    tp_mesh = parallel_dims.get_optional_mesh("tp")
-    for i, part in enumerate(model_parts):
-        part = apply_tp(part, dense_mesh, cfg)
-        if compile:
-            part = apply_compile(part, compile_config=compile_config, tp_mesh=tp_mesh)
-        part = apply_fsdp(part, cfg, parallel_dims)
-        model_parts[i] = part
-        # Rebind the stage's submodule in case a transform replaced the chunk.
-        stages[i].submod = part
 
     has_first_stage = any(stage.is_first for stage in stages)
     has_last_stage = any(stage.is_last for stage in stages)

@@ -20,8 +20,7 @@ import torch
 import torch.distributed as dist
 from torch.distributed.device_mesh import init_device_mesh
 
-from hpmesh.accelerator.mesh import build_parallel_dims
-from hpmesh.parallel.parallel_dims import ParallelDims
+from hpmesh.parallel.parallel_dims import ParallelDims, build_parallel_dims
 from hpmesh.trainer import HybridMeshConfig, ParallelConfig
 
 

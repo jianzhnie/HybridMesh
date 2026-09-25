@@ -115,7 +115,6 @@ from ..accelerator.device import (
 )
 from ..accelerator.dist import all_reduce
 from ..accelerator.dist_utils import _init_dist_pytorch, is_distributed
-from ..accelerator.mesh import build_mesh, build_parallel_dims
 from ..accelerator.spmd_context import spmd_context
 from ..components.checkpointer import DATALOADER, TRAIN_STATE, CheckpointManager
 from ..components.loss import (
@@ -152,7 +151,7 @@ from ..models.hf_wrapper import (
     materialize_meta_model,
     num_flops_per_token,
 )
-from ..parallel.parallel_dims import ParallelDims
+from ..parallel.parallel_dims import ParallelDims, build_mesh, build_parallel_dims
 from ..parallel.pipeline_parallel import PipelineParallelSetup
 from ..parallel.tensor_parallel.tp import (
     ColwiseLinear,
@@ -305,8 +304,9 @@ class Trainer:
             # The dense (dp, cp, tp) mesh does not cover the world under PP,
             # so ``build_mesh``'s coverage backstop would reject it. The same
             # view over this rank's non-PP coordinates exists per stage and is
-            # what the per-part apply_* functions index (apply_pp resolves it
-            # off parallel_dims itself); keep the attribute consistent.
+            # what the per-part apply_* functions index (parallelize_hf
+            # resolves it off parallel_dims itself); keep the attribute
+            # consistent.
             self.mesh = self.parallel_dims.spmd_dense_mesh()
         else:
             self.mesh = build_mesh(self.parallel_dims)

@@ -56,7 +56,7 @@ from hpmesh.parallel.context_parallel import (
     shard_batch_for_tp,
 )
 from hpmesh.parallel.parallel_dims import ParallelDims
-from hpmesh.parallel.tensor_parallel.tp import apply_tp
+from hpmesh.parallel.tensor_parallel import apply_tp
 from hpmesh.trainer import HybridMeshConfig, ModelConfig, ParallelConfig, TrainingConfig
 
 SEQ = 256  # torch's CP BlockMask path requires Q_LEN % (cp * 128) == 0

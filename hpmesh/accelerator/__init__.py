@@ -5,9 +5,6 @@ Members:
 
 * ``device.py`` -- hpmesh's backend-neutral device module (NPU/CUDA/MLU/MUSA
   discovery, distributed-backend selection, per-vendor predicates).
-* ``mesh.py`` -- ``build_parallel_dims`` / ``build_mesh``: topology
-  construction (the trainer bootstraps its PG via
-  ``dist_utils._init_dist_pytorch``).
 * ``collectives.py`` -- PG timeouts (``set_pg_timeouts``) and EP-aware
   ``clip_grad_norm_``.
 * ``monitoring.py`` -- device memory monitors/snapshots and ``get_peak_flops``.
@@ -18,11 +15,14 @@ Members:
   (multi-launcher ``init_dist``, object collectives, ``cast_data_device``).
 
 The vendored toolbox is re-exported here lazily (PEP 562): importing this
-package or a sibling submodule (``hpmesh.accelerator.mesh`` ...) does not pay
-for ``dist.py`` unless a toolbox name is actually touched. ``mesh`` /
-``collectives`` / ``monitoring`` / ``spmd_context`` are imported as
-submodules -- re-exporting them would make ``import hpmesh.accelerator``
-pull in the parallel and trainer layers and close an import cycle.
+package or a sibling submodule (``hpmesh.accelerator.device`` ...) does not pay
+for ``dist.py`` unless a toolbox name is actually touched. ``collectives`` /
+``monitoring`` / ``spmd_context`` are imported as submodules -- re-exporting
+them would make ``import hpmesh.accelerator`` pull in the parallel and
+trainer layers and close an import cycle. Topology construction
+(``build_parallel_dims`` / ``build_mesh``) lives with ``ParallelDims`` in
+``hpmesh/parallel/parallel_dims.py``; the trainer bootstraps its PG via
+``dist_utils._init_dist_pytorch``.
 """
 
 _EXPORT_SOURCES = {
