@@ -57,7 +57,7 @@ from ...utils import filesystem
 from ...utils.gc import GarbageCollection
 
 if TYPE_CHECKING:
-    from ...trainer.config import CheckpointConfig
+    from ...config import CheckpointConfig
 
 from ...utils.logger_utils import get_logger
 from .base import (

@@ -11,7 +11,7 @@ import pytest
 import torch
 
 from hpmesh.components.optimizer import LRSchedulersContainer, build_lr_scheduler
-from hpmesh.trainer.config import LRSchedulerConfig
+from hpmesh.config import LRSchedulerConfig
 
 
 def _optimizer(lr: float = 1.0) -> torch.optim.Optimizer:

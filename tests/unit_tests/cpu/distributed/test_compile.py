@@ -31,7 +31,7 @@ import contextlib
 import pytest
 import torch
 
-from hpmesh.trainer.config import (
+from hpmesh.config import (
     CompileConfig,
     HybridMeshConfig,
     ParallelConfig,

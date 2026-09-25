@@ -44,6 +44,7 @@ import sys
 import torch
 import torch.distributed as dist
 
+from hpmesh.config import CheckpointConfig, MetricsConfig
 from hpmesh.trainer import (
     HybridMeshConfig,
     ModelConfig,
@@ -51,7 +52,6 @@ from hpmesh.trainer import (
     ParallelConfig,
     TrainingConfig,
 )
-from hpmesh.trainer.config import CheckpointConfig, MetricsConfig
 from hpmesh.trainer.trainer import Trainer
 
 SPLIT_STEP = 2  # N: checkpoint taken after this many steps

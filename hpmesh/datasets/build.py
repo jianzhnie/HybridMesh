@@ -40,7 +40,7 @@ from .text.text import (
 from .types import DatasetBuildContext, DatasetIterationPolicy
 
 if TYPE_CHECKING:
-    from ..trainer.config import HybridMeshConfig
+    from ..config import HybridMeshConfig
 
 __all__ = ["build_dataloader"]
 
@@ -54,7 +54,7 @@ def build_dataloader(
     repeat: bool = True,
     dataset: str | None = None,
 ) -> BaseDataLoader:
-    """Build the loader a :class:`~hpmesh.trainer.config.HybridMeshConfig` names.
+    """Build the loader a :class:`~hpmesh.config.HybridMeshConfig` names.
 
     The config answers everything that describes the *run*; the keyword
     arguments answer the things it cannot. ``config.dataloader`` (a

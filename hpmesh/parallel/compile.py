@@ -43,7 +43,7 @@ from collections.abc import Callable
 import torch
 import torch.nn as nn
 
-from hpmesh.trainer.config import CompileConfig
+from hpmesh.config import CompileConfig
 
 from ..models.common.moe import _iter_moe_layers
 from ..utils.logger_utils import get_logger

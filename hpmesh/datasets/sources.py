@@ -3,7 +3,7 @@
 Vendored from torchtitan ``components/data/sources.py``. Each source is a plain
 dataclass describing *what* to read; :func:`build_source` -- a free function, not
 a method -- is what reads it. That split is the same one every other config in
-hpmesh uses (``trainer/config.py``: configs are descriptions, not builders), and
+hpmesh uses (``hpmesh/config/``: configs are descriptions, not builders), and
 it is what lets a dataset catalog hold sources at module scope without touching
 the filesystem or the Hub: constructing one resolves nothing.
 

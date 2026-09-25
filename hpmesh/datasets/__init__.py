@@ -1,7 +1,7 @@
 """The data pipeline: a Grain dataset graph plus the loaders that drive it.
 
 The public surface is the substrate below plus ``build_dataloader``, which
-assembles them from a ``trainer.config.DataloaderConfig``. The concrete dataset
+assembles them from a ``hpmesh.config.DataloaderConfig``. The concrete dataset
 catalogs (``datasets.text.text``, ``datasets.multimodal.mm_datasets``) are
 deliberately not re-exported: they pull in optional dependencies -- torchvision,
 and a video backend behind them -- that a run using none of them should not have

@@ -23,8 +23,8 @@ until something addressed a rank through one group and collected on another.
 
 from __future__ import annotations
 
+from ..config import HybridMeshConfig
 from ..parallel.parallel_dims import ParallelDims
-from ..trainer.config import HybridMeshConfig
 
 # Mesh axis names. `axis` names a specific DeviceMesh axis; `dim` is for shapes.
 # These are the axes of the dense mesh the parallel layer is handed; ``pp`` is

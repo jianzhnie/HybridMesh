@@ -51,7 +51,7 @@ import torch
 import torch.nn as nn
 from torch.distributed.device_mesh import DeviceMesh
 
-from hpmesh.trainer.config import ParallelConfig
+from hpmesh.config import ParallelConfig
 
 from .linear import (
     AllGatherLinear,

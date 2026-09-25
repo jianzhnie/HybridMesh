@@ -5,7 +5,7 @@ from __future__ import annotations
 import torch.nn as nn
 from torch.distributed.device_mesh import DeviceMesh
 
-from hpmesh.trainer.config import ParallelConfig
+from hpmesh.config import ParallelConfig
 
 from ...utils.logger_utils import get_logger
 from .cp_kernel import CPFlexKernel

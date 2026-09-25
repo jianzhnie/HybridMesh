@@ -33,6 +33,7 @@ import torch.distributed as dist
 import torch.nn.functional as F
 
 from hpmesh.accelerator.mesh import build_mesh
+from hpmesh.config import ParallelConfig
 from hpmesh.models.hf_wrapper import HFTransformerModel, build_model_config
 from hpmesh.parallel.parallel_dims import ParallelDims
 from hpmesh.parallel.tensor_parallel.tp import (
@@ -41,7 +42,6 @@ from hpmesh.parallel.tensor_parallel.tp import (
     RowwiseLinear,
     apply_tp,
 )
-from hpmesh.trainer.config import ParallelConfig
 from hpmesh.trainer.trainer import Trainer
 
 SEQ = 16

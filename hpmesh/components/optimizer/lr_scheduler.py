@@ -15,7 +15,7 @@ is exactly what this class holds, and why it exists rather than a bare
 Departures from upstream:
 
 * **The config is not defined here.** The knobs live in ``LRSchedulerConfig`` in
-  ``hpmesh.trainer.config``, with every other config in the package;
+  ``hpmesh.config``, with every other config in the package;
   :func:`build_lr_scheduler` is the seam that turns one into the container.
   Upstream's ``Config.build`` is that seam, spelled with torchtitan's config
   system.
@@ -41,9 +41,9 @@ from torch.optim.lr_scheduler import LambdaLR
 from ...utils.logger_utils import get_logger
 
 if TYPE_CHECKING:
-    # ``trainer.config`` imports this package, so the runtime import happens
+    # ``hpmesh.config`` imports this package, so the runtime import happens
     # inside ``build_lr_scheduler`` -- the one place a config's fields are read.
-    from ...trainer.config import LRSchedulerConfig
+    from ...config import LRSchedulerConfig
 
 logger = get_logger(__name__)
 
@@ -185,7 +185,7 @@ def build_lr_scheduler(
     optimizers: list[Optimizer],
     training_steps: int,
 ) -> LRSchedulersContainer:
-    """Build the schedule a :class:`~hpmesh.trainer.config.LRSchedulerConfig`
+    """Build the schedule a :class:`~hpmesh.config.LRSchedulerConfig`
     describes.
 
     ``training_steps`` is the run's actual length; the config's ``total_steps``

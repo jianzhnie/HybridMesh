@@ -15,6 +15,7 @@ import types
 import pytest
 import torch
 
+from hpmesh.config import ParallelConfig
 from hpmesh.models.common.token_dispatcher import (
     TORCHAO_INSTALL_HINT,
     AllToAllTokenDispatcher,
@@ -22,7 +23,6 @@ from hpmesh.models.common.token_dispatcher import (
     TorchAOTokenDispatcher,
 )
 from hpmesh.parallel.expert_parallel.swap import swap_hf_moe_blocks
-from hpmesh.trainer.config import ParallelConfig
 
 # --------------------------------------------------------------------------
 # config gating

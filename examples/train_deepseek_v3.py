@@ -29,7 +29,7 @@ from hpmesh.trainer import (
     ParallelConfig,
     TrainingConfig,
 )
-from hpmesh.trainer.config import MetricsConfig
+from hpmesh.config import MetricsConfig
 from hpmesh.trainer.trainer import Trainer
 
 

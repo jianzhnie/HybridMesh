@@ -35,6 +35,12 @@ from torch.distributed.algorithms._checkpoint.checkpoint_wrapper import (
 )
 from torch.utils.checkpoint import CheckpointPolicy
 
+from hpmesh.config import (
+    MemoryBudgetACConfig,
+    ParallelConfig,
+    SelectiveACConfig,
+    TrainingConfig,
+)
 from hpmesh.models.hf_wrapper import HFTransformerModel, build_model_config
 from hpmesh.parallel.activation_checkpoint import (
     VALID_AC_MODES,
@@ -44,12 +50,6 @@ from hpmesh.parallel.activation_checkpoint import (
     apply_ac,
 )
 from hpmesh.parallel.parallelize_hf import parallelize_hf_transformers
-from hpmesh.trainer.config import (
-    MemoryBudgetACConfig,
-    ParallelConfig,
-    SelectiveACConfig,
-    TrainingConfig,
-)
 
 _VOCAB = 32
 _HIDDEN = 16

@@ -19,6 +19,7 @@ import torch
 import torch.distributed as dist
 
 from hpmesh.components.loss import IGNORE_INDEX
+from hpmesh.config import MetricsConfig
 from hpmesh.trainer import (
     HybridMeshConfig,
     ModelConfig,
@@ -26,7 +27,6 @@ from hpmesh.trainer import (
     ParallelConfig,
     TrainingConfig,
 )
-from hpmesh.trainer.config import MetricsConfig
 from hpmesh.trainer.trainer import Trainer
 
 SEQ = 32

@@ -56,7 +56,7 @@ import os
 
 from transformers import HfArgumentParser
 
-from .config import (
+from hpmesh.config import (
     CheckpointConfig,
     DataloaderConfig,
     HybridMeshConfig,
@@ -68,6 +68,7 @@ from .config import (
     ProfilerConfig,
     TrainingConfig,
 )
+
 from .trainer import Trainer
 
 

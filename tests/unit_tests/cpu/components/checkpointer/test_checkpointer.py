@@ -21,8 +21,8 @@ from hpmesh.components.checkpointer import (
 from hpmesh.components.checkpointer.dcp import _FilesystemCheckpointStorage
 from hpmesh.components.optimizer import init_optim_state
 from hpmesh.components.optimizer.lr_scheduler import build_lr_scheduler
-from hpmesh.trainer.config import CheckpointConfig as Config
-from hpmesh.trainer.config import LRSchedulerConfig
+from hpmesh.config import CheckpointConfig as Config
+from hpmesh.config import LRSchedulerConfig
 
 # -- canonical_fqn ------------------------------------------------------------
 

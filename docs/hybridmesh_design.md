@@ -104,7 +104,7 @@ G1 决定模型层只能依赖 HF 公共约定（`config.architectures`、常见
 
 ```
 +---------------------------------------------------------------+
-|  CLI (HfArgumentParser)              trainer/config.py        |
+|  CLI (HfArgumentParser)              config/ (顶层配置包)      |
 |  Model/Parallel/Optimizer/TrainingArguments -> HybridMeshConfig|
 +---------------------------------------------------------------+
                           |  组装层读取; 不向下传
@@ -165,7 +165,9 @@ import trainer 或读取全局 run config；跨 models/parallel 的依赖必须�
 ```
 hpmesh/
   __main__.py / __init__.py     入口: python -m hpmesh
-  trainer/      4 模块          config.py / trainer.py / train.py
+  config/       8 模块          model/parallel/optimizer/checkpoint/data/
+                                training/root.py + __init__(全量再导出)
+  trainer/      3 模块          trainer.py / train.py
   models/      19 模块          hf_wrapper.py + common/{rope,masks,qkv,moe,...}
   parallel/    20 模块          tensor_parallel/
                                 fully_shard/ pipeline_parallel/ context_parallel/
@@ -188,14 +190,14 @@ hpmesh/
 
 ### 4.1 SEAM 0：唯一配置入口
 
-`HybridMeshConfig`（trainer/config.py）由四组 dataclass **组合**（不是多继承）：
+`HybridMeshConfig`（config/root.py，经 `hpmesh.config` 再导出）由四组 dataclass **组合**（不是多继承）：
 `ModelArguments / ParallelArguments / OptimizerArguments / TrainingArguments`。CLI 用
 `HfArgumentParser` 平铺解析四组 flag，组合后经 `cfg.auto_fill_model()`（hub id 时从
 HF 拉架构补齐）得到唯一配置对象。
 
 配置流动遵守 G2：只有 trainer 组装层读 `HybridMeshConfig`；往下传递时拆成显式参数——
 `ParallelDims.from_config(cfg.parallel, world_size)` 读度数，`apply_*` 收
-`cfg.parallel`（`ParallelConfig`，与其余配置组一起住在 `trainer/config.py`），只读
+`cfg.parallel`（`ParallelConfig`，与其余配置组一起住在 `hpmesh/config/` 包），只读
 自己的字段（`cfg.tp` / `cfg.cp` 等短别名 property）；少数训练侧标量（`compile` /
 `global_batch_size` / `dataset`）由调用方显式传入。没有 config 树 `traverse`，没有
 运行时 override 机制——要改配置就改 CLI flag 或改 dataclass 默认值。

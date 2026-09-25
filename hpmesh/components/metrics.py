@@ -74,8 +74,8 @@ if TYPE_CHECKING:
     # Annotation-only. ``parallel_dims`` imports the training config, which
     # imports the checkpointer, so importing it for real here would close a
     # cycle back into the components package that only exists to name a type.
+    from ..config import MetricsConfig
     from ..parallel.parallel_dims import ParallelDims
-    from ..trainer.config import MetricsConfig
 
 # hpmesh configures handlers per module, rather than on the root logger the
 # way torchtitan does, so this has to be get_logger for the metrics lines to

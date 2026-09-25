@@ -44,7 +44,7 @@ step 1 恢复 optimizer、scheduler、dataloader 和 train state 后完成并保
 | hpmesh 重要符号 | TorchTitan 对应实现 | 主要差异 | 结论/维护动作 |
 |---|---|---|---|
 | `trainer.train.parse_config`, `main` | `torchtitan/train.py` | hpmesh 直接构造一个集中式 dataclass 配置；上游构造 Configurable 树 | 通过（适配）；同步启动顺序和全局运行时设置，不同步配置树 |
-| `trainer.config.HybridMeshConfig` 及各子 config | `config/configs.py` 与各组件嵌套 `Config` | hpmesh 的 SEAM 0：全部字段集中；上游字段分散在组件 | 通过（适配）；新增功能必须先落到这里 |
+| `hpmesh.config.HybridMeshConfig` 及各子 config | `config/configs.py` 与各组件嵌套 `Config` | hpmesh 的 SEAM 0：全部字段集中；上游字段分散在组件 | 通过（适配）；新增功能必须先落到这里 |
 | `HybridMeshConfig.auto_fill_model` | 上游模型 registry/config build | hpmesh 用 HF `AutoConfig` 填充；上游选原生模型 config | 通过；本地模型与 Hub 配置分别测试 |
 | `accelerator.mesh.build_parallel_dims`, `build_mesh` | `distributed/parallel_dims.py` + `trainer.py` | 上游无单一对应函数；hpmesh 把解析与 mesh 构造分开 | 通过（适配） |
 | `accelerator.dist_utils._init_dist_pytorch` | `train.py` 的 PG 初始化段 | 2026-09-24 起为 trainer 的 PG 引导（原 `mesh.init_distributed` 已并入）：trainer 直接调它而非 `init_dist` 门面，避开后者的 `mp.set_start_method('spawn')` 副作用；厂商加速器 backend 由设备层推导，CUDA 路径才消费 `backend` 实参 | 通过；后端特有行为需实际设备验证 |
@@ -434,7 +434,7 @@ step 1 恢复 optimizer、scheduler、dataloader 和 train state 后完成并保
 | `parallel/pipeline_parallel/apply.py` | metadata、apply、schedule build | B，`distributed/pipeline_parallel.py` |
 | `parallel/tensor_parallel/linear.py` | fused/fallback collective GEMM | A2，`models/common/dist_gemm.py`（原 `distributed/linear.py`，上游已删除并搬迁改名） |
 | `parallel/tensor_parallel/tp.py` | HF plan realizer 与 `apply_tp` | B，各模型 TP plan（上游 `distributed/tensor_parallel.py` 已删除，无后继） |
-| `trainer/config.py` | 全部配置 dataclass | B，`config/configs.py` + 嵌套 Config |
+| `config/`（顶层配置包） | 全部配置 dataclass | B，`config/configs.py` + 嵌套 Config |
 | `trainer/train.py` | parse/main | B，根 `train.py` |
 | `trainer/trainer.py` | 完整训练生命周期 | B，根 `trainer.py` + `training_engine.py` |
 | `utils/batch_invariant.py` | batch-invariant getter/setter | C，上游开关散在 trainer/config |

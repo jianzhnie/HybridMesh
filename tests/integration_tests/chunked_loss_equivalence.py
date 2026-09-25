@@ -38,6 +38,7 @@ from torch.distributed.tensor import DTensor
 
 from hpmesh.accelerator.collectives import clip_grad_norm_
 from hpmesh.components.loss import IGNORE_INDEX, cross_entropy_loss
+from hpmesh.config import MetricsConfig
 from hpmesh.datasets.random_data import Batch, RandomTokenSource, batch_iterator
 from hpmesh.models.hf_wrapper import HFTransformerModel, build_model_config_for
 from hpmesh.trainer import (
@@ -47,7 +48,6 @@ from hpmesh.trainer import (
     ParallelConfig,
     TrainingConfig,
 )
-from hpmesh.trainer.config import MetricsConfig
 from hpmesh.trainer.trainer import Trainer
 
 STEPS = 4

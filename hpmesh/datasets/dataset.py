@@ -6,7 +6,7 @@ turns one into a Grain graph. Construction lives outside the dataclass because
 it takes arguments the description does not have -- which rank am I, how many
 tokens per batch -- and because a class that carries its own builder suggests
 the built graph is one of its fields, which it is not. That is the shape
-``trainer/config.py`` states for every config in the package (descriptions, not
+``hpmesh/config/`` states for every config in the package (descriptions, not
 builders) and the one ``components/optimizer`` and ``components/profiler``
 already use. A ``SampleProcessor`` gets its runtime values, the tokenizer above
 all, as ``__init__(*, context)``.

@@ -5,7 +5,7 @@ Only the config is re-exported here. ``Trainer`` and the CLI entry point live in
 avoid a circular import with the model layer.
 """
 
-from .config import (
+from hpmesh.config import (
     DataloaderConfig,
     HybridMeshConfig,
     LRSchedulerConfig,
