@@ -436,7 +436,7 @@ step 1 恢复 optimizer、scheduler、dataloader 和 train state 后完成并保
 | `parallel/tensor_parallel/tp.py` + `apply.py` | HF plan realizer 与 `apply_tp` 入口 | B，各模型 TP plan（上游 `distributed/tensor_parallel.py` 已删除，无后继） |
 | `config/`（顶层配置包） | 全部配置 dataclass | B，`config/configs.py` + 嵌套 Config |
 | `trainer/train.py` | parse/main | B，根 `train.py` |
-| `trainer/trainer.py`（+ `validation.py` / `pp_steps.py` 抽出的 validation 与 PP microbatch 段） | 完整训练生命周期 | B，根 `trainer.py` + `training_engine.py` |
+| `trainer/trainer.py`（+ `builder.py` 装配段 / `validation.py` / `pp_steps.py` / `batch.py`） | 完整训练生命周期 | B，根 `trainer.py` + `training_engine.py` |
 | `utils/batch_invariant.py` | batch-invariant getter/setter | C，上游开关散在 trainer/config |
 
 组合判定约定：并行组合的支持/拒绝单一来源是 `parallel/matrix.py`

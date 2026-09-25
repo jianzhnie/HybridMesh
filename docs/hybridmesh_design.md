@@ -173,16 +173,16 @@ import trainer 或读取全局 run config；跨 models/parallel 的依赖必须�
 引擎层（TP/CP fused kernel、FSDP、`spmd_context`、checkpoint 的 PG 生命周期）直连
 `torch.distributed` 与 `_functional_collectives` 等私有 API。
 
-目录结构（112 个 Python 模块，约 28.3k 行；2026-09-25 终稿实测）：
+目录结构（113 个 Python 模块，约 28.6k 行；2026-09-25 终稿实测）：
 
 ```
 hpmesh/
   __main__.py / __init__.py     入口: python -m hpmesh
   config/       8 模块          model/parallel/optimizer/checkpoint/data/
                                 training/root.py + __init__(全量再导出)
-  trainer/      7 模块          trainer.py / train.py / validation.py /
-                                pp_steps.py / batch.py / seed.py（validation、
-                                PP microbatch、batch 预处理段 + 种子派生）
+  trainer/      8 模块          trainer.py / train.py / builder.py（装配段，
+                                顺序契约见模块 docstring）/ validation.py /
+                                pp_steps.py / batch.py / seed.py
   models/      22 模块          hf_wrapper.py + hf_factory.py（config 构建/类解析/
                                 meta materialize/FLOPs）+ common/{rope,masks,qkv,
                                 moe/routers/balancing,...}
