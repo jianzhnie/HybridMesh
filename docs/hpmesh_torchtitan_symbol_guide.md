@@ -151,8 +151,8 @@ step 1 恢复 optimizer、scheduler、dataloader 和 train state 后完成并保
 |---|---|---|
 | `AllGatherLinear`, `LinearReduceScatter` | `models/common/async_linear.py` 的 `AsyncAllGatherLinear`/`AsyncLinearReduceScatter`（原 `distributed/linear.py` → dist_gemm.py → async_linear.py，数学不变） | fused symmetric-memory autograd 实现；提供 functional collective fallback，**通过** |
 | `all_gather_linear`, `linear_reduce_scatter` | 同上非融合语义 | CPU/gloo fallback，前后向是 collective 对偶，**通过** |
-| `ColwiseLinear`, `RowwiseLinear` | 各模型 TP plan（上游 `distributed/tensor_parallel.py` 已随 DTensor 后端删除，无后继文件） | hpmesh 替换 HF `nn.Linear`，不使用 ParallelStyle，**通过（适配）** |
-| `ColwiseLinearNoGather` | vocab-parallel/特定输出 plan | 输出保留 sequence shard，供匹配计划使用，**通过** |
+| `ColumnParallelLinear`, `RowParallelLinear`（2026-09-26 改名对齐上游，原 `ColwiseLinear`/`RowwiseLinear`） | 上游 `models/common/linear.py` 同名类（9e159aed7 起拥有各自 collective） | hpmesh 替换 HF `nn.Linear`，不使用 ParallelStyle；plan 规格字符串 `colwise`/`rowwise` 与 factory 不变，**通过（适配）** |
+| `ColwiseLinearNoGather` | 无对应物（上游为父模块一次性 gather + plain Linear 子投影） | hpmesh 特有 realizer：输出保留 sequence shard；保持原名（hpmesh 特有，非改名对象），**通过** |
 | `_resolve_plan`, `_match` | HF `_tp_plan` + 上游 sharding registry | 支持 colwise/rowwise/replicated；`colwise_gather_output` 当前保守保持 lm_head 复制，**通过（适配）** |
 | `apply_tp` | transformers backend parallelize + 各模型 parallelize | 手写 pattern plan；明确拒绝 `moe_tp_experts`，**受限：TP×MoE 未实现** |
 

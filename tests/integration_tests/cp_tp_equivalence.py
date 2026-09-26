@@ -146,7 +146,7 @@ def _tp_wrapper_count(model: HFTransformerModel) -> int:
     """How many projections ``apply_tp`` swapped for a sharded realizer.
 
     hpmesh's TP is manual-collective, not DTensor-based: ``apply_tp`` replaces a
-    target ``nn.Linear`` with ``ColwiseLinear`` / ``RowwiseLinear`` /
+    target ``nn.Linear`` with ``ColumnParallelLinear`` / ``RowParallelLinear`` /
     ``ColwiseLinearNoGather``, whose stored weight is a literal slice of the
     original. So "did TP do anything" is a class-count question, not an
     ``isinstance(param, DTensor)`` one.
@@ -157,7 +157,7 @@ def _tp_wrapper_count(model: HFTransformerModel) -> int:
     produce a doubled token axis there and fail on shape. What this adds is a
     failure message that names the cause.
     """
-    wrappers = {"ColwiseLinear", "RowwiseLinear", "ColwiseLinearNoGather"}
+    wrappers = {"ColumnParallelLinear", "RowParallelLinear", "ColwiseLinearNoGather"}
     return sum(1 for m in model.modules() if type(m).__name__ in wrappers)
 
 

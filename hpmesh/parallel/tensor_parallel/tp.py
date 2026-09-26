@@ -5,7 +5,7 @@ HOW its activations move around the cut. This file keeps those apart.
 
 * ``ShardingConfig`` (built by the ``colwise()`` / ``rowwise()`` factories) is the
   DECLARATION -- plain data, no tensors, no collectives.
-* ``ColwiseLinear`` / ``RowwiseLinear`` are the modules that REALIZE a
+* ``ColumnParallelLinear`` / ``RowParallelLinear`` are the modules that REALIZE a
   declaration, built on the fused collective+GEMM primitives in ``linear.py``.
 * ``apply_tp`` is the ENGINE -- it reads a plan (the model's HF ``tp_plan`` by
   default, or an explicit ``{pattern: ShardingConfig}`` map), cuts each target
@@ -83,7 +83,7 @@ def _shard_weight(
     return torch.chunk(weight.detach(), tp_size, dim=dim)[tp_rank].contiguous()
 
 
-class ColwiseLinear(nn.Module):
+class ColumnParallelLinear(nn.Module):
     """Column-parallel projection: output features split across TP ranks.
 
     Stores the weight as ``[out_features / tp, in_features]`` -- HF's own
@@ -130,7 +130,7 @@ class ColwiseLinear(nn.Module):
         return y_2d.reshape(*lead[:-1], lead[-1] * self.tp_size, -1)
 
 
-class RowwiseLinear(nn.Module):
+class RowParallelLinear(nn.Module):
     """Row-parallel projection: input features split across TP ranks.
 
     Stores the weight as ``[out_features, in_features / tp]`` -- HF's layout cut
@@ -161,7 +161,7 @@ class RowwiseLinear(nn.Module):
         self.use_symm_mem = use_symm_mem
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        # Mirror of ColwiseLinear.forward: fold to 2D for the collective, then
+        # Mirror of ColumnParallelLinear.forward: fold to 2D for the collective, then
         # restore the leading dims with the row count divided by tp_size --
         # that is the reduce-scattered sequence shard.
         lead = x.shape[:-1]
@@ -178,7 +178,7 @@ class RowwiseLinear(nn.Module):
 class ColwiseLinearNoGather(nn.Module):
     """Column-parallel projection without the fused sequence all-gather.
 
-    Same weight shard as :class:`ColwiseLinear` (``[out / tp, in]``) but a plain
+    Same weight shard as :class:`ColumnParallelLinear` (``[out / tp, in]``) but a plain
     local GEMM, for sites whose input is already full-sequence: the attention
     boundary gather (``_GatherSequenceFirst``) runs upstream, because HF
     attention derives q/k/v shapes from ``hidden_states`` and cannot absorb a
@@ -366,12 +366,12 @@ class ShardingConfig:
 
 def colwise() -> ShardingConfig:
     """Output features split; activations stay feature-sharded after the GEMM."""
-    return ShardingConfig(kind="colwise", implementation=ColwiseLinear)
+    return ShardingConfig(kind="colwise", implementation=ColumnParallelLinear)
 
 
 def rowwise() -> ShardingConfig:
     """Input features split; activations reduce-scatter back to a sequence shard."""
-    return ShardingConfig(kind="rowwise", implementation=RowwiseLinear)
+    return ShardingConfig(kind="rowwise", implementation=RowParallelLinear)
 
 
 # -- engine -------------------------------------------------------------------

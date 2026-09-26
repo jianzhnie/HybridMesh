@@ -47,9 +47,9 @@ from hpmesh.models.hf_factory import build_model_config_for
 from hpmesh.models.hf_wrapper import HFTransformerModel
 from hpmesh.parallel.parallel_dims import ParallelDims
 from hpmesh.parallel.tensor_parallel.tp import (
-    ColwiseLinear,
+    ColumnParallelLinear,
     ColwiseLinearNoGather,
-    RowwiseLinear,
+    RowParallelLinear,
 )
 from hpmesh.trainer import (
     HybridMeshConfig,
@@ -205,9 +205,9 @@ def main() -> None:
     # colwise shards rows, rowwise shards columns.
     tp_layouts = {}
     for path, mod in model.named_modules():
-        if isinstance(mod, ColwiseLinear | ColwiseLinearNoGather):
+        if isinstance(mod, ColumnParallelLinear | ColwiseLinearNoGather):
             tp_layouts[f"{path}.weight"] = "row"
-        elif isinstance(mod, RowwiseLinear):
+        elif isinstance(mod, RowParallelLinear):
             tp_layouts[f"{path}.weight"] = "col"
     if not tp_layouts:
         failures.append(f"rank {rank}: no TP-sharded projections -- vacuous")

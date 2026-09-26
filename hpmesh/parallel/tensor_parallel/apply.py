@@ -16,7 +16,7 @@ from hpmesh.config import ParallelConfig
 from .. import matrix
 from .tp import (
     _MOE_PLAN_SPECS,
-    ColwiseLinear,
+    ColumnParallelLinear,
     ColwiseLinearNoGather,
     ShardingConfig,
     _enable_symm_mem,
@@ -158,7 +158,7 @@ def apply_tp(
             # projection a plain feature-sharded GEMM. Only the default
             # realizer is swapped out; an explicitly provided one is the
             # caller's responsibility.
-            if implementation is ColwiseLinear:
+            if implementation is ColumnParallelLinear:
                 implementation = ColwiseLinearNoGather
             attention_parents[parent_path] = parent
 

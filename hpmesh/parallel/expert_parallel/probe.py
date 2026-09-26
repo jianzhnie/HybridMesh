@@ -207,10 +207,10 @@ def _is_hf_moe_block(module: nn.Module) -> bool:
         raise
     if experts is None:
         return False
-    return _has_router_weight(_router_of(module)) and _read_top_k(module) is not None
+    return _has_router_weight(_router_of(module)) and _resolve_top_k(module) is not None
 
 
-def _read_top_k(block: nn.Module) -> int | None:
+def _resolve_top_k(block: nn.Module) -> int | None:
     """Top-K per token, from the block or its router."""
     for owner in (block, _router_of(block)):
         if owner is None:
@@ -259,10 +259,10 @@ def _read_route_norm(block: nn.Module, router: nn.Module) -> bool:
         value = getattr(owner, "norm_topk_prob", None)
         if value is not None:
             return bool(value)
-    return _read_score_func(block, router) != "sigmoid"
+    return _resolve_score_func(block, router) != "sigmoid"
 
 
-def _read_score_func(block: nn.Module, router: nn.Module) -> str:
+def _resolve_score_func(block: nn.Module, router: nn.Module) -> str:
     """The router's scoring function.
 
     ``e_score_correction_bias`` is the reliable DeepSeek-V3/GLM4 marker: a router

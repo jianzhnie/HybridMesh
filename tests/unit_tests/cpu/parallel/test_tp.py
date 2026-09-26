@@ -22,9 +22,9 @@ import torch.nn as nn
 
 from hpmesh.parallel.tensor_parallel import apply_tp
 from hpmesh.parallel.tensor_parallel.tp import (
-    ColwiseLinear,
+    ColumnParallelLinear,
     ColwiseLinearNoGather,
-    RowwiseLinear,
+    RowParallelLinear,
     ShardingConfig,
     _match,
     _resolve_plan,
@@ -35,8 +35,12 @@ from hpmesh.trainer import ParallelConfig
 
 
 def test_declaration_factories_pick_the_right_realizer() -> None:
-    assert colwise() == ShardingConfig(kind="colwise", implementation=ColwiseLinear)
-    assert rowwise() == ShardingConfig(kind="rowwise", implementation=RowwiseLinear)
+    assert colwise() == ShardingConfig(
+        kind="colwise", implementation=ColumnParallelLinear
+    )
+    assert rowwise() == ShardingConfig(
+        kind="rowwise", implementation=RowParallelLinear
+    )
 
 
 def test_colwise_layout_is_cut_on_output_features() -> None:
@@ -46,26 +50,26 @@ def test_colwise_layout_is_cut_on_output_features() -> None:
     # transposed first and cut the last dim, feeding the op [K, N/R] and
     # producing garbage on the fused path.
     W = torch.arange(4 * 8, dtype=torch.float32).reshape(4, 8)  # out=4, in=8
-    mod = ColwiseLinear(W, tp_size=2, tp_rank=0, group=None)
+    mod = ColumnParallelLinear(W, tp_size=2, tp_rank=0, group=None)
     assert mod.weight.shape == (2, 8)
     assert torch.equal(mod.weight, W[0:2])
     # rank 1 holds the other half
-    other = ColwiseLinear(W, tp_size=2, tp_rank=1, group=None)
+    other = ColumnParallelLinear(W, tp_size=2, tp_rank=1, group=None)
     assert torch.equal(other.weight, W[2:4])
 
 
 def test_rowwise_layout_is_cut_on_input_features() -> None:
     W = torch.arange(4 * 8, dtype=torch.float32).reshape(4, 8)
-    mod = RowwiseLinear(W, tp_size=2, tp_rank=1, group=None)
+    mod = RowParallelLinear(W, tp_size=2, tp_rank=1, group=None)
     assert mod.weight.shape == (4, 4)
     assert torch.equal(mod.weight, W[:, 4:8])
 
 
 def test_sharded_weights_reconstruct_the_original() -> None:
     W = torch.randn(6, 12)
-    for cls in (ColwiseLinear, ColwiseLinearNoGather, RowwiseLinear):
+    for cls in (ColumnParallelLinear, ColwiseLinearNoGather, RowParallelLinear):
         shards = [cls(W, tp_size=3, tp_rank=r, group=None).weight for r in range(3)]
-        if cls is RowwiseLinear:
+        if cls is RowParallelLinear:
             rec = torch.cat(shards, dim=1)
         else:
             rec = torch.cat(shards, dim=0)

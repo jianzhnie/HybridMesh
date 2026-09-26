@@ -333,12 +333,12 @@ def test_swap_refuses_a_shared_expert_block_under_tp_x_ep() -> None:
 
 def test_tp_sharded_param_ids_covers_dense_tp_and_ep_experts_not_router() -> None:
     from hpmesh.models.common.grouped_experts import GroupedExperts
-    from hpmesh.parallel.tensor_parallel.tp import ColwiseLinear
+    from hpmesh.parallel.tensor_parallel.tp import ColumnParallelLinear
     from hpmesh.trainer.trainer import _tp_sharded_param_ids
 
     grouped = GroupedExperts(dim=8, hidden_dim=4, num_experts=2)
     router = nn.Linear(8, 2, bias=False)
-    dense_tp = ColwiseLinear(torch.randn(8, 8), tp_size=2, tp_rank=0, group=None)
+    dense_tp = ColumnParallelLinear(torch.randn(8, 8), tp_size=2, tp_rank=0, group=None)
     part = nn.ModuleDict({"ge": grouped, "gate": router, "proj": dense_tp})
 
     ids = _tp_sharded_param_ids([part])

@@ -412,8 +412,8 @@ PP 外轴，并派生 dataloading、dense storage、dense fwd/bwd、sparse EP、
 ### 5.3 TP（tensor_parallel/tp.py + apply.py 入口）
 
 声明层是纯数据：`ShardingConfig(kind, implementation)` frozen dataclass +
-`colwise()/rowwise()` 工厂。实现层两个 fused collective+GEMM 模块：`ColwiseLinear`
-（存 `[in, out/tp]`，配 all-gather）与 `RowwiseLinear`（`[out, in/tp]` 切 dim1，配
+`colwise()/rowwise()` 工厂。实现层两个 fused collective+GEMM 模块：`ColumnParallelLinear`
+（存 `[in, out/tp]`，配 all-gather）与 `RowParallelLinear`（`[out, in/tp]` 切 dim1，配
 reduce-scatter），均为 sequence-parallel 形态。plan 为 None 时读 `model.tp_plan`（即
 HF `_tp_plan` 的重写版），按路径深度倒序替换 `nn.Linear`；遇 bias 直接 raise。可选
 注册对称内存（`enable_fsdp_symm_mem`）。`colwise_gather_output` 当前保守地保持
@@ -523,7 +523,7 @@ HFTransformerModel.preprocess_inputs
                                  -> 统一 batch、构造 mask、按 CP 后 TP 切 token
 spmd_context(parallel_dims)      -> TLS 压入 dense/sparse mesh
 HFTransformerModel.forward       -> tok_embeddings -> layers -> norm -> lm_head
-    每层内: TP 的 Colwise/RowwiseLinear 就地做 collective
+    每层内: TP 的 Column/RowParallelLinear 就地做 collective
             CP 选择 K/V all-gather 或 Ulysses token↔head all-to-all
             EP 的 all-to-all dispatcher 在 MoE 前后换位
 PP 时: schedule.step(arg_mbs / target_mbs) 驱动各 stage，末 stage 出 loss

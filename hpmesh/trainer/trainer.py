@@ -133,9 +133,9 @@ from ..models.common.moe import (
 )
 from ..parallel.parallel_dims import ParallelDims
 from ..parallel.tensor_parallel.tp import (
-    ColwiseLinear,
+    ColumnParallelLinear,
     ColwiseLinearNoGather,
-    RowwiseLinear,
+    RowParallelLinear,
 )
 from ..utils.gc import GarbageCollection
 from ..utils.logger_utils import get_logger
@@ -159,8 +159,8 @@ def _tp_sharded_param_ids(model_parts: Iterable[torch.nn.Module]) -> set[int]:
     of parameters are instead complete on their own rank, and summing them
     across TP would corrupt them:
 
-    * the dense TP realizers' ``weight`` (``ColwiseLinear`` /
-      ``RowwiseLinear`` / ``ColwiseLinearNoGather``) -- each rank owns a
+    * the dense TP realizers' ``weight`` (``ColumnParallelLinear`` /
+      ``RowParallelLinear`` / ``ColwiseLinearNoGather``) -- each rank owns a
       feature shard;
     * MoE-under-TP expert weights (ep=1): stacked parameters on the HF
       experts module, F-sharded in place by ``apply_tp``, which records their
@@ -177,7 +177,9 @@ def _tp_sharded_param_ids(model_parts: Iterable[torch.nn.Module]) -> set[int]:
         id(module.weight)
         for part in model_parts
         for module in part.modules()
-        if isinstance(module, ColwiseLinear | RowwiseLinear | ColwiseLinearNoGather)
+        if isinstance(
+            module, ColumnParallelLinear | RowParallelLinear | ColwiseLinearNoGather
+        )
     }
     for part in model_parts:
         for module in part.modules():
