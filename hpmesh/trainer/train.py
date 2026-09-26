@@ -5,22 +5,10 @@ Deciding which group a config belongs to
 HfArgumentParser is given the config GROUPS (not the composed config), so each
 field becomes a clean flat CLI flag (--steps, --data_parallel_shard_size,
 --learning_rate, --dump_folder, ...) and each group runs its own __post_init__
-validation. We then compose them into the single HybridMeshConfig. A YAML/JSON
+validation. The nine groups live in ``hpmesh.config`` and are composed into the
+single HybridMeshConfig by ``HybridMeshConfig.from_groups``, which owns the
+graft table (which nested group lands on which top-level group). A YAML/JSON
 file can also be passed positionally.
-
-All ten classes in ``config.py`` are named ``*Config`` and each is parsed as its
-own group here. Five of them are nested inside another config (reachable as
-``cfg.training.checkpoint`` and friends), so which one they graft onto is a
-deliberate choice, and this is the table of it:
-
-  model          ModelConfig            top level
-  parallel       ParallelConfig         top level
-  optimizer      OptimizerConfig        top level (LRSchedulerConfig grafts here)
-  training       TrainingConfig         top level (the rest graft here)
-                 CheckpointConfig
-                 DataloaderConfig
-                 MetricsConfig
-                 ProfilerConfig
 
 Grafting happens after parsing, so a nested config's fields still reach the user
 as bare flags: --enable, --interval, --log_freq, --dataset, --profile_freq.
@@ -68,51 +56,41 @@ from hpmesh.config import (
     ProfilerConfig,
     TrainingConfig,
 )
+from hpmesh.errors import ConfigError
 
 from .trainer import Trainer
 
+# Parser order is significant: parse_args_into_dataclasses() returns one
+# instance per class in this exact order.
+_GROUP_CLASSES = (
+    ModelConfig,
+    ParallelConfig,
+    OptimizerConfig,
+    LRSchedulerConfig,
+    TrainingConfig,
+    CheckpointConfig,
+    DataloaderConfig,
+    MetricsConfig,
+    ProfilerConfig,
+)
+
 
 def parse_config() -> HybridMeshConfig:
-    parser = HfArgumentParser(
-        [
-            ModelConfig,
-            ParallelConfig,
-            OptimizerConfig,
-            LRSchedulerConfig,
-            TrainingConfig,
-            CheckpointConfig,
-            DataloaderConfig,
-            MetricsConfig,
-            ProfilerConfig,
-        ]
-    )
-    (
-        model_config,
-        parallel_config,
-        optimizer_config,
-        lr_scheduler_config,
-        training_config,
-        checkpoint_config,
-        dataloader_config,
-        metrics_config,
-        profiler_config,
-    ) = parser.parse_args_into_dataclasses()
+    parser = HfArgumentParser(list(_GROUP_CLASSES))
     # Each group is its own parser group, so every scalar field becomes a flag.
-    # The nested configs (reachable as ``training.checkpoint`` and friends) are
-    # grafted on here; their __post_init__ already ran as part of the parser's
-    # construction. The schedule grafts onto the OPTIMIZER group, not onto
-    # ``training``: it scales the learning rate that group sets, and splitting
-    # them would let a run halve one without touching the other.
-    optimizer_config.lr_scheduler_config = lr_scheduler_config
-    training_config.checkpoint_config = checkpoint_config
-    training_config.dataloader_config = dataloader_config
-    training_config.metrics_config = metrics_config
-    training_config.profiler_config = profiler_config
-    cfg = HybridMeshConfig(
-        model=model_config,
-        parallel=parallel_config,
-        optimizer=optimizer_config,
-        training=training_config,
+    parsed = dict(
+        zip(_GROUP_CLASSES, parser.parse_args_into_dataclasses(), strict=True)
+    )
+    cfg = HybridMeshConfig.from_groups(
+        model=parsed[ModelConfig],
+        parallel=parsed[ParallelConfig],
+        optimizer=parsed[OptimizerConfig],
+        lr_scheduler=parsed[LRSchedulerConfig],
+        training=parsed[TrainingConfig],
+        checkpoint=parsed[CheckpointConfig],
+        dataloader=parsed[DataloaderConfig],
+        metrics=parsed[MetricsConfig],
+        profiler=parsed[ProfilerConfig],
     )
     cfg.auto_fill_model()  # pull arch from a HF hub id when given one (no-op offline)
     return cfg
@@ -127,12 +105,12 @@ def main() -> None:
         # sharding would bake one rank's shard layout into the artifact), and
         # loading treats step-0 as model-only (see ``checkpointer/base.py``).
         if int(os.environ.get("WORLD_SIZE", "1")) != 1:
-            raise RuntimeError(
+            raise ConfigError(
                 "Must create a seed checkpoint using a single device, to "
                 "disable sharding."
             )
         if not cfg.checkpoint.enable:
-            raise RuntimeError(
+            raise ConfigError(
                 "Must enable checkpointing when creating a seed checkpoint."
             )
         try:
