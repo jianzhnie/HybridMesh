@@ -47,7 +47,7 @@ Not ported, deliberately:
   dependency plus a region-declaration channel on HF decoder layers.
 * ``_disable_dynamo_lru_cache``. It works around a SAC-with-pipeline-parallel
   recompilation interaction, and hpmesh refuses activation checkpointing on the
-  ``pp > 1`` path outright (see ``parallelize_hf``), so the case it fixes is
+  ``pp > 1`` path outright (see ``parallelize``), so the case it fixes is
   unreachable here. It also mutates a process-global dynamo knob, which is not
   something to do speculatively (see https://github.com/pytorch/pytorch/issues/166926).
 

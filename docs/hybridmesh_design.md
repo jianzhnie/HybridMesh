@@ -82,7 +82,7 @@ hpmesh 的 SPMD glue **不是** TorchTitan 的抽象。活跃路径只有 `accel
 |---|---|
 | `Config.build()` 构造协议 | 构造函数显式传参（`Trainer(cfg)`、`HFTransformerModel(hf_config)`） |
 | `init_states` 递归初始化 | 随机初始化走 HF `_init_weights`；真实 HF 权重走 meta 构建 → 并行/FSDP → `to_empty` → DCP safetensors 加载 |
-| 声明式 `ShardingConfig.parallelize()` | 顶层函数 `apply_tp / apply_cp / apply_ep / apply_fsdp`，顺序写在 `parallelize_hf.py` |
+| 声明式 `ShardingConfig.parallelize()` | 顶层函数 `apply_tp / apply_cp / apply_ep / apply_fsdp`，顺序写在 `parallel/parallelize.py` |
 | `preprocess_inputs` | `HFTransformerModel.preprocess_inputs` 统一 batch、mask 与 CP/TP 序列分片 |
 | `state_dict_adapter` | 训练 checkpoint 使用 DCP/FQN state；HF 导入导出能力由可选 adapter 决定 |
 | `ModelSpec` / registry | 不需要：TP plan 直接用 HF 模型自带的 `_tp_plan`（见 §4.2） |
@@ -124,7 +124,7 @@ G1 决定模型层只能依赖 HF 公共约定（`config.architectures`、常见
 +----------------+ +----------------+ +----------------+
         |                 |                 |
         +-----------------+-----------------+
-        顺序即契约, 写在 parallel/parallelize_hf.py 一个文件里
+        顺序即契约, 写在 parallel/parallelize.py 一个文件里
                           |
              [SEAM 1]  HF wrapper 契约 (§4.2)
                           |
@@ -144,7 +144,7 @@ G1 决定模型层只能依赖 HF 公共约定（`config.architectures`、常见
 +---------------------------------------------------------------+
                           |
 +---------------------------------------------------------------+
-|  models/common/*  (rope, masks, qkv, aux_loss, moe, dist_gemm)|
+|  models/common/*  (rope, masks, qkv, aux_loss, moe, async_linear)|
 |    通过上下文取 group, 不接收 cfg, 不 import trainer            |
 +---------------------------------------------------------------+
 ```
@@ -153,9 +153,9 @@ G1 决定模型层只能依赖 HF 公共约定（`config.architectures`、常见
 批 5 收尾后，明确保留三处"models 依赖下层原语"的例外（语义上合理，不为消依赖
 制造更差的结构）：
 
-1. `models/common/dist_gemm.py` -> `parallel/tensor_parallel/linear.py`：dist_gemm
+1. `models/common/async_linear.py` -> `parallel/tensor_parallel/linear.py`：async_linear
    只是 fused collective+GEMM 原语的接线与 fallback，原语属 parallel 层（与
-   `apply_tp` 同源），上移 dist_gemm 会把模型构件塞进装配层，下移 linear 会把
+   `apply_tp` 同源），上移 async_linear 会把模型构件塞进装配层，下移 linear 会把
    TP 引擎依赖拖进 models。
 2. `models/common/embedding.py` -> `components.loss`（`vocab_shard_bounds`）：
    vocab 并行 embedding 的分片边界是 loss 层共用的纯函数词汇表，反向移动会让
@@ -191,7 +191,7 @@ hpmesh/
                                 expert_parallel/(swap+probe+convert)
                                 activation_checkpoint.py compile.py matrix.py
                                 stages.py（装配 stage 表）
-                                parallel_dims.py parallelize_hf.py
+                                parallel_dims.py parallelize.py
   accelerator/  8 模块          device.py（设备发现/backend 选择）
                                 capabilities.py（能力注册表）
                                 collectives.py（归约/超时/grad norm）
@@ -354,7 +354,7 @@ def apply_fsdp(model, mesh, cfg, parallel_dims) -> nn.Module # fully_shard/
 
 公共语义：`mesh is None` 或对应度数 `<= 1` 时 no-op 原样返回；否则返回就地改造后的
 模型。**顺序即契约**——且契约是数据不是注释：`parallel/stages.py` 的 `STAGES`
-表是唯一来源（有序、`on_pp` 标记、每项带位置理由），`parallelize_hf.py` 的两条
+表是唯一来源（有序、`on_pp` 标记、每项带位置理由），`parallelize.py` 的两条
 路径都由它驱动（无引擎依赖，任何地方可导入）：
 
 ```
@@ -490,7 +490,7 @@ wrapper 的 `named_children()` 只呈现五部件、看不到它们）同样按�
 
 **闭环已落地**：`pipeline_parallel/apply.py` 的 `apply_pp` 按 schedule 类推导 stage 数
 （looped schedule 默认每 rank 2 个）并完成切分；每个 model_part 的
-`apply_tp` → `apply_compile` → `apply_fsdp` 编排已上移 `parallelize_hf.py`
+`apply_tp` → `apply_compile` → `apply_fsdp` 编排已上移 `parallelize.py`
 （与单卡路径同序、同一调用点）；`build_pipeline_schedule` 建 schedule
 （`scale_grads=False`，loss 是 sum 由 trainer 归一）。trainer 侧：
 `_pp_forward_backward_body` 驱动 `schedule.step`——首 stage 收 `input_ids`、末 stage

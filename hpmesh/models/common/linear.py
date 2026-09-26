@@ -4,7 +4,7 @@ Vendored from torchtitan ``models/common/linear.py``. Upstream ``Linear`` is a
 diamond subclass of ``nn.Linear`` + ``Module`` so that a config can build it;
 that class is not carried over -- a model that wants a plain projection uses
 ``nn.Linear`` / the ``parallel.tensor_parallel`` wrappers directly, which is
-what ``dist_gemm`` and ``tp`` already do.
+what ``async_linear`` and ``tp`` already do.
 
 What is kept is the two classes whose forward is NOT ``nn.Linear``:
 

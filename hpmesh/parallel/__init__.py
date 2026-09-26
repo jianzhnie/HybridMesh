@@ -29,7 +29,7 @@ _EXPORT_SOURCES = {
     "apply_ep": "expert_parallel",
     "apply_fsdp": "fully_shard.apply",
     "apply_tp": "tensor_parallel",
-    "parallelize_hf_transformers": "parallelize_hf",
+    "parallelize_hf_transformers": "parallelize",
 }
 
 __all__ = sorted(_EXPORT_SOURCES)

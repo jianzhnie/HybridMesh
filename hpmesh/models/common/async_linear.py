@@ -1,6 +1,8 @@
 """Model components that fold the TP collectives into their GEMMs.
 
-Vendored from torchtitan ``models/common/dist_gemm.py``. These are drop-in
+Vendored from torchtitan ``models/common/async_linear.py`` (renamed from
+``dist_gemm.py`` upstream in 9e159aed7; this file follows the new name).
+These are drop-in
 replacements for the stock QKV, output and SwiGLU projections: they move the TP
 collective inside the GEMM, over the autograd Functions in
 ``hpmesh/parallel/tensor_parallel/linear.py`` (which holds the collective+GEMM

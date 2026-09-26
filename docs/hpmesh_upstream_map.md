@@ -85,7 +85,7 @@ C 类上会把项目**故意删掉**的抽象又拽回来。
 | `datasets/text/text.py` | `hf_datasets/text_datasets.py` | 0.767 | 路径与 processor 构造契约已适配 |
 | `datasets/types.py` | `components/data/types.py` | 0.506 | 去 Configurable 后重塑 build context 与 iteration policy |
 | `models/common/aux_loss.py` | `models/common/aux_loss.py` | 0.682 | |
-| `models/common/dist_gemm.py` | `models/common/async_linear.py`（9e159aed7 自 dist_gemm.py 改名） | 0.527 | |
+| `models/common/async_linear.py`（2026-09-26 文件名对齐上游，原 dist_gemm.py） | `models/common/async_linear.py` | 0.527 | |
 | `models/common/feed_forward.py` | `models/common/feed_forward.py` | 0.560 | **曾写完又被退**，不要在没有明确指令时重新引入 |
 | `models/common/linear.py` | `models/common/linear.py` | 0.620 | |
 | `models/common/masks.py` | `models/common/attention.py` | 0.380 | 拆出了 mask 部分 |
@@ -112,7 +112,7 @@ C 类上会把项目**故意删掉**的抽象又拽回来。
 | --- | --- | --- |
 | `models/hf_wrapper.py`（+ `hf_factory.py` 构建侧） | `experiments/transformers_modeling_backend/model.py` 的包装层；上游另有 `models/*/model.py` 各一份 | 0.059 |
 | `models/hf_state_dict_adapter.py` | `experiments/transformers_modeling_backend/state_dict_adapter.py`；hpmesh 更强：读 safetensors index 做 missing/unexpected 严格校验；上游的 `hf_to_titan_moe_state_dict` 转换对因 hpmesh EP swap 直接搬运 HF 权重（无第二 key 布局）而不需要 | — |
-| `parallel/parallelize_hf.py` | `experiments/transformers_modeling_backend/parallelize.py` + 各 `models/*/parallelize.py` | 0.089 |
+| `parallel/parallelize.py`（2026-09-26 文件名对齐上游，原 parallelize_hf.py） | `experiments/transformers_modeling_backend/parallelize.py` + 各 `models/*/parallelize.py` | 0.089 |
 | `parallel/tensor_parallel/tp.py`（+ `apply.py` 入口） | 各模型 TP plan；上游 `distributed/tensor_parallel.py` 已随 DTensor 后端删除、无后继文件。hpmesh 是**手写 plan realizer**，不是声明式 `_sharding_config` | 0.056 |
 | `parallel/expert_parallel/apply.py` + `swap.py` | `experiments/.../moe_replacement.py` + 各模型 EP parallelize；hpmesh 搬运 HF 权重而非重新初始化 | 0.036–0.146 |
 | `parallel/fully_shard/apply.py` | 各 `models/*/parallelize.py` 的 FSDP driver；HF 五部件适配 | 0.155 |
@@ -275,7 +275,7 @@ stage 0；已被切分占有的 FQN 与重复 FQN loud-raise，缺失模块跳�
 接线），属"能力就位 + 契约测试"；多 stage 真跑待目标设备（torch≥2.12）复跑。
 
 **已从 D 移除**（2026-09-24 批 4 移植）：validation 循环——上游
-`components/validate.py::Validator` 落 `trainer/validation.py`
+`components/validate.py::Validator` 落 `trainer/validate.py`（2026-09-26 文件名对齐上游，原 validation.py）
 （`Trainer.validate`/`should_validate`/`_check_validation_feasibility` 的
 薄委托背后）+
 `config/training.py::ValidationConfig`（`training.validation_config`，默认
@@ -399,7 +399,8 @@ hpmesh 侧是 `datasets/multimodal/mm_image.py`），本表的 hpmesh 列是唯�
   `models/common/dist_gemm.py`（改名 `AsyncAllGatherLinear`/`AsyncLinearReduceScatter`，
   数学不变；上游 9e159aed7 再把该文件改名 `async_linear.py`），此后上游
   async_linear.py 同时对应 hpmesh 的 `parallel/tensor_parallel/linear.py`
-  （autograd 原语）与 `models/common/dist_gemm.py`（模块层），一对二；
+  （autograd 原语）与 `models/common/async_linear.py`（模块层，hpmesh 2026-09-26
+  同步改名），一对二；
   `distributed/tensor_parallel.py` 已随 DTensor 后端整体删除、无后继。
 - 早前基线：hpmesh `8a2f269`，TorchTitan `c6e416bbd`。
 - 表中的 ratio 除 A2 中明确标为 2026-09-21 复核的十行外，来自早期结构快照
