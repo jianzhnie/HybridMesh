@@ -43,7 +43,7 @@ step 1 恢复 optimizer、scheduler、dataloader 和 train state 后完成并保
 
 | hpmesh 重要符号 | TorchTitan 对应实现 | 主要差异 | 结论/维护动作 |
 |---|---|---|---|
-| `trainer.train.parse_config`, `main` | `torchtitan/train.py` | hpmesh 直接构造一个集中式 dataclass 配置；上游构造 Configurable 树 | 通过（适配）；同步启动顺序和全局运行时设置，不同步配置树 |
+| `trainer.train.parse_config`, `main` | `torchtitan/train.py` | hpmesh 直接构造一个集中式 dataclass 配置；上游构造 Configurable 树；group 嫁接表在 `HybridMeshConfig.from_groups`（2026-09-26 起，自 train.py 内联迁入） | 通过（适配）；同步启动顺序和全局运行时设置，不同步配置树 |
 | `hpmesh.config.HybridMeshConfig` 及各子 config | `config/configs.py` 与各组件嵌套 `Config` | hpmesh 的 SEAM 0：全部字段集中；上游字段分散在组件 | 通过（适配）；新增功能必须先落到这里 |
 | `HybridMeshConfig.auto_fill_model` | 上游模型 registry/config build | hpmesh 用 HF `AutoConfig` 填充；上游选原生模型 config | 通过；本地模型与 Hub 配置分别测试 |
 | `parallel.parallel_dims.build_parallel_dims`, `build_mesh` | `distributed/parallel_dims.py` + `trainer.py` | 上游无单一对应函数；hpmesh 把解析与 mesh 构造分开 | 通过（适配） |

@@ -37,6 +37,49 @@ class HybridMeshConfig:
     optimizer: OptimizerConfig = field(default_factory=OptimizerConfig)
     training: TrainingConfig = field(default_factory=TrainingConfig)
 
+    @classmethod
+    def from_groups(
+        cls,
+        *,
+        model: ModelConfig,
+        parallel: ParallelConfig,
+        optimizer: OptimizerConfig,
+        lr_scheduler: LRSchedulerConfig,
+        training: TrainingConfig,
+        checkpoint: CheckpointConfig,
+        dataloader: DataloaderConfig,
+        metrics: MetricsConfig,
+        profiler: ProfilerConfig,
+    ) -> HybridMeshConfig:
+        """Compose the nine parsed argument groups into the aggregate config.
+
+        The CLI parses every group flat; which nested group grafts onto which
+        top-level group is a deliberate choice, and this is the table of it:
+
+          model          ModelConfig            top level
+          parallel       ParallelConfig         top level
+          optimizer      OptimizerConfig        top level (LRSchedulerConfig
+                                                       grafts here)
+          training       TrainingConfig         top level (the rest graft here)
+                         CheckpointConfig
+                         DataloaderConfig
+                         MetricsConfig
+                         ProfilerConfig
+
+        The schedule grafts onto the OPTIMIZER group, not onto ``training``: it
+        scales the learning rate that group sets, and splitting them would let
+        a run halve one without touching the other. Each group's own
+        ``__post_init__`` already ran during parsing.
+        """
+        optimizer.lr_scheduler_config = lr_scheduler
+        training.checkpoint_config = checkpoint
+        training.dataloader_config = dataloader
+        training.metrics_config = metrics
+        training.profiler_config = profiler
+        return cls(
+            model=model, parallel=parallel, optimizer=optimizer, training=training
+        )
+
     def __post_init__(self) -> None:
         # Lazy import, same cycle reason as ParallelConfig.__post_init__.
         from hpmesh.parallel import matrix
@@ -49,6 +92,7 @@ class HybridMeshConfig:
         # rather than surfacing deep inside the compile step.
         matrix.async_tp_requires_compile(self)
         matrix.async_tp_requires_tp(self)
+
     # -- Flat view: lets the trainer read cfg.lr / cfg.steps / ... uniformly. --
     # The parallel degrees (dp/tp/pp/cp/ep) are deliberately NOT here: the
     # parallel layer takes ``cfg.parallel`` (a ParallelConfig) directly, so a
