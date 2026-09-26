@@ -7,8 +7,7 @@ from dataclasses import dataclass, field
 from hpmesh.config.checkpoint import CheckpointConfig
 from hpmesh.config.data import DataloaderConfig
 from hpmesh.config.optimizer import EMAConfig
-from hpmesh.errors import ConfigError
-from hpmesh.parallel import matrix
+from hpmesh.errors import ConfigError, EnvironmentUnsupportedError
 
 
 @dataclass(kw_only=True)
@@ -520,7 +519,13 @@ class TrainingConfig:
                 "chunked_loss_num_chunks must be >= 1 (1 disables chunking), "
                 f"got {self.chunked_loss_num_chunks}"
             )
-        matrix.region_ac(self)
+        if self.activation_checkpoint_mode == "region":
+            raise EnvironmentUnsupportedError(
+                "self.activation_checkpoint_mode='region' (upstream "
+                "RegionAC) needs torch_remat and model-declared remat "
+                "regions, which hpmesh has no equivalent of; see "
+                "parallel/activation_checkpoint.py's docstring."
+            )
         if self.activation_checkpoint_mode not in (
             "none",
             "full",
@@ -528,8 +533,16 @@ class TrainingConfig:
             "memory_budget",
         ):
             raise ConfigError(
-                "training.activation_checkpoint_mode must be one of: 'none', "
+                "self.activation_checkpoint_mode must be one of: 'none', "
                 "'full', 'selective', 'memory_budget' (got "
                 f"{self.activation_checkpoint_mode!r})"
             )
-        matrix.memory_budget_requires_compile(self)
+        if (
+            self.activation_checkpoint_mode == "memory_budget"
+            and not self.compile
+        ):
+            raise ConfigError(
+                "self.activation_checkpoint_mode='memory_budget' requires "
+                "self.compile=True: the budget is consumed by the compile "
+                "partitioner, so without compile it would silently do nothing."
+            )

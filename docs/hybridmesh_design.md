@@ -250,27 +250,29 @@ device.py 本身就是设备注册表）；DTensor/flex_attention/spmd_types 是
 硬 import，没有可探测的降级路径；`linear.py` 的 functional-collectives
 改名回退是版本兼容 shim，不是守卫。
 
-## 3.3 组合矩阵单一来源（parallel/matrix.py）
+## 3.3 跨层组合裁决单一来源（parallel/matrix.py）
 
-"哪些组合支持/拒绝"只有一份答案：`hpmesh/parallel/matrix.py`——每个组合是
-一个普通函数（判定逻辑 + 文案 + 理由 docstring）加文件底部 `ENTRIES` 扁平表里
-的一行（函数引用 / 判定阶段 / 异常类型 / 守卫位置；`name` 与 `reason` 由函数
-派生）。三个阶段：
+分工（2026-09-26 收窄后）：**config 期能判的组合校验住在各 config 的
+`__post_init__`**（`config/parallel.py` 的 tp×ep×cp、deepep/hybridep、
+dispatcher@ep=1、ptrr、ulysses×load balancer、sequence_parallel；
+`config/training.py` 的 region AC、memory_budget×compile；`config/root.py` 的
+cp 整除 seq_len、async_tp×{compile,tp}），与其余字段校验同处、同序触发——
+这些判定只需要配置本身，不应绕道 parallel 层。
 
-* **config**：配置期可判（tp×ep×cp、deepep/hybridep、dispatcher@ep=1、ptrr、
-  ulysses×load balancer、sequence_parallel、region AC、memory_budget×compile、
-  cp 整除 seq_len、async_tp×{compile,tp}）。函数自带谓词与文案，
-  `config/*` 的 `__post_init__` 在原位调用（首错顺序不变）；
-  `check_config/check_training/check_root` 供一致性测试与文档全量重放。
+`hpmesh/parallel/matrix.py` 只保留**跨层组合裁决**（需模型/运行时/HF 布局信息
+才能判的组合）：每个裁决是一个普通函数（判定 + 文案 + 理由 docstring）加文件
+底部 `ENTRIES` 扁平表里的一行（函数引用 / 阶段 / 异常类型 / 守卫位置；`name`
+与 `reason` 由函数派生）。两个阶段：
+
 * **assembly**：需模型/运行时信息（PP×AC、PP×validation、EP×checkpoint、
   chunked×PP、pp×{cp,ep,dataset,tying}、shared-expert×tp、quantile@ep=1 等）。
-  触发条件留在守卫点，判定（类型+文案）由条目 `reject` 给出，双写不可能。
+  触发条件留在守卫点，判定（类型+文案）由矩阵函数给出，双写不可能。
 * **probe**：需 HF 布局（GPT-OSS、group_limited_greedy、router bias、
   shared_expert_gate、quantile×softmax/group、shared-expert×tp×ep）。同上。
 
 字段值校验（sizes、allowed 值域）不是组合知识，留在各 config；能力探测
-（torch knob）在 §3.2 注册表。`parallel/__init__` 为 PEP 562 懒导出，正是
-为了让 config 层能读 matrix 子模块而不拖入引擎层。
+（torch knob）在 §3.2 注册表。config 不再 import matrix；`parallel/__init__`
+保持 PEP 562 懒导出（懒加载的价值仍在：config/任何消费方不应拖入引擎层）。
 
 ## 3.4 公开 API 面（三级）
 

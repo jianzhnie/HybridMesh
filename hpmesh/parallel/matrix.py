@@ -1,25 +1,18 @@
-"""The combination support matrix: one source of truth for what composes.
+"""Cross-layer combination verdicts: the single source for assembly/probe guards.
 
-"Which parallel combinations are supported, refused, or conditional" used to
-live in three places at once -- ``config/parallel.py``'s ``__post_init__``,
-the assembly-time guards in the ``apply_*`` functions, and the EP swap's
-layout probes -- and drifted on every upstream alignment. Every combination
-hpmesh has an opinion about is a plain function below plus one row in the
-``ENTRIES`` table at the bottom of this file: the function carries the verdict
-(exception type, exact message) and the rationale (its docstring); the row
-records the phase that can decide it and the guard's location.
+The support matrix's scope is the combinations that need MORE than the config
+to decide -- assembly time (the model, the resolved ``ParallelDims``, the
+dataset name) and probe time (the HF model's layout, via the EP swap's
+duck-typed probes). Each is a plain function below plus one row in the
+``ENTRIES`` table at the bottom: the function carries the verdict (exception
+type, exact message) and the rationale (its docstring); the row records the
+phase and the guard's location. The trigger condition stays at the guard
+site; the verdict lives here, so the site cannot quietly disagree.
 
-* ``config`` rows are decidable from the config alone. The owning config's
-  ``__post_init__`` calls the function at its original position
-  (first-error ordering is unchanged); ``check_config`` /
-  ``check_training`` / ``check_root`` filter the table by ``scope`` for
-  consistency tests and docs.
-* ``assembly`` rows need runtime information (the model, the resolved
-  ``ParallelDims``, the dataset name). The trigger condition stays at the
-  guard site; the verdict is the function here, so the site cannot quietly
-  disagree with the matrix.
-* ``probe`` rows need the HF model's layout (the EP swap's duck-typed
-  probes). Same split: the probe triggers, the row's function rejects.
+Config-phase combination checks are NOT here: they live in the owning
+config's ``__post_init__`` (``config/parallel.py``, ``config/training.py``,
+``config/root.py``), alongside every other field validation. The division of
+labor is documented in docs/hybridmesh_design.md (support-boundary section).
 
 This is deliberately not a rules engine: plain functions, plus one flat
 table. Field-level validation (sizes, allowed values) is not combination
@@ -35,16 +28,12 @@ from typing import Literal
 
 from hpmesh.errors import (
     ConfigError,
-    EnvironmentUnsupportedError,
     UnsupportedCombinationError,
 )
 
 __all__ = [
     "ENTRIES",
     "Row",
-    "check_config",
-    "check_root",
-    "check_training",
 ]
 
 Phase = Literal["config", "assembly", "probe"]
@@ -58,7 +47,6 @@ class Row:
     phase: Phase
     error: type[Exception]
     guard: str
-    scope: str | None = None
 
     @property
     def name(self) -> str:
@@ -72,187 +60,42 @@ class Row:
 # == config phase: ParallelConfig ========================================
 
 
-def sequence_parallel_required(cfg) -> None:
-    """hpmesh has one TP realization and it is the sequence-parallel one; False has
-    nothing to select. Leave it true, or set tp=1.
-    """
-    if not cfg.enable_sequence_parallel:
-        raise UnsupportedCombinationError(
-            "parallelism.enable_sequence_parallel=false is not supported: "
-            "hpmesh's tensor parallelism is sequence-parallel by "
-            "construction (the fused TP GEMMs gather/scatter the sequence "
-            "and the batch is sharded T/tp). There is no "
-            "replicated-activation TP path to fall back to, so this flag "
-            "has nothing to disable. Leave it true, or set "
-            "tensor_parallel_size=1 to drop TP."
-        )
 
 
 
-def tp_ep_cp(cfg) -> None:
-    """tp x ep is supported (TP dense, EP owns the routed experts); adding CP on top is
-    unverified -- the token-count reductions and dispatcher layouts have not been
-    exercised together.
-    """
-    if (
-        cfg.tensor_parallel_size > 1
-        and cfg.expert_parallel_size > 1
-        and cfg.context_parallel_size > 1
-    ):
-        raise UnsupportedCombinationError(
-            "tensor_parallel_size > 1 with expert_parallel_size > 1 and "
-            "context_parallel_size > 1 is not supported: tp x ep x cp is "
-            "unverified. Run tp x ep with context_parallel_size=1, or ep x "
-            "cp with tensor_parallel_size=1."
-        )
 
 
 
-def deepep_hybridep(cfg) -> None:
-    """CUDA-only kernels plus torchtitan's distributed/deepep/ wrappers, which hpmesh
-    does not vendor. Unlock: vendor the wrappers, add the CUDA-only dependency as
-    an optional extra, re-validate numerics on a CUDA device.
-    """
-    if cfg.ep_token_dispatcher in ("deepep", "hybridep"):
-        raise EnvironmentUnsupportedError(
-            f"ep_token_dispatcher={cfg.ep_token_dispatcher!r} is a "
-            "registered gap, not a supported backend: it is CUDA-only and "
-            "requires the deep_ep/hybridep kernels plus torchtitan's "
-            "distributed/deepep/ wrappers, which hpmesh does not vendor "
-            "(environment not covered; see docs/hpmesh_upstream_map.md "
-            "table D). Unlock conditions: vendor the wrappers, add the "
-            "CUDA-only dependency as an optional extra, and re-validate "
-            "numerics on a CUDA device. Use 'alltoall' meanwhile."
-        )
 
 
 
-def dispatcher_requires_ep(cfg) -> None:
-    """The EP swap is the only place a token dispatcher is installed, and it does not
-    run at ep=1.
-    """
-    if cfg.ep_token_dispatcher != "alltoall" and cfg.expert_parallel_size == 1:
-        raise UnsupportedCombinationError(
-            f"ep_token_dispatcher={cfg.ep_token_dispatcher!r} has no "
-            "effect at expert_parallel_size=1: the EP swap is the only "
-            "place a token dispatcher is installed and it does not run at "
-            "ep=1. Set expert_parallel_size > 1, or keep 'alltoall'."
-        )
 
 
 
-def ptrr_load_balancer(cfg) -> None:
-    """ptrr derives its schedule from a BlockMask, which hpmesh's CP kernel does not
-    consume. Use 'headtail' or None.
-    """
-    if cfg.context_parallel_load_balancer == "ptrr":
-        raise UnsupportedCombinationError(
-            "parallelism.context_parallel_load_balancer='ptrr' is not "
-            "implemented in hpmesh: it derives its schedule from a "
-            "BlockMask, which hpmesh's CP kernel does not consume. Use "
-            "'headtail' or None."
-        )
 
 
 
-def ulysses_no_load_balancer(cfg) -> None:
-    """Every rank attends the full sequence in whatever order the all-to-all delivers; a
-    load balancer's rearrangement would make that a permuted corpus, and nothing
-    would raise.
-    """
-    if (
-        cfg.context_parallel_strategy == "ulysses"
-        and cfg.context_parallel_load_balancer is not None
-    ):
-        raise UnsupportedCombinationError(
-            "parallelism.context_parallel_strategy='ulysses' requires "
-            "context_parallel_load_balancer=None: every rank attends the "
-            "full sequence in whatever order the all-to-all delivers, and "
-            "a load balancer's rearrangement would make that a permuted "
-            "corpus. Nothing raises: the attention is over the wrong "
-            "order of the right tokens, so the loss stays finite and the "
-            "run trains a different model. "
-            f"(got {cfg.context_parallel_load_balancer!r})"
-        )
 
 
 
 # == config phase: TrainingConfig ========================================
 
 
-def region_ac(training) -> None:
-    """RegionAC needs torch_remat and model-declared remat regions, which hpmesh has no
-    equivalent of. Unlock: add the torch_remat dependency plus a region-
-    declaration channel on HF decoder layers.
-    """
-    if training.activation_checkpoint_mode == "region":
-        raise EnvironmentUnsupportedError(
-            "training.activation_checkpoint_mode='region' (upstream "
-            "RegionAC) needs torch_remat and model-declared remat "
-            "regions, which hpmesh has no equivalent of; see "
-            "parallel/activation_checkpoint.py's docstring."
-        )
 
 
 
-def memory_budget_requires_compile(training) -> None:
-    """The memory budget is consumed by the compile partitioner, so without compile it
-    would silently do nothing.
-    """
-    if training.activation_checkpoint_mode == "memory_budget" and not training.compile:
-        raise ConfigError(
-            "training.activation_checkpoint_mode='memory_budget' requires "
-            "training.compile=True: the budget is consumed by the compile "
-            "partitioner, so without compile it would silently do nothing."
-        )
 
 
 
 # == config phase: HybridMeshConfig cross-group =======================
 
 
-def cp_divides_seq_len(root) -> None:
-    """Cross-group check: CP must divide the sequence length.
-    """
-    if root.training.max_seq_len % root.parallel.cp != 0:
-        raise ConfigError(
-            f"max_seq_len ({root.training.max_seq_len}) must be divisible by "
-            f"cp ({root.parallel.cp})"
-        )
 
 
 
-def async_tp_requires_compile(root) -> None:
-    """Async TP is an inductor pass over compiled regions; without compile it would
-    silently do nothing.
-    """
-    if (
-        root.training.compile_config.enable_async_tensor_parallel
-        and not root.training.compile
-    ):
-        raise ConfigError(
-            "training.compile_config.enable_async_tensor_parallel "
-            "requires training.compile=True: async TP is an inductor "
-            "pass over compiled regions, so without compile it would "
-            "silently do nothing."
-        )
 
 
 
-def async_tp_requires_tp(root) -> None:
-    """Async TP pipelines the TP collectives, and there are none at tp=1.
-    """
-    if (
-        root.training.compile_config.enable_async_tensor_parallel
-        and root.training.compile
-        and root.parallel.tp < 2
-    ):
-        raise ConfigError(
-            "training.compile_config.enable_async_tensor_parallel "
-            "requires tensor_parallel_size > 1 (got "
-            f"{root.parallel.tp}): it pipelines the TP collectives, "
-            "and there are none at tp=1."
-        )
 
 
 
@@ -548,30 +391,6 @@ def shared_expert_tp_ep(block: object) -> None:
 
 
 ENTRIES: tuple[Row, ...] = (
-    Row(sequence_parallel_required, "config", UnsupportedCombinationError,
-        'config/parallel.py::__post_init__', scope='parallel'),
-    Row(tp_ep_cp, "config", UnsupportedCombinationError,
-        'config/parallel.py::__post_init__', scope='parallel'),
-    Row(deepep_hybridep, "config", EnvironmentUnsupportedError,
-        'config/parallel.py::__post_init__', scope='parallel'),
-    Row(dispatcher_requires_ep, "config", UnsupportedCombinationError,
-        'config/parallel.py::__post_init__', scope='parallel'),
-    Row(ptrr_load_balancer, "config", UnsupportedCombinationError,
-        'config/parallel.py::__post_init__ '
-        '(backstop: context_parallel/input_shard.py)', scope='parallel'),
-    Row(ulysses_no_load_balancer, "config", UnsupportedCombinationError,
-        'config/parallel.py::__post_init__', scope='parallel'),
-    Row(region_ac, "config", EnvironmentUnsupportedError,
-        'config/training.py::TrainingConfig.__post_init__ '
-        '(backstop: parallel/activation_checkpoint.py::apply_ac)', scope='training'),
-    Row(memory_budget_requires_compile, "config", ConfigError,
-        'config/training.py::TrainingConfig.__post_init__', scope='training'),
-    Row(cp_divides_seq_len, "config", ConfigError,
-        'config/root.py::HybridMeshConfig.__post_init__', scope='root'),
-    Row(async_tp_requires_compile, "config", ConfigError,
-        'config/root.py::HybridMeshConfig.__post_init__', scope='root'),
-    Row(async_tp_requires_tp, "config", ConfigError,
-        'config/root.py::HybridMeshConfig.__post_init__', scope='root'),
     Row(pp_activation_checkpoint, "assembly", UnsupportedCombinationError,
         'parallel/parallelize.py::parallelize_hf_transformers'),
     Row(pp_validation, "assembly", UnsupportedCombinationError,
@@ -615,24 +434,3 @@ ENTRIES: tuple[Row, ...] = (
     Row(shared_expert_tp_ep, "probe", UnsupportedCombinationError,
         'parallel/expert_parallel/convert.py::_convert_block'),
 )
-
-
-def check_config(parallel) -> None:
-    """Every config-phase row over a ``ParallelConfig``, in table order."""
-    for row in ENTRIES:
-        if row.phase == "config" and row.scope == "parallel":
-            row.fn(parallel)
-
-
-def check_training(training) -> None:
-    """Every config-phase row over a ``TrainingConfig``, in table order."""
-    for row in ENTRIES:
-        if row.phase == "config" and row.scope == "training":
-            row.fn(training)
-
-
-def check_root(root) -> None:
-    """Every config-phase row over a ``HybridMeshConfig``, in table order."""
-    for row in ENTRIES:
-        if row.phase == "config" and row.scope == "root":
-            row.fn(root)
