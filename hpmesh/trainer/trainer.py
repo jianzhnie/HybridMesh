@@ -141,7 +141,7 @@ from ..utils.gc import GarbageCollection
 from ..utils.logger_utils import get_logger
 from . import batch as batch_mod
 from . import builder, pp_steps
-from . import validation as validation_pass
+from . import validate as validation_pass
 
 # Rank-aware: the helper installs a handler on rank 0 only, so a torchrun run
 # logs one line per step instead of one per rank.

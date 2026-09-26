@@ -20,7 +20,7 @@ __all__ = [
     "_stage_enabled",
 ]
 
-# The order IS the contract (see parallelize_hf.py's docstring).
+# The order IS the contract (see parallelize.py's docstring).
 @dataclass(frozen=True)
 class Stage:
     """One assembly stage: name, whether PP runs it, why it sits here."""

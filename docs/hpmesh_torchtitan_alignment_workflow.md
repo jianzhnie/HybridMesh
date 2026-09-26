@@ -125,7 +125,7 @@ git -C <torchtitan> log <上次-torchtitan-基线>..HEAD -- torchtitan/
 类层次。重点模块：
 
 - `models/hf_wrapper.py`
-- `parallel/parallelize_hf.py`
+- `parallel/parallelize.py`
 - `parallel/tensor_parallel/tp.py`
 - `parallel/expert_parallel/*`
 - `parallel/context_parallel/cp_kernel.py`（CP redistribution 与 kernel；原 `primitives.py` 已于 2026-09-23 删除）

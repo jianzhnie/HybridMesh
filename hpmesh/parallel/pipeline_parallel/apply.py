@@ -6,7 +6,7 @@ driver around it, vendored in shape from torchtitan's
 
 * ``apply_pp`` -- decides the stage count from the schedule class and splits
   the model into this rank's stages. Parallelizing the resulting chunks (TP,
-  compile, FSDP) is the caller's job: ``parallelize_hf`` owns that assembly
+  compile, FSDP) is the caller's job: ``parallelize`` owns that assembly
   order for both the split and the unsplit path, so this module never imports
   a sibling parallelism family. Its ``first_stage_module_fqns`` option is
   torchtitan's ``pipeline_with_first_stage_modules``: extra top-level modules

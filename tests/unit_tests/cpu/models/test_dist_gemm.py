@@ -25,7 +25,7 @@ import pytest
 import torch
 
 from hpmesh.models.common.activation import SwiGLU
-from hpmesh.models.common.dist_gemm import (
+from hpmesh.models.common.async_linear import (
     AllGatherFusedQKVLinear,
     DistGEMMFeedForward,
     RowParallelLinear,
@@ -143,7 +143,7 @@ def test_feed_forward_uses_the_given_activation() -> None:
 
 def test_feed_forward_warns_when_tp_is_off(caplog) -> None:
     """Silently running unfused is the failure mode the warning exists for."""
-    import hpmesh.models.common.dist_gemm as dg
+    import hpmesh.models.common.async_linear as dg
 
     dg._WARNED_NO_TP = False
     ffn = _ffn()
@@ -156,7 +156,7 @@ def test_feed_forward_warns_when_tp_is_off(caplog) -> None:
 
 def test_feed_forward_warns_only_once(caplog) -> None:
     """A per-step warning would flood the log; one per process is enough."""
-    import hpmesh.models.common.dist_gemm as dg
+    import hpmesh.models.common.async_linear as dg
 
     dg._WARNED_NO_TP = False
     ffn = _ffn()

@@ -8,7 +8,7 @@ only steers activation checkpointing; calling the projection directly is the
 same arithmetic. The checkpoint hooks are kept: without them an external
 checkpoint that stores the logical ``w1`` / ``w3`` projections cannot load.
 
-This is the base class ``dist_gemm.DistGEMMFeedForward`` subclasses: that module
+This is the base class ``async_linear.DistGEMMFeedForward`` subclasses: that module
 is the same network with the TP collectives folded into the two GEMMs, so it
 overrides how the projections run and reuses the fused-weight layout contract
 (``w13`` interleaved gate/up) and the activation split established here.

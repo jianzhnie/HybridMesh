@@ -113,7 +113,7 @@ def build_trainer_state(self, cfg) -> None:
         # The dense (dp, cp, tp) mesh does not cover the world under PP,
         # so ``build_mesh``'s coverage backstop would reject it. The same
         # view over this rank's non-PP coordinates exists per stage and is
-        # what the per-part apply_* functions index (parallelize_hf
+        # what the per-part apply_* functions index (parallelize
         # resolves it off parallel_dims itself); keep the attribute
         # consistent.
         self.mesh = self.parallel_dims.spmd_dense_mesh()

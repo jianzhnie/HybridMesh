@@ -2,7 +2,7 @@
 
 Split out of ``tp.py`` (which keeps the declaration/realizer machinery) so
 every parallelism family exposes the same ``apply.py`` entry-point shape --
-``parallelize_hf`` can then import ``apply_tp`` the same way it imports
+``parallelize`` can then import ``apply_tp`` the same way it imports
 ``apply_ep`` / ``apply_cp`` / ``apply_fsdp``.
 """
 

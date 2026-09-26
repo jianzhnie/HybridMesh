@@ -18,7 +18,7 @@ import torch
 import torch.nn as nn
 
 from hpmesh.models.common.activation import SwiGLU
-from hpmesh.models.common.dist_gemm import DistGEMMFeedForward
+from hpmesh.models.common.async_linear import DistGEMMFeedForward
 from hpmesh.models.common.feed_forward import (
     FeedForward,
     SigmoidGatedFeedForward,
