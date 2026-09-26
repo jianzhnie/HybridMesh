@@ -18,6 +18,7 @@ from hpmesh.config.training import (
     TrainingConfig,
     ValidationConfig,
 )
+from hpmesh.errors import ConfigError
 from hpmesh.utils.logger_utils import get_logger
 
 logger = get_logger(__name__)
@@ -82,16 +83,38 @@ class HybridMeshConfig:
 
     def __post_init__(self) -> None:
         # Lazy import, same cycle reason as ParallelConfig.__post_init__.
-        from hpmesh.parallel import matrix
 
         # Cross-group check: CP must divide the sequence length.
-        matrix.cp_divides_seq_len(self)
+        if self.training.max_seq_len % self.parallel.cp != 0:
+            raise ConfigError(
+                f"max_seq_len ({self.training.max_seq_len}) must be divisible by "
+                f"cp ({self.parallel.cp})"
+            )
         # Async TP is a compiled-TP optimization: without compile there is no
         # inductor pass to pipeline the collectives, and without TP there are
         # no collectives. Reject both halves here so the error names the flag
         # rather than surfacing deep inside the compile step.
-        matrix.async_tp_requires_compile(self)
-        matrix.async_tp_requires_tp(self)
+        if (
+            self.training.compile_config.enable_async_tensor_parallel
+            and not self.training.compile
+        ):
+            raise ConfigError(
+                "training.compile_config.enable_async_tensor_parallel "
+                "requires training.compile=True: async TP is an inductor "
+                "pass over compiled regions, so without compile it would "
+                "silently do nothing."
+            )
+        if (
+            self.training.compile_config.enable_async_tensor_parallel
+            and self.training.compile
+            and self.parallel.tp < 2
+        ):
+            raise ConfigError(
+                "training.compile_config.enable_async_tensor_parallel "
+                "requires tensor_parallel_size > 1 (got "
+                f"{self.parallel.tp}): it pipelines the TP collectives, "
+                "and there are none at tp=1."
+            )
 
     # -- Flat view: lets the trainer read cfg.lr / cfg.steps / ... uniformly. --
     # The parallel degrees (dp/tp/pp/cp/ep) are deliberately NOT here: the

@@ -443,10 +443,10 @@ step 1 恢复 optimizer、scheduler、dataloader 和 train state 后完成并保
 公开面约定：稳定面 = `hpmesh.HybridMeshConfig` / `hpmesh.Trainer` /
 `hpmesh.config.*` / CLI；集成面与内部分级见 design doc §3.4。
 
-组合判定约定：并行组合的支持/拒绝单一来源是 `parallel/matrix.py`
-（每个组合一个普通函数 + 底部 `ENTRIES` 扁平表一行；config/assembly/probe
-三阶段；配置期 `__post_init__` 原位调用，装配期与 probe 期由守卫点触发、
-函数给出判定与文案）。
+组合判定约定：分工两处——config 期可判的组合校验在各 config 的
+`__post_init__`（与其余字段校验同处）；跨层组合裁决（assembly/probe 期）
+的单一来源是 `parallel/matrix.py`（每个组合一个普通函数 + 底部 `ENTRIES`
+扁平表一行；守卫点触发、函数给出判定与文案）。
 
 能力探测约定：torch 版本/环境探测集中在 `accelerator/capabilities.py`
 （`has`/`require`，缺失经 `EnvironmentUnsupportedError` 报解锁指引）。
