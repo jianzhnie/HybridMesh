@@ -38,9 +38,9 @@ from hpmesh.models.hf_wrapper import HFTransformerModel
 from hpmesh.parallel.parallel_dims import ParallelDims, build_mesh
 from hpmesh.parallel.tensor_parallel import apply_tp
 from hpmesh.parallel.tensor_parallel.tp import (
-    ColwiseLinear,
+    ColumnParallelLinear,
     ColwiseLinearNoGather,
-    RowwiseLinear,
+    RowParallelLinear,
 )
 from hpmesh.trainer.trainer import Trainer
 
@@ -104,7 +104,9 @@ def main() -> None:
     sharded_ids = {
         id(mod.weight)
         for mod in model.modules()
-        if isinstance(mod, ColwiseLinear | ColwiseLinearNoGather | RowwiseLinear)
+        if isinstance(
+            mod, ColumnParallelLinear | ColwiseLinearNoGather | RowParallelLinear
+        )
     }
     assert sharded_ids, "apply_tp swapped no projections -- test is vacuous"
     replicated = {

@@ -4,18 +4,18 @@ every other parallelism family."""
 
 from .apply import apply_tp
 from .tp import (
-    ColwiseLinear,
+    ColumnParallelLinear,
     ColwiseLinearNoGather,
-    RowwiseLinear,
+    RowParallelLinear,
     ShardingConfig,
     colwise,
     rowwise,
 )
 
 __all__ = [
-    "ColwiseLinear",
+    "ColumnParallelLinear",
     "ColwiseLinearNoGather",
-    "RowwiseLinear",
+    "RowParallelLinear",
     "ShardingConfig",
     "apply_tp",
     "colwise",

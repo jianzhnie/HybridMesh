@@ -32,8 +32,8 @@ from .probe import (
     _read_expert_groups,
     _read_route_norm,
     _read_route_scale,
-    _read_score_func,
-    _read_top_k,
+    _resolve_score_func,
+    _resolve_top_k,
     _router_of,
 )
 
@@ -80,7 +80,7 @@ def _convert_block(
     assert experts is not None  # the probe established this
 
     num_experts = experts.num_experts
-    top_k = _read_top_k(block)
+    top_k = _resolve_top_k(block)
     assert top_k is not None  # the probe established this
     dim = router_gate.weight.shape[1]
     hidden = experts.gate_EFD.shape[1]
@@ -94,7 +94,7 @@ def _convert_block(
 
     num_expert_groups, num_limited_groups = _read_expert_groups(block, router_gate)
     grouped = GroupedExperts(dim, hidden, num_local)
-    score_func = _read_score_func(block, router_gate)
+    score_func = _resolve_score_func(block, router_gate)
     if quantile_balancing:
         # The quantile scheme is defined over sigmoid scores (the histogram
         # range derives from their [0, 1] bound) and routes freely over all

@@ -87,15 +87,15 @@ def parse_config() -> HybridMeshConfig:
         ]
     )
     (
-        model,
-        parallel,
-        optimizer,
-        lr_scheduler,
-        training,
-        checkpoint,
-        dataloader,
-        metrics,
-        profiler,
+        model_config,
+        parallel_config,
+        optimizer_config,
+        lr_scheduler_config,
+        training_config,
+        checkpoint_config,
+        dataloader_config,
+        metrics_config,
+        profiler_config,
     ) = parser.parse_args_into_dataclasses()
     # Each group is its own parser group, so every scalar field becomes a flag.
     # The nested configs (reachable as ``training.checkpoint`` and friends) are
@@ -103,13 +103,16 @@ def parse_config() -> HybridMeshConfig:
     # construction. The schedule grafts onto the OPTIMIZER group, not onto
     # ``training``: it scales the learning rate that group sets, and splitting
     # them would let a run halve one without touching the other.
-    optimizer.lr_scheduler_config = lr_scheduler
-    training.checkpoint_config = checkpoint
-    training.dataloader_config = dataloader
-    training.metrics_config = metrics
-    training.profiler_config = profiler
+    optimizer_config.lr_scheduler_config = lr_scheduler_config
+    training_config.checkpoint_config = checkpoint_config
+    training_config.dataloader_config = dataloader_config
+    training_config.metrics_config = metrics_config
+    training_config.profiler_config = profiler_config
     cfg = HybridMeshConfig(
-        model=model, parallel=parallel, optimizer=optimizer, training=training
+        model=model_config,
+        parallel=parallel_config,
+        optimizer=optimizer_config,
+        training=training_config,
     )
     cfg.auto_fill_model()  # pull arch from a HF hub id when given one (no-op offline)
     return cfg
