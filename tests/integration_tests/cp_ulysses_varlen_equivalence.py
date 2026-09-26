@@ -28,7 +28,7 @@ Three layers of checks:
 * the gradients: torch's flex attention has no CPU backward, so the collective
   duality is pinned around an SDPA inner attention with the same dense
   document mask: loss and q/k/v gradients of the sharded path
-  (``_SeqToHead`` -> attention -> ``_HeadToSeq``) must equal the full-sequence
+  (``SeqToHead`` -> attention -> ``HeadToSeq``) must equal the full-sequence
   reference's shards, and must be nonzero (non-vacuity).
 
 CPU/gloo, float64, flex forced explicitly. Everything forward-only except the
@@ -47,7 +47,7 @@ from torch.distributed.device_mesh import init_device_mesh
 from hpmesh.models.hf_factory import build_model_config_for
 from hpmesh.models.hf_wrapper import HFTransformerModel
 from hpmesh.parallel.context_parallel import apply_cp
-from hpmesh.parallel.context_parallel.cp_kernel import _HeadToSeq, _SeqToHead
+from hpmesh.parallel.context_parallel.cp_kernel import HeadToSeq, SeqToHead
 from hpmesh.trainer import (
     HybridMeshConfig,
     ModelConfig,
@@ -217,7 +217,7 @@ def _check_gradients_under_varlen_mask(
 
     Flex has no CPU backward, so the inner attention here is SDPA against the
     same dense document mask -- what is pinned is the collective duality
-    (``_SeqToHead`` / ``_HeadToSeq`` forward-backward pairing) carrying correct
+    (``SeqToHead`` / ``HeadToSeq`` forward-backward pairing) carrying correct
     gradients under a varlen mask, not the flex kernel.
     """
     rank = cp_mesh.get_local_rank()
@@ -245,9 +245,9 @@ def _check_gradients_under_varlen_mask(
 
     # Sharded: token shard -> head shard -> attention -> token shard.
     sh_qkv = [x[:, :, lo:hi].clone().requires_grad_(True) for x in qkv_full]
-    a2a_qkv = [_SeqToHead.apply(x, group) for x in sh_qkv]
+    a2a_qkv = [SeqToHead.apply(x, group) for x in sh_qkv]
     out = sdpa(*a2a_qkv)
-    out = _HeadToSeq.apply(out, group)
+    out = HeadToSeq.apply(out, group)
     (out * w[:, :, lo:hi]).sum().backward()
 
     out_diff = (out - ref_out[:, :, lo:hi]).abs().max().item()

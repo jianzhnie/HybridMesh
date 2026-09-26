@@ -335,7 +335,7 @@ def test_a_composite_config_carries_the_mask_type_down_to_the_text_stack() -> No
     """
     from transformers import AutoConfig
 
-    from hpmesh.models.hf_factory import _unwrap_text_config
+    from hpmesh.models.hf_factory import unwrap_text_config
 
     for name in ("llava", "gemma3"):
         top = AutoConfig.for_model(name)
@@ -345,7 +345,7 @@ def test_a_composite_config_carries_the_mask_type_down_to_the_text_stack() -> No
             "would pass without the carry-down and prove nothing"
         )
 
-        seen = _unwrap_text_config(top)
+        seen = unwrap_text_config(top)
 
         assert seen is top.text_config
         assert getattr(seen, "attn_mask_type", "causal") == "block_causal", (
@@ -356,19 +356,19 @@ def test_a_composite_config_carries_the_mask_type_down_to_the_text_stack() -> No
 def test_a_composite_without_the_flag_stays_unset() -> None:
     """The carry-down must not invent a flag the caller never derived.
 
-    ``_unwrap_text_config`` is also reached by callers that build a config by
+    ``unwrap_text_config`` is also reached by callers that build a config by
     hand (the equivalence tests), and ``getattr(..., 'causal')`` is the
     documented default at the mask site. Synthesizing ``"causal"`` here would
     turn every unset flag into an explicit one and quietly retire that default.
     """
     from transformers import AutoConfig
 
-    from hpmesh.models.hf_factory import _unwrap_text_config
+    from hpmesh.models.hf_factory import unwrap_text_config
 
     top = AutoConfig.for_model("llava")
     assert not hasattr(top, "attn_mask_type")
 
-    seen = _unwrap_text_config(top)
+    seen = unwrap_text_config(top)
 
     assert not hasattr(seen, "attn_mask_type")
 
@@ -494,7 +494,7 @@ def test_wrapper_forward_returns_logits_the_trainer_can_score() -> None:
 
     # The model's own path marks its row ends IGNORE_INDEX, and those are then
     # excluded from the denominator rather than silently counted. The count
-    # comes from ``_count_valid_tokens``, which sees the unsharded labels -- the
+    # comes from ``count_valid_tokens``, which sees the unsharded labels -- the
     # loss itself only skips the ignored rows.
     row_aware = next_token_targets(ids, seq_len=cfg.max_seq_len)
     counted = int((row_aware != IGNORE_INDEX).sum())

@@ -15,18 +15,18 @@ from hpmesh.config import ParallelConfig
 
 from .. import matrix
 from .tp import (
-    _MOE_PLAN_SPECS,
+    MOE_PLAN_SPECS,
     ColumnParallelLinear,
     ColwiseLinearNoGather,
+    GatherSequenceFirst,
     ShardingConfig,
-    _enable_symm_mem,
-    _GatherSequenceFirst,
-    _looks_like_attention,
-    _match,
-    _resolve_plan,
-    _shard_experts_for_tp,
-    _supports_symm_mem,
-    _TPMoeSequenceBoundary,
+    TPMoeSequenceBoundary,
+    enable_symm_mem,
+    looks_like_attention,
+    match,
+    resolve_plan,
+    shard_experts_for_tp,
+    supports_symm_mem,
 )
 
 __all__ = ["apply_tp"]
@@ -51,7 +51,7 @@ def apply_tp(
     # nothing, or that matches no module, used to leave the model fully
     # replicated while the run reported a healthy TP setup. Both are loud
     # errors now, and both fire before any process-group access.
-    sharding_plan = _resolve_plan(model, plan)
+    sharding_plan = resolve_plan(model, plan)
     if not sharding_plan:
         raise ValueError(
             f"apply_tp with tp={cfg.tp}: {type(model).__name__} provides no TP "
@@ -63,20 +63,20 @@ def apply_tp(
     targets: list[tuple[str, nn.Linear, ShardingConfig]] = []
     for module_path, module in model.named_modules():
         if isinstance(module, nn.Linear):
-            spec = _match(sharding_plan, module_path)
+            spec = match(sharding_plan, module_path)
             if spec is not None:
                 targets.append((module_path, module, spec))
 
     # MoE-under-TP is declared by spec strings that name no nn.Linear (the
     # expert weights are stacked parameters), so it has to be detected on the
-    # RAW plan, before _resolve_plan maps those specs to None.
+    # RAW plan, before resolve_plan maps those specs to None.
     raw_plan = plan
     if raw_plan is None:
         raw_plan = (
             getattr(model, "tp_plan", None) or getattr(model, "_tp_plan", None) or {}
         )
     plan_declares_moe = any(
-        isinstance(spec, str) and spec in _MOE_PLAN_SPECS for spec in raw_plan.values()
+        isinstance(spec, str) and spec in MOE_PLAN_SPECS for spec in raw_plan.values()
     )
     # tp x ep: TP shards only the dense parts and EP owns the routed experts
     # (the upstream alignment). The HF blocks are left whole here and swapped
@@ -87,7 +87,7 @@ def apply_tp(
     moe_blocks: list[tuple[str, nn.Module]] = []
     already_bracketed = False
     if plan_declares_moe and not moe_deferred_to_ep:
-        from ..expert_parallel.swap import _is_hf_moe_block
+        from ..expert_parallel.swap import is_hf_moe_block
 
         for module_path, module in model.named_modules():
             if getattr(module, "_tp_moe_boundary", False):
@@ -97,7 +97,7 @@ def apply_tp(
                 continue
             # Blocks the probe refuses (GPT-OSS's transposed, bias-bearing
             # experts) raise out of it here, before any weight is touched.
-            if _is_hf_moe_block(module):
+            if is_hf_moe_block(module):
                 moe_blocks.append((module_path, module))
         if not moe_blocks and not already_bracketed:
             matrix.tp_moe_specs_without_block(cfg.tp, model)
@@ -115,9 +115,9 @@ def apply_tp(
     group = mesh["tp"].get_group()
     tp_size = mesh["tp"].size()
     tp_rank = mesh["tp"].get_local_rank()
-    use_symm_mem = _supports_symm_mem(mesh["tp"])
+    use_symm_mem = supports_symm_mem(mesh["tp"])
     if use_symm_mem:
-        _enable_symm_mem(group)
+        enable_symm_mem(group)
 
     for module_path, block in moe_blocks:
         if getattr(block, "shared_expert", None) is not None or (
@@ -128,14 +128,14 @@ def apply_tp(
         # replicated-gradient all-reduce through this id set: each rank's
         # F-shard gradient is complete, and summing it with a different
         # shard's gradient would corrupt it.
-        block._tp_sharded_param_ids = _shard_experts_for_tp(
+        block.tp_sharded_param_ids = shard_experts_for_tp(
             block, tp_size=tp_size, tp_rank=tp_rank
         )
         block._tp_seq_group = group
         block._tp_moe_boundary = True
         block.__class__ = type(
             f"TPMoe{type(block).__name__}",
-            (_TPMoeSequenceBoundary, type(block)),
+            (TPMoeSequenceBoundary, type(block)),
             {},
         )
 
@@ -151,7 +151,7 @@ def apply_tp(
         parent = model.get_submodule(parent_path) if parent_path else model
 
         implementation = spec.implementation
-        if spec.kind == "colwise" and _looks_like_attention(parent):
+        if spec.kind == "colwise" and looks_like_attention(parent):
             # HF attention reshapes q/k/v by the input's shape, so the fused
             # in-GEMM sequence gather would silently mis-shape them. Take the
             # same gather at the module boundary instead (below) and give the
@@ -177,7 +177,7 @@ def apply_tp(
         parent._tp_seq_group = group
         parent.__class__ = type(
             f"TPGather{type(parent).__name__}",
-            (_GatherSequenceFirst, type(parent)),
+            (GatherSequenceFirst, type(parent)),
             {},
         )
 

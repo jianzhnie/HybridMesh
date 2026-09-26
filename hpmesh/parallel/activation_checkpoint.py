@@ -169,7 +169,7 @@ def _get_default_save_ops() -> set:
     return save_ops
 
 
-def _mm_recompute_shapes(
+def mm_recompute_shapes(
     module: nn.Module, base_fqn: str | None, fqns: list[str]
 ) -> set[tuple[int, int]]:
     """Collect the ``(in, out)`` weight shapes to force-recompute, by fqn.
@@ -207,7 +207,7 @@ _MM_OPS = (
 )
 
 
-def _selective_policy(
+def selective_policy(
     save_ops: set, mm_recompute_shapes: set[tuple[int, int]]
 ) -> Callable:
     """Build the per-op policy the selective context consults (upstream's
@@ -252,10 +252,10 @@ def _wrap_selective(
 ) -> nn.Module:
     """Wrap one block with the selective policy (upstream's ``_wrap_block``)."""
     save_ops = _get_default_save_ops()
-    mm_recompute_shapes = _mm_recompute_shapes(
+    mm_shapes = mm_recompute_shapes(
         module, base_fqn, cfg.force_recompute_mm_shapes_by_fqns
     )
-    policy = _selective_policy(save_ops, mm_recompute_shapes)
+    policy = selective_policy(save_ops, mm_shapes)
     return ptd_checkpoint_wrapper(
         module,
         context_fn=lambda: create_selective_checkpoint_contexts(policy),

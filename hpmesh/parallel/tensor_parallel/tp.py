@@ -31,7 +31,7 @@ collective never materializes a full-sized activation and can overlap the matmul
 One site cannot host the fused gather: HF attention derives its q/k/v view
 shapes from ``hidden_states.shape``, which a projection that physically
 lengthens the sequence would silently mis-shape. Attention therefore takes the
-same all-gather at the module boundary instead (``_GatherSequenceFirst`` --
+same all-gather at the module boundary instead (``GatherSequenceFirst`` --
 numerically identical, just unfused), its q/k/v projections become plain
 feature-sharded GEMMs (``ColwiseLinearNoGather``), and its o_proj keeps the
 fused reduce-scatter, which returns the activation to the sequence shard. The
@@ -67,7 +67,7 @@ ShardKind = Literal["colwise", "rowwise"]
 # -- declaration --------------------------------------------------------------
 
 
-def _shard_weight(
+def shard_weight(
     weight: torch.Tensor, dim: int, *, tp_size: int, tp_rank: int
 ) -> torch.Tensor:
     """Cut ``weight`` into ``tp_size`` pieces along ``dim``; keep this rank's.
@@ -108,7 +108,7 @@ class ColumnParallelLinear(nn.Module):
         self.in_features = weight.shape[1]
         self.out_features = weight.shape[0]
         self.weight = nn.Parameter(
-            _shard_weight(weight, 0, tp_size=tp_size, tp_rank=tp_rank)
+            shard_weight(weight, 0, tp_size=tp_size, tp_rank=tp_rank)
         )
         self.group = group
         self.tp_size = tp_size
@@ -154,7 +154,7 @@ class RowParallelLinear(nn.Module):
         self.in_features = weight.shape[1]
         self.out_features = weight.shape[0]
         self.weight = nn.Parameter(
-            _shard_weight(weight, 1, tp_size=tp_size, tp_rank=tp_rank)
+            shard_weight(weight, 1, tp_size=tp_size, tp_rank=tp_rank)
         )
         self.group = group
         self.tp_size = tp_size
@@ -180,7 +180,7 @@ class ColwiseLinearNoGather(nn.Module):
 
     Same weight shard as :class:`ColumnParallelLinear` (``[out / tp, in]``) but a plain
     local GEMM, for sites whose input is already full-sequence: the attention
-    boundary gather (``_GatherSequenceFirst``) runs upstream, because HF
+    boundary gather (``GatherSequenceFirst``) runs upstream, because HF
     attention derives q/k/v shapes from ``hidden_states`` and cannot absorb a
     projection whose output is physically longer than its input.
 
@@ -204,14 +204,14 @@ class ColwiseLinearNoGather(nn.Module):
         self.in_features = weight.shape[1]
         self.out_features = weight.shape[0]
         self.weight = nn.Parameter(
-            _shard_weight(weight, 0, tp_size=tp_size, tp_rank=tp_rank)
+            shard_weight(weight, 0, tp_size=tp_size, tp_rank=tp_rank)
         )
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         return torch.nn.functional.linear(x, self.weight)
 
 
-class _GatherSequenceFirst:
+class GatherSequenceFirst:
     """Mixin that all-gathers the TP sequence shard before HF attention runs.
 
     Installed by ``apply_tp`` via a ``__class__`` swap (not a module wrapper),
@@ -232,7 +232,7 @@ class _GatherSequenceFirst:
         return super().forward(gathered, *args, **kwargs)
 
 
-def _looks_like_attention(module: nn.Module) -> bool:
+def looks_like_attention(module: nn.Module) -> bool:
     """HF attention modules hold q/k/v projections as direct attributes.
 
     This is the site test for the boundary gather: such a module reshapes its
@@ -251,17 +251,17 @@ def _looks_like_attention(module: nn.Module) -> bool:
 # the expert weights are stacked parameters on the experts module -- so they
 # resolve to None in the plan and are realized structurally by ``_apply_moe_tp``
 # below, which is what keeps the refusal-to-replicate validation honest.
-_MOE_PLAN_SPECS = frozenset({"packed_colwise", "packed_rowwise", "moe_tp_experts"})
+MOE_PLAN_SPECS = frozenset({"packed_colwise", "packed_rowwise", "moe_tp_experts"})
 
 
-class _TPMoeSequenceBoundary:
+class TPMoeSequenceBoundary:
     """Mixin that brackets a HF MoE block with the TP sequence collectives.
 
     The MoE block under TP is the dense colwise/rowwise pair with the feature
     shard kept internal: the input arrives as this rank's ``(B, T / tp, D)``
     sequence shard and is all-gathered (backward: reduce-scatter of the input
     gradient); the block then runs on the full token stream with its expert
-    weights sharded on the F dim (``_shard_experts_for_tp``), producing an
+    weights sharded on the F dim (``shard_experts_for_tp``), producing an
     output that is partial over the TP group; the boundary reduce-scatter sums
     the partials and returns a ``(B, T / tp, D)`` sequence shard (backward:
     all-gather of the output gradient). Weight layout and collectives are the
@@ -272,7 +272,7 @@ class _TPMoeSequenceBoundary:
     trainer's ``_allreduce_replicated_tp_grads`` sums its gradient (each rank's
     copy earns a different partial through the sharded expert outputs).
 
-    Installed by ``__class__`` swap (like ``_GatherSequenceFirst``), so module
+    Installed by ``__class__`` swap (like ``GatherSequenceFirst``), so module
     paths, ``state_dict`` keys and later attach points are all untouched.
     """
 
@@ -286,7 +286,7 @@ class _TPMoeSequenceBoundary:
         return reduce_scatter_along(out, -2, self._tp_seq_group)
 
 
-def _shard_experts_for_tp(
+def shard_experts_for_tp(
     block: nn.Module, *, tp_size: int, tp_rank: int
 ) -> frozenset[int]:
     """Shard a HF MoE block's fused expert weights on the F dim, in place.
@@ -377,7 +377,7 @@ def rowwise() -> ShardingConfig:
 # -- engine -------------------------------------------------------------------
 
 
-def _resolve_plan(model: nn.Module, plan) -> dict[str, ShardingConfig | None]:
+def resolve_plan(model: nn.Module, plan) -> dict[str, ShardingConfig | None]:
     """Normalize a plan into ``{module_path_pattern: ShardingConfig}``.
 
     ``plan`` may be ``None`` (use the model's declared plan), a map of patterns
@@ -398,8 +398,8 @@ def _resolve_plan(model: nn.Module, plan) -> dict[str, ShardingConfig | None]:
     Replicate -- and they name stacked parameters on the experts module, not
     nn.Linear modules, so there is nothing for the per-Linear engine to swap.
     They are realized structurally by ``_apply_moe_tp`` (weight sharding in
-    ``_shard_experts_for_tp``, activation collectives in
-    ``_TPMoeSequenceBoundary``), which ``apply_tp`` invokes when the raw plan
+    ``shard_experts_for_tp``, activation collectives in
+    ``TPMoeSequenceBoundary``), which ``apply_tp`` invokes when the raw plan
     carries any of these specs. This is hpmesh's counterpart to upstream's
     ``models/common/moe_sharding.py`` declarations; see
     docs/hpmesh_upstream_map.md (D: ``models/common/moe_sharding.py``).
@@ -427,13 +427,13 @@ def _resolve_plan(model: nn.Module, plan) -> dict[str, ShardingConfig | None]:
             # rank. The ``_with_grad_allreduce`` half is already implemented --
             # _allreduce_replicated_tp_grads sums exactly these parameters'
             # gradients -- so this entry only has to be understood, not acted
-            # on. Recorded as None rather than dropped so _match still stops
+            # on. Recorded as None rather than dropped so match still stops
             # here instead of falling through to a broader later pattern.
             resolved[pattern] = None
-        elif spec in _MOE_PLAN_SPECS:
+        elif spec in MOE_PLAN_SPECS:
             # MoE-under-TP, realized structurally in apply_tp (weight sharding
-            # in _shard_experts_for_tp, activation collectives in
-            # _TPMoeSequenceBoundary). None for
+            # in shard_experts_for_tp, activation collectives in
+            # TPMoeSequenceBoundary). None for
             # the same first-match-wins reason as above, and so a pattern that
             # happens to match an nn.Linear is left whole rather than wrongly
             # swapped for a dense realizer.
@@ -443,13 +443,13 @@ def _resolve_plan(model: nn.Module, plan) -> dict[str, ShardingConfig | None]:
     return resolved
 
 
-def _match(
+def match(
     plan: dict[str, ShardingConfig | None], module_path: str
 ) -> ShardingConfig | None:
     """The first pattern in ``plan`` that matches ``module_path``.
 
     The None entries are plans that deliberately declare a projection *not*
-    sharded; for those first-match-wins is load-bearing, because ``_match``
+    sharded; for those first-match-wins is load-bearing, because ``match``
     walks the plan in insertion order and stops at the first hit. Returning
     None from them is indistinguishable from "no pattern matched" to the
     caller, which is correct here -- both mean "leave this module alone" -- but
@@ -462,7 +462,7 @@ def _match(
     return None
 
 
-def _supports_symm_mem(tp_mesh: DeviceMesh) -> bool:
+def supports_symm_mem(tp_mesh: DeviceMesh) -> bool:
     """Whether the fused symmetric-memory TP collectives can run on this mesh.
 
     They are CUDA-only; anywhere else the modules fall back to the functional-
@@ -475,13 +475,13 @@ def _supports_symm_mem(tp_mesh: DeviceMesh) -> bool:
     return has("symm_mem")
 
 
-def _enable_symm_mem(group) -> None:
+def enable_symm_mem(group) -> None:
     """Register ``group`` for symmetric-memory collectives.
 
     ``torch.ops.symm_mem.fused_all_gather_matmul`` (and its reduce-scatter dual)
     only work on a group registered here; PyTorch does not yet do this
     automatically for the TP group. CUDA-only -- call only when
-    ``_supports_symm_mem`` held for the mesh.
+    ``supports_symm_mem`` held for the mesh.
     """
     import warnings
 

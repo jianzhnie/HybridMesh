@@ -150,7 +150,7 @@ logger = get_logger(__name__)
 __all__ = ["Trainer"]
 
 
-def _tp_sharded_param_ids(model_parts: Iterable[torch.nn.Module]) -> set[int]:
+def tp_sharded_param_ids(model_parts: Iterable[torch.nn.Module]) -> set[int]:
     """Ids of parameters whose gradients must NOT be summed over the TP group.
 
     Everything not in this set is treated as TP-replicated by
@@ -164,7 +164,7 @@ def _tp_sharded_param_ids(model_parts: Iterable[torch.nn.Module]) -> set[int]:
       feature shard;
     * MoE-under-TP expert weights (ep=1): stacked parameters on the HF
       experts module, F-sharded in place by ``apply_tp``, which records their
-      ids on the block as ``_tp_sharded_param_ids``;
+      ids on the block as ``tp_sharded_param_ids``;
     * EP expert weights (tp x ep): ``GroupedExperts``'s ``w1/w3/w2``. Each EP
       rank owns a different slice of the expert COUNT, and its gradient is
       complete for those experts (the all-to-all dispatch feeds it every
@@ -183,7 +183,7 @@ def _tp_sharded_param_ids(model_parts: Iterable[torch.nn.Module]) -> set[int]:
     }
     for part in model_parts:
         for module in part.modules():
-            extra = getattr(module, "_tp_sharded_param_ids", None)
+            extra = getattr(module, "tp_sharded_param_ids", None)
             if extra:
                 sharded_ids.update(extra)
             if isinstance(module, GroupedExperts):
@@ -213,7 +213,7 @@ class Trainer:
     _pp_loss_sentinel: torch.Tensor | None
     _chunked_loss_num_chunks: int
     optimizer: torch.optim.Optimizer
-    # Defaulted, not just annotated: ``_data_iterator`` reads it, and that is
+    # Defaulted, not just annotated: ``data_iterator`` reads it, and that is
     # the one helper the tests drive off a ``Trainer`` built with ``__new__``.
     # A real Trainer always holds a loader (it is registered in the checkpoint
     # states), so ``None`` is only the not-built state of such a test double.
@@ -245,21 +245,21 @@ class Trainer:
 
     # -- batch handling (bodies live in batch.py) -------------------------------
 
-    def _dp_rank_world_size(self) -> tuple[int, int]:
+    def dp_rank_world_size(self) -> tuple[int, int]:
         """This rank's position and extent along the dataloading (DP) axis."""
-        return batch_mod._dp_rank_world_size(self)
+        return batch_mod.dp_rank_world_size(self)
 
-    def _batch_size_per_rank(self, dp_world_size: int) -> int:
+    def batch_size_per_rank(self, dp_world_size: int) -> int:
         """This rank's share of the global batch. Body in ``batch.py``."""
-        return batch_mod._batch_size_per_rank(self, dp_world_size)
+        return batch_mod.batch_size_per_rank(self, dp_world_size)
 
-    def _build_dataloader(self) -> BaseDataLoader | None:
+    def build_dataloader(self) -> BaseDataLoader | None:
         """Build the micro-batch source the config names. Body in ``batch.py``."""
-        return batch_mod._build_dataloader(self)
+        return batch_mod.build_dataloader(self)
 
-    def _data_iterator(self) -> Iterator[Batch | TrainerBatch]:
+    def data_iterator(self) -> Iterator[Batch | TrainerBatch]:
         """The raw micro-batch source. Body in ``batch.py``."""
-        return batch_mod._data_iterator(self)
+        return batch_mod.data_iterator(self)
 
     def batch_generator(
         self, data_iterable: Iterable[Batch | TrainerBatch]
@@ -268,12 +268,12 @@ class Trainer:
         return batch_mod.batch_generator(self, data_iterable)
 
     @staticmethod
-    def _count_valid_tokens(batch: Batch | TrainerBatch) -> int:
+    def count_valid_tokens(batch: Batch | TrainerBatch) -> int:
         """The number of labels that contribute to the loss, pre-shard.
 
         Body in ``batch.py``.
         """
-        return batch_mod._count_valid_tokens(batch)
+        return batch_mod.count_valid_tokens(batch)
 
 
     # -- the step, one function per level --------------------------------------
@@ -289,28 +289,28 @@ class Trainer:
         """
         return self.model if self.model is not None else self.model_parts[0]
 
-    def _microbatch(self, batch: Batch | TrainerBatch) -> dict[str, Any]:
+    def microbatch(self, batch: Batch | TrainerBatch) -> dict[str, Any]:
         """Everything one accumulation group's forward/backward needs.
 
         Body in ``batch.py``.
         """
-        return batch_mod._microbatch(self, batch)
+        return batch_mod.microbatch(self, batch)
 
-    def _to_device(self, batch: Batch | TrainerBatch) -> Batch | TrainerBatch:
+    def to_device(self, batch: Batch | TrainerBatch) -> Batch | TrainerBatch:
         """Move one consumption group's tensors to the training device.
 
         Body in ``batch.py``.
         """
-        return batch_mod._to_device(self, batch)
+        return batch_mod.to_device(self, batch)
 
-    def _preprocess(
+    def preprocess(
         self, microbatch: dict[str, Any]
     ) -> tuple[torch.Tensor, torch.Tensor, dict[str, Any]]:
         """Ask the model to turn its batch into forward inputs.
 
         Body in ``batch.py``.
         """
-        return batch_mod._preprocess(self, microbatch)
+        return batch_mod.preprocess(self, microbatch)
 
 
     def forward_backward_step(
@@ -335,10 +335,10 @@ class Trainer:
         the caller reduces it first and hands it down.
         """
         if self.parallel_dims is not None and self.parallel_dims.pp_enabled:
-            return self._pp_forward_backward_body(
+            return self.pp_forward_backward_body(
                 microbatch["batch"], global_valid_tokens=global_valid_tokens
             )
-        inputs, labels, extra_kwargs = self._preprocess(microbatch)
+        inputs, labels, extra_kwargs = self.preprocess(microbatch)
         return self._forward_backward_body(
             inputs,
             labels,
@@ -412,7 +412,7 @@ class Trainer:
         Not normalized, and deliberately not told the token count. The
         denominator is a *global* count reduced across DP, which the caller
         owns; the per-rank count that pairs with it is taken upstream from the
-        unsharded batch (``_count_valid_tokens``) precisely so a loss that has
+        unsharded batch (``count_valid_tokens``) precisely so a loss that has
         since been sliced by context parallelism cannot be recounted. Passing
         the count in here would suggest this function has a use for it, and a
         recount would silently undercount by a factor of ``cp``.
@@ -423,14 +423,14 @@ class Trainer:
 
     # -- pipeline-parallel steps (bodies live in pp_steps.py) -------------------
 
-    def _pp_microbatches(self, batch: Batch | TrainerBatch) -> list[dict[str, Any]]:
+    def pp_microbatches(self, batch: Batch | TrainerBatch) -> list[dict[str, Any]]:
         """Split the rank's batch into the schedule's micro-batches.
 
         The body lives in ``pp_steps.py``; see there for the contract.
         """
-        return pp_steps._pp_microbatches(self, batch)
+        return pp_steps.pp_microbatches(self, batch)
 
-    def _pp_forward_backward_body(
+    def pp_forward_backward_body(
         self,
         batch: Batch | TrainerBatch,
         *,
@@ -440,7 +440,7 @@ class Trainer:
 
         The body lives in ``pp_steps.py``; see there for the contract.
         """
-        return pp_steps._pp_forward_backward_body(
+        return pp_steps.pp_forward_backward_body(
             self, batch, global_valid_tokens=global_valid_tokens
         )
 
@@ -454,7 +454,7 @@ class Trainer:
         tokens. No collective inside the TP modules covers them (the fused
         GEMMs reduce only their own sharded weights' gradients), so without
         this all-reduce the copies train on ``1/tp`` of the tokens and drift
-        apart. The sharded weights are identified by ``_tp_sharded_param_ids``:
+        apart. The sharded weights are identified by ``tp_sharded_param_ids``:
         the dense TP realizer classes, MoE-under-TP's in-place-sharded expert
         parameters (ep=1), and EP's per-rank expert slices (tp x ep);
         everything else in the model is replicated.
@@ -469,7 +469,7 @@ class Trainer:
         )
         if tp_mesh is None:
             return
-        sharded_ids = _tp_sharded_param_ids(self.model_parts)
+        sharded_ids = tp_sharded_param_ids(self.model_parts)
         group = tp_mesh.get_group()
         for part in self.model_parts:
             for param in part.parameters():
@@ -584,13 +584,13 @@ class Trainer:
         microbatches: list[dict[str, Any]] = []
         local_valid_tokens = 0
         for _ in range(self.cfg.gradient_accumulation_steps):
-            # ``_microbatch`` owns the split of responsibility: it takes the
+            # ``microbatch`` owns the split of responsibility: it takes the
             # count (the denominator) and the accounting off the loader's own
             # batch, before any reshaping, and leaves everything else to the
             # model. Both of those have to happen here rather than per
             # micro-batch: the count has to be reduced across DP before the
             # first backward, and the account is a report about the loader.
-            microbatch = self._microbatch(next(data_iterator))
+            microbatch = self.microbatch(next(data_iterator))
             microbatches.append(microbatch)
             local_valid_tokens += microbatch["num_valid_tokens"]
 
@@ -814,7 +814,7 @@ class Trainer:
     # -- validation (bodies live in validation.py) ------------------------------
 
     @staticmethod
-    def _check_validation_feasibility(
+    def check_validation_feasibility(
         validation: ValidationConfig,
         *,
         pp_enabled: bool,
@@ -825,7 +825,7 @@ class Trainer:
 
         The body lives in ``validation.py``; see there for the rationale.
         """
-        validation_pass._check_validation_feasibility(
+        validation_pass.check_validation_feasibility(
             validation,
             pp_enabled=pp_enabled,
             dp_world_size=dp_world_size,
@@ -847,9 +847,9 @@ class Trainer:
         """
         validation_pass.validate(self, step)
 
-    def _validate_body(self, validation: ValidationConfig, step: int) -> None:
+    def validate_body(self, validation: ValidationConfig, step: int) -> None:
         """The pass itself; the body lives in ``validation.py``."""
-        validation_pass._validate_body(self, validation, step)
+        validation_pass.validate_body(self, validation, step)
 
 
     # -- the loop ---------------------------------------------------------------
@@ -896,7 +896,7 @@ class Trainer:
             # ``batch_generator`` wraps the bare source so every fetch carries
             # its token and loading-time accounting; the loop below sees only
             # batches. One exception type crosses that boundary.
-            data_iterator = self.batch_generator(self._data_iterator())
+            data_iterator = self.batch_generator(self.data_iterator())
             # Entered around the loop rather than around a single step: the
             # torch profiler's schedule counts iterations across the whole run
             # and only dumps a trace at the end of a cycle, so a per-step

@@ -32,7 +32,7 @@ from ..accelerator.device import (
     get_distributed_backend,
     get_env_dist_info,
 )
-from ..accelerator.dist_utils import _init_dist_pytorch, is_distributed
+from ..accelerator.dist_utils import init_dist_pytorch, is_distributed
 from ..components.checkpointer import DATALOADER, TRAIN_STATE, CheckpointManager
 from ..components.metrics import MetricsProcessor
 from ..components.optimizer import EMA, OptimizersContainer, build_lr_scheduler
@@ -61,7 +61,7 @@ def build_trainer_state(self, cfg) -> None:
         and "RANK" in os.environ
         and "WORLD_SIZE" in os.environ
     ):
-        _init_dist_pytorch(get_distributed_backend())
+        init_dist_pytorch(get_distributed_backend())
     self.rank, self.world_size, self.local_rank = get_env_dist_info()
 
     # Resolve the degrees first: the PP seed offset below needs this rank's
@@ -74,7 +74,7 @@ def build_trainer_state(self, cfg) -> None:
     # cleanly would otherwise hang on its collectives mid-run, and a
     # pipeline-parallel pass has no eval seam to run through at all.
     if cfg.validation is not None:
-        self._check_validation_feasibility(
+        self.check_validation_feasibility(
             cfg.validation,
             pp_enabled=(
                 self.parallel_dims is not None and self.parallel_dims.pp_enabled
@@ -180,7 +180,7 @@ def build_trainer_state(self, cfg) -> None:
     if isinstance(orchestration, PipelineParallelSetup):
         # pp > 1: no single model survives the split -- this rank holds its
         # stages' chunks only, and the schedule drives them in
-        # ``_pp_forward_backward_body``.
+        # ``pp_forward_backward_body``.
         self.model = None
         self.model_parts = orchestration.model_parts
         self.pp_schedule = orchestration.schedule
@@ -265,7 +265,7 @@ def build_trainer_state(self, cfg) -> None:
 
     # 4. the micro-batch source. Built before the checkpointer, which
     #    serializes its read position alongside the model.
-    self.dataloader = self._build_dataloader()
+    self.dataloader = self.build_dataloader()
 
     # 5. checkpointing, last because it needs the model and optimizer it is
     #    going to serialize, and because a checkpoint is meaningless until

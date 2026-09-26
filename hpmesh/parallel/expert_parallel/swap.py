@@ -19,10 +19,10 @@ releases:
 * **The router.** ``block.gate`` or ``block.router``, either a plain
   ``nn.Linear`` (DeepSeek-V2) or a bespoke module holding the same ``(E, D)``
   weight plus, for DeepSeek-V3/GLM4, an ``e_score_correction_bias`` buffer.
-  Identified by its *weight tensor*, not its type (``_router_of``).
+  Identified by its *weight tensor*, not its type (``router_of``).
 * **The expert weights.** Always ``gate_up_proj (E, 2F, D)`` and
   ``down_proj (E, D, F)``, split by ``chunk(2, dim=-1)`` after the gate+up
-  GEMM. Identified by shape (``_fused_experts_of``).
+  GEMM. Identified by shape (``fused_experts_of``).
 
 Where a family keeps its routing attributes also moved in 5.x: ``top_k``,
 ``n_group``, ``topk_group``, ``norm_topk_prob``, ``scoring_func`` and
@@ -41,7 +41,7 @@ pins both halves of that claim against the HF block being replaced.
 Routing parity with the HF block: Qwen3Moe and Mixtral score with a softmax over
 fp32 logits; DeepSeek-V3/GLM4 score with a sigmoid and apply
 ``routed_scaling_factor``; DeepSeek-V2 scores with a softmax but never
-renormalizes, whatever its config declares (see ``_ignores_norm_topk_prob``).
+renormalizes, whatever its config declares (see ``ignores_norm_topk_prob``).
 ``RouterGateLinear`` computes in fp32, so the same score function reproduces it,
 and ``TokenChoiceTopKRouter`` takes node-limited routing as
 ``num_expert_groups``/``num_limited_groups``. The one deliberate addition is the
@@ -57,10 +57,10 @@ loss curve reveals:
 
 * ``GPT-OSS``: per-expert bias vectors, a transposed ``(E, D, 2F)`` layout, and
   a hardcoded clamped sigmoid-GLU activation rather than a module
-  (see ``_fused_experts_of``).
+  (see ``fused_experts_of``).
 * ``DeepSeek-V2`` with ``topk_method="group_limited_greedy"``: scores a group by
   its single best expert where V3/GLM4 sum the top-2 (see
-  ``_read_expert_groups``). Its default ``"greedy"`` is supported and exact.
+  ``read_expert_groups``). Its default ``"greedy"`` is supported and exact.
 
 ``Qwen2Moe``'s ``shared_expert_gate`` multiplies where ``MoE.shared_experts``
 only adds, and is refused at the point the shared expert is found.
@@ -74,8 +74,8 @@ from hpmesh.errors import EnvironmentUnsupportedError
 
 from ...models.common.token_dispatcher import EP_DISPATCHER_BACKENDS
 from ...utils.logger_utils import get_logger
-from .convert import _convert_block, _restore_fp32_state_buffers
-from .probe import _is_hf_moe_block, _moe_block_of, _router_of
+from .convert import convert_block, restore_fp32_state_buffers
+from .probe import is_hf_moe_block, moe_block_of, router_of
 
 logger = get_logger(__name__)
 
@@ -83,8 +83,8 @@ __all__ = ["swap_hf_moe_blocks"]
 
 # Re-exported for callers that reached the probe/convert helpers through this
 # module before the three-way split (tensor_parallel/apply.py, the swap tests).
-_is_hf_moe_block = _is_hf_moe_block
-_restore_fp32_state_buffers = _restore_fp32_state_buffers
+is_hf_moe_block = is_hf_moe_block
+restore_fp32_state_buffers = restore_fp32_state_buffers
 
 
 def swap_hf_moe_blocks(
@@ -136,8 +136,8 @@ def swap_hf_moe_blocks(
             would run it replicated.
         NotImplementedError: if a MoE block uses a layout this swap does not
             implement -- GPT-OSS's transposed, bias-bearing experts (see
-            ``_fused_experts_of``) or DeepSeek-V2's ``group_limited_greedy``
-            routing (see ``_read_expert_groups``).
+            ``fused_experts_of``) or DeepSeek-V2's ``group_limited_greedy``
+            routing (see ``read_expert_groups``).
     """
     layers = getattr(model, "layers", None)
     if layers is None:
@@ -176,18 +176,18 @@ def swap_hf_moe_blocks(
 
     swapped = 0
     for layer in layers:
-        attr, block = _moe_block_of(layer)
+        attr, block = moe_block_of(layer)
         # Dense layers of a mixed model (Qwen3Moe's decoder_sparse_step, and the
         # first_k_dense_replace of the DeepSeek/GLM4 families) are left alone.
-        if block is None or not _is_hf_moe_block(block):
+        if block is None or not is_hf_moe_block(block):
             continue
-        router_gate = _router_of(block)
+        router_gate = router_of(block)
         load_balance_coeff = (
             float(default_coeff)
             if getattr(router_gate, "e_score_correction_bias", None) is not None
             else None
         )
-        moe = _convert_block(
+        moe = convert_block(
             block,
             ep_group=ep_group,
             aux_loss_coeff=aux_loss_coeff,

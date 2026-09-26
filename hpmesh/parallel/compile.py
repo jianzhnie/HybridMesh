@@ -55,7 +55,7 @@ logger = get_logger(__name__)
 __all__ = ["apply_compile", "maybe_regional_inductor"]
 
 
-# Toggled on by ``_maybe_regional_inductor_backend`` when the model compiles
+# Toggled on by ``maybe_regional_inductor_backend`` when the model compiles
 # with a non-inductor backend and its flex regions must be scooped into an
 # inductor sub-compile. Read by ``maybe_regional_inductor`` at trace time;
 # left False on the default inductor / eager paths so no annotation metadata
@@ -103,7 +103,7 @@ def apply_compile(
         torch._dynamo.config.capture_scalar_outputs = True
         logger.info("capture_scalar_outputs is enabled (token-choice MoE)")
 
-    backend = _maybe_regional_inductor_backend(model, compile_config.backend)
+    backend = maybe_regional_inductor_backend(model, compile_config.backend)
 
     if compile_config.per_block:
         for layer_id, block in model.layers.named_children():
@@ -164,7 +164,7 @@ def _maybe_enable_async_tp(compile_config: CompileConfig, tp_mesh) -> None:
     logger.info("Async TP is enabled")
 
 
-def _maybe_regional_inductor_backend(
+def maybe_regional_inductor_backend(
     model: nn.Module, backend: str
 ) -> str | Callable:
     """Wrap ``aot_eager`` so the flex regions are scooped into inductor.
@@ -217,7 +217,7 @@ def maybe_regional_inductor(
     """Context manager that marks the wrapped region for ``regional_inductor``.
 
     Returns a null context unless regional inductor is enabled (see
-    ``_maybe_regional_inductor_backend``). When enabled, the region is tagged
+    ``maybe_regional_inductor_backend``). When enabled, the region is tagged
     with ``compile_with_inductor`` so a non-inductor outer compile lowers
     just this region to inductor with ``inductor_configs``.
     """

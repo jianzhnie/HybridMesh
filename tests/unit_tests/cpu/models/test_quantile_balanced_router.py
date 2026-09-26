@@ -38,8 +38,8 @@ from hpmesh.models.common.moe import (
     QuantileBalancedTopKRouter,
     RoutedExperts,
     TokenChoiceTopKRouter,
-    _update_quantile_expert_bias,
     register_moe_quantile_balancing_hook,
+    update_quantile_expert_bias,
 )
 from hpmesh.models.common.token_dispatcher import LocalTokenDispatcher
 
@@ -361,7 +361,7 @@ def test_the_collective_runs_over_a_real_process_group(single_rank_group) -> Non
     moe = _moe()
     moe.router.quantile_balancer.required_bias_histogram_EB.fill_(1)
 
-    _update_quantile_expert_bias([moe], parallel_dims=None)
+    update_quantile_expert_bias([moe], parallel_dims=None)
 
     # A size-1 group leaves the histogram alone; the estimate runs off it.
     assert int(moe.router.quantile_balancer.required_bias_histogram_EB.sum()) == 0
@@ -378,7 +378,7 @@ def test_every_layer_of_every_part_is_updated() -> None:
     all_layers = [
         moe for part in parts for moe in part.modules() if isinstance(moe, MoE)
     ]
-    _update_quantile_expert_bias(all_layers, parallel_dims=None)
+    update_quantile_expert_bias(all_layers, parallel_dims=None)
 
     for moe in (a, b, c):
         assert int(moe.router.quantile_balancer.required_bias_histogram_EB.sum()) == 0

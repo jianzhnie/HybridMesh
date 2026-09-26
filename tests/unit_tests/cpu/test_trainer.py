@@ -102,8 +102,8 @@ def test_pp_forward_backward_releases_consumed_loss_graphs() -> None:
             pp_schedule=SimpleNamespace(step=schedule_step),
             parallel_dims=None,
             _param_context=nullcontext,
-            _pp_microbatches=lambda batch: [batch, batch],
-            _preprocess=lambda microbatch: (
+            pp_microbatches=lambda batch: [batch, batch],
+            preprocess=lambda microbatch: (
                 torch.ones(1),
                 torch.ones(1, dtype=torch.long),
                 {},
@@ -111,7 +111,7 @@ def test_pp_forward_backward_releases_consumed_loss_graphs() -> None:
         ),
     )
 
-    reporting_loss = Trainer._pp_forward_backward_body(
+    reporting_loss = Trainer.pp_forward_backward_body(
         trainer,
         Batch(input_ids=torch.ones(1, 1), labels=torch.ones(1, 1)),
         global_valid_tokens=torch.tensor(2),
@@ -378,8 +378,8 @@ def test_batch_size_per_rank_divides_evenly() -> None:
     trainer = _bare_trainer(_cfg_with_batch(global_batch_size=8))
 
     # 8 over 2 ranks is 4 each; 8 over 8 is 1 each.
-    assert trainer._batch_size_per_rank(2) == 4
-    assert trainer._batch_size_per_rank(8) == 1
+    assert trainer.batch_size_per_rank(2) == 4
+    assert trainer.batch_size_per_rank(8) == 1
 
 
 def test_an_indivisible_global_batch_is_rejected() -> None:
@@ -393,7 +393,7 @@ def test_an_indivisible_global_batch_is_rejected() -> None:
     trainer = _bare_trainer(_cfg_with_batch(global_batch_size=10))
 
     with pytest.raises(ValueError, match="divisible by"):
-        trainer._batch_size_per_rank(4)
+        trainer.batch_size_per_rank(4)
 
 
 def _source(n: int, *, batch_size: int = 2, seq_len: int = 4) -> RandomTokenSource:
@@ -824,7 +824,7 @@ def _wrapper() -> HFTransformerModel:
 
 def test_count_valid_tokens_passes_the_synthetic_shape_through_unchanged() -> None:
     batch = _random_batch()
-    num_valid = Trainer._count_valid_tokens(batch)
+    num_valid = Trainer.count_valid_tokens(batch)
     # The synthetic source has no collator, so the trainer counts the
     # predictable labels itself. It must: the loss divides by the step's token
     # count *before* it backwards, so a ``None`` here would leave the
@@ -845,10 +845,10 @@ def test_count_valid_tokens_prefers_the_collators_count() -> None:
         "input": torch.arange(5),
         "labels": torch.tensor([1, 2, IGNORE_INDEX, 4, IGNORE_INDEX]),
     }
-    assert Trainer._count_valid_tokens(labelled) == 3
+    assert Trainer.count_valid_tokens(labelled) == 3
 
     counted = {**labelled, "num_valid_tokens": 5}
-    assert Trainer._count_valid_tokens(counted) == 5
+    assert Trainer.count_valid_tokens(counted) == 5
 
 
 def test_count_valid_tokens_reports_the_row_final_mask_the_loss_skips() -> None:
@@ -860,7 +860,7 @@ def test_count_valid_tokens_reports_the_row_final_mask_the_loss_skips() -> None:
     """
     batch = _random_batch(batch_size=3, seq_len=4)
 
-    num_valid = Trainer._count_valid_tokens(batch)
+    num_valid = Trainer.count_valid_tokens(batch)
 
     assert num_valid == batch.labels.numel() - batch.labels.shape[0]
 
@@ -1018,7 +1018,7 @@ def test_checkpoint_carries_a_dataloader_read_position(tmp_path) -> None:
 
 
 def test_synthetic_loader_is_checkpointed_like_any_other() -> None:
-    """``_build_dataloader`` hands back the synthetic loader, not ``None``.
+    """``build_dataloader`` hands back the synthetic loader, not ``None``.
 
     Dropping it (the old behavior) kept the loader out of the checkpoint's
     ``states``, so a resumed run restored trained weights and then re-read the
@@ -1027,7 +1027,7 @@ def test_synthetic_loader_is_checkpointed_like_any_other() -> None:
     """
     trainer = _bare_trainer(_cfg_with_batch(global_batch_size=8, max_seq_len=16))
 
-    loader = trainer._build_dataloader()
+    loader = trainer.build_dataloader()
 
     assert isinstance(loader, RandomTokenDataLoader)
 
@@ -1035,9 +1035,9 @@ def test_synthetic_loader_is_checkpointed_like_any_other() -> None:
 def test_microbatch_defers_the_device_transfer_to_consumption() -> None:
     """Reading an accumulation window must not move it to the device.
 
-    ``_microbatch`` runs at read time for every group of the window; moving
+    ``microbatch`` runs at read time for every group of the window; moving
     tensors there would keep the whole window resident in device memory. The
-    transfer belongs to ``_to_device``, which ``_preprocess`` calls once per
+    transfer belongs to ``to_device``, which ``preprocess`` calls once per
     group, just ahead of that group's forward.
     """
     trainer = _bare_trainer(_cfg_with_batch())
@@ -1055,9 +1055,9 @@ def test_microbatch_defers_the_device_transfer_to_consumption() -> None:
 
     try:
         torch.Tensor.to = counting_to
-        microbatch = trainer._microbatch(batch)
-        assert calls == 0, "_microbatch moved tensors at read time"
-        trainer._to_device(microbatch["batch"])
+        microbatch = trainer.microbatch(batch)
+        assert calls == 0, "microbatch moved tensors at read time"
+        trainer.to_device(microbatch["batch"])
         assert calls == 2  # input_ids and labels
     finally:
         torch.Tensor.to = original_to
@@ -1079,7 +1079,7 @@ def test_microbatch_counts_only_the_ranks_share_under_sequence_sharding() -> Non
     trainer.parallel_dims = SimpleNamespace(cp=2, tp=2)
 
     batch = _random_batch()
-    trainer._microbatch(batch)
+    trainer.microbatch(batch)
 
     assert trainer.ntokens_seen == batch.labels.numel() // 4
     # Non-vacuity: the share differs from both the full count and zero.
@@ -1220,8 +1220,8 @@ def test_synthetic_batch_is_deterministic() -> None:
     trainer = _bare_trainer(
         _cfg_with_batch(global_batch_size=8, max_seq_len=16, seed=42)
     )
-    first = next(trainer._data_iterator())
-    second = next(trainer._data_iterator())
+    first = next(trainer.data_iterator())
+    second = next(trainer.data_iterator())
 
     assert torch.equal(first.input_ids, second.input_ids)
     assert first.input_ids.shape == (8, 16)
@@ -1235,7 +1235,7 @@ def test_dp_slice_partitions_global_batch() -> None:
     would drop or duplicate samples once per step, invisibly.
     """
     cfg = _cfg_with_batch(global_batch_size=8, max_seq_len=16, seed=42)
-    batch = next(_bare_trainer(cfg)._data_iterator())
+    batch = next(_bare_trainer(cfg).data_iterator())
 
     per_rank = cfg.global_batch_size // 2
     rank_0 = batch.input_ids[0:per_rank]

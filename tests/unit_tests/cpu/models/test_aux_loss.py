@@ -15,7 +15,7 @@ silently:
   is ``coeff / denominator`` scaled. Conflating them makes the loss unweighted or
   double-weighted without any visible symptom.
 
-Note on the carrier's gradient: ``_AuxLossInjection`` is an identity, so
+Note on the carrier's gradient: ``AuxLossInjection`` is an identity, so
 whatever gradient arrives from downstream passes through unchanged, *and* the
 aux-loss branch adds its own if the loss also depends on the carrier. In the
 tests below the two paths are isolated deliberately -- ``_ConstantLoss`` does not
@@ -35,8 +35,8 @@ import torch.nn.functional as F
 
 from hpmesh.models.common.aux_loss import (
     AuxLoss,
-    _zero_aux_losses,
     collect_aux_loss_metrics,
+    zero_aux_losses,
 )
 from hpmesh.models.common.moe import MicrobatchWiseLoadBalanceLoss
 
@@ -236,7 +236,7 @@ def test_zero_hook_rolls_instances_into_the_group_and_clears_them() -> None:
     AuxLoss.set_step_denominator(torch.tensor(2.0))
     loss(torch.ones(4, requires_grad=True))
 
-    _zero_aux_losses([loss])
+    zero_aux_losses([loss])
 
     torch.testing.assert_close(
         AuxLoss.group_acc[("batch", "_constant_loss")],
@@ -254,7 +254,7 @@ def test_zero_hook_sums_instances_within_one_group() -> None:
     a(torch.ones(2, requires_grad=True))  # raw 2
     b(torch.ones(3, requires_grad=True))  # raw 2
 
-    _zero_aux_losses([a, b])
+    zero_aux_losses([a, b])
 
     torch.testing.assert_close(
         AuxLoss.group_acc[("batch", "_constant_loss")],
@@ -270,7 +270,7 @@ def test_zero_hook_finds_nested_loss_modules() -> None:
     AuxLoss.set_step_denominator(torch.tensor(1.0))
     container[0](torch.ones(2, requires_grad=True))
 
-    _zero_aux_losses([container])
+    zero_aux_losses([container])
 
     torch.testing.assert_close(
         AuxLoss.group_acc[("batch", "_constant_loss")],
@@ -285,7 +285,7 @@ def test_zero_hook_ignores_modules_that_are_not_aux_losses() -> None:
     AuxLoss.set_step_denominator(torch.tensor(1.0))
     container[1](torch.ones(2, requires_grad=True))
 
-    _zero_aux_losses([container])
+    zero_aux_losses([container])
 
     assert set(AuxLoss.group_acc) == {("batch", "_constant_loss")}
 
@@ -300,7 +300,7 @@ def test_collect_divides_the_group_sum_by_the_instance_count() -> None:
     AuxLoss.set_step_denominator(torch.tensor(1.0))
     a(torch.ones(2, requires_grad=True))  # raw 2
     b(torch.ones(4, requires_grad=True))  # raw 2
-    _zero_aux_losses([a, b])
+    zero_aux_losses([a, b])
 
     metrics = collect_aux_loss_metrics(parallel_dims=_NoMeshes())
 
@@ -310,7 +310,7 @@ def test_collect_divides_the_group_sum_by_the_instance_count() -> None:
 def test_collect_clamps_a_missing_group_register_to_zero() -> None:
     """A rank owning no instance of a group still reports the group's mean.
 
-    The register is only created by ``_zero_aux_losses`` on ranks that hold an
+    The register is only created by ``zero_aux_losses`` on ranks that hold an
     instance, so a rank without one must contribute a zero rather than be
     skipped -- otherwise collective participation would diverge.
     """

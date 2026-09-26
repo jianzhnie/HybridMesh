@@ -24,7 +24,7 @@ from hpmesh.components.profiler import (
     PROFILE_ITER_DIR,
     MemoryProfiler,
     Profiler,
-    _caused_by_oom,
+    caused_by_oom,
 )
 from hpmesh.config import ProfilerConfig as Config
 
@@ -120,7 +120,7 @@ def test_exit_does_not_swallow_the_exception(tmp_path) -> None:
 
 
 def test_an_oom_is_detected_directly() -> None:
-    assert _caused_by_oom(torch.OutOfMemoryError("CUDA out of memory"))
+    assert caused_by_oom(torch.OutOfMemoryError("CUDA out of memory"))
 
 
 def test_an_oom_wrapped_in_another_error_is_still_detected() -> None:
@@ -133,7 +133,7 @@ def test_an_oom_wrapped_in_another_error_is_still_detected() -> None:
         except torch.OutOfMemoryError as oom:
             raise RuntimeError("Failure at stage 2") from oom
     except RuntimeError as wrapped:
-        assert _caused_by_oom(wrapped)
+        assert caused_by_oom(wrapped)
 
 
 def test_an_oom_reached_through_implicit_context_is_detected() -> None:
@@ -148,13 +148,13 @@ def test_an_oom_reached_through_implicit_context_is_detected() -> None:
             raise RuntimeError("wrapped without from")  # noqa: B904
     except RuntimeError as wrapped:
         assert wrapped.__cause__ is None
-        assert _caused_by_oom(wrapped)
+        assert caused_by_oom(wrapped)
 
 
 def test_an_unrelated_failure_is_not_an_oom() -> None:
-    assert not _caused_by_oom(ValueError("just a bug"))
-    assert not _caused_by_oom(RuntimeError("Failure at stage 2"))
-    assert not _caused_by_oom(None)
+    assert not caused_by_oom(ValueError("just a bug"))
+    assert not caused_by_oom(RuntimeError("Failure at stage 2"))
+    assert not caused_by_oom(None)
 
 
 def test_a_self_referential_chain_terminates() -> None:
@@ -163,7 +163,7 @@ def test_a_self_referential_chain_terminates() -> None:
     error = RuntimeError("cycled")
     error.__cause__ = error
 
-    assert not _caused_by_oom(error)
+    assert not caused_by_oom(error)
 
 
 def test_the_exit_snapshot_is_forced_on_an_oom(tmp_path) -> None:

@@ -59,7 +59,7 @@ __all__ = [
 ]
 
 
-class _AuxLossInjection(torch.autograd.Function):
+class AuxLossInjection(torch.autograd.Function):
     """Identity forward that injects an aux-loss gradient on the backward pass.
 
     The carrier passes through untouched; its only job is to give the aux
@@ -114,7 +114,7 @@ class AuxLoss(nn.Module):
 
     # Per metric group (``(reduce_mesh, metric_name)``): this rank's total value
     # for the current step, rolled up from the per-instance ``instance_acc``
-    # buffers by ``_zero_aux_losses`` at each optimizer step pre-hook and
+    # buffers by ``zero_aux_losses`` at each optimizer step pre-hook and
     # reduced by ``collect_aux_loss_metrics`` at log time. Cleared at the next
     # pre-hook.
     group_acc: ClassVar[dict[tuple[str, str], torch.Tensor]] = {}
@@ -125,7 +125,7 @@ class AuxLoss(nn.Module):
         self.reduce_mesh = reduce_mesh
         # Per-instance accumulator: the sum of this loss instance's scaled
         # per-microbatch values over the current training step. Filled in the
-        # forward; rolled into ``group_acc`` and zeroed by ``_zero_aux_losses``
+        # forward; rolled into ``group_acc`` and zeroed by ``zero_aux_losses``
         # at each optimizer step pre-hook. Non-persistent: it is scratch, and
         # a checkpoint resuming mid-step should not restore a partial sum.
         self.register_buffer(
@@ -179,10 +179,10 @@ class AuxLoss(nn.Module):
         # buffer out of the autograd graph.
         with torch.no_grad():
             self.instance_acc.add_(raw_sum * scale)
-        return _AuxLossInjection.apply(carrier, injected)
+        return AuxLossInjection.apply(carrier, injected)
 
 
-def _zero_aux_losses(model_parts: Sequence[nn.Module]) -> None:
+def zero_aux_losses(model_parts: Sequence[nn.Module]) -> None:
     """Roll per-instance ``instance_acc`` into ``group_acc`` and clear them.
 
     Optimizer step pre-hook. Each metric group is summed once per model part
@@ -253,5 +253,5 @@ def register_aux_loss_zero_hook(
     """
     del parallel_dims
     optimizer.register_step_pre_hook(
-        lambda *args, **kwargs: _zero_aux_losses(model_parts)
+        lambda *args, **kwargs: zero_aux_losses(model_parts)
     )

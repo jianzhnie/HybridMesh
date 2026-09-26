@@ -23,7 +23,7 @@ from hpmesh.components.checkpointer import (
     ModelWrapper,
     canonical_fqn,
 )
-from hpmesh.components.checkpointer.dcp import _FilesystemCheckpointStorage
+from hpmesh.components.checkpointer.dcp import FilesystemCheckpointStorage
 from hpmesh.components.optimizer import init_optim_state
 from hpmesh.components.optimizer.lr_scheduler import build_lr_scheduler
 from hpmesh.config import CheckpointConfig as Config
@@ -206,11 +206,11 @@ def test_close_and_the_public_methods_survive_a_failed_constructor(tmp_path) -> 
 
 def test_filesystem_storage_satisfies_the_protocol(tmp_path) -> None:
     """``runtime_checkable`` catches a rename that would surface mid-save."""
-    assert isinstance(_FilesystemCheckpointStorage(), CheckpointStorage)
+    assert isinstance(FilesystemCheckpointStorage(), CheckpointStorage)
 
 
 def test_filesystem_storage_reports_paths(tmp_path) -> None:
-    storage = _FilesystemCheckpointStorage()
+    storage = FilesystemCheckpointStorage()
     (tmp_path / "step-1").mkdir()
     (tmp_path / "step-1" / ".metadata").write_text("{}")
 
@@ -418,8 +418,8 @@ def test_an_enabled_manager_registers_the_lr_scheduler(monkeypatch) -> None:
     def _stop(_backend):
         raise _ReachedBackendUse
 
-    monkeypatch.setattr(tc, "_require_torch_checkpointing", _StubBackend)
-    monkeypatch.setattr(tc, "_async_save_config", _stop)
+    monkeypatch.setattr(tc, "require_torch_checkpointing", _StubBackend)
+    monkeypatch.setattr(tc, "async_save_config", _stop)
 
     sentinel = object()
     states: dict[str, object] = {}

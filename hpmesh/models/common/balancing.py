@@ -25,7 +25,7 @@ if TYPE_CHECKING:
     from ...parallel.parallel_dims import ParallelDims
 
 
-def _update_expert_bias(
+def update_expert_bias(
     mappers: list[tuple[nn.Module, list[MoE]]],
     parallel_dims: ParallelDims | None,
 ) -> None:
@@ -120,12 +120,12 @@ def register_moe_load_balancing_hook(
     if not load_balance_enabled:
         return
     optimizer.register_step_pre_hook(
-        lambda *args, **kwargs: _update_expert_bias(mappers, parallel_dims)
+        lambda *args, **kwargs: update_expert_bias(mappers, parallel_dims)
     )
 
 
 @torch.no_grad()
-def _update_quantile_expert_bias(
+def update_quantile_expert_bias(
     moe_layers: list[MoE],
     parallel_dims: ParallelDims | None,
 ) -> None:
@@ -133,7 +133,7 @@ def _update_quantile_expert_bias(
 
     The histograms count the same tokens ``tokens_per_expert_E`` counts, so
     they are summed over exactly the same axes (dp, cp, and tp only when EP
-    shards the token stream over it) -- see ``_update_expert_bias`` for why
+    shards the token stream over it) -- see ``update_expert_bias`` for why
     those axes and no others. Every rank then holds the identical global
     histogram, computes the identical estimate, and ``expert_bias_E`` stays
     replicated, which is what the forward assumes.
@@ -204,7 +204,7 @@ def register_moe_quantile_balancing_hook(
             "none may."
         )
     optimizer.register_step_pre_hook(
-        lambda *args, **kwargs: _update_quantile_expert_bias(
+        lambda *args, **kwargs: update_quantile_expert_bias(
             quantile_layers, parallel_dims
         )
     )

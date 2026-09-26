@@ -7,7 +7,7 @@ Run under torchrun with 2 ranks (from the repo root):
 
 Why this file exists
 --------------------
-``_LossParallelCrossEntropy`` is 100 lines of TP all-reduce and shard masking,
+``LossParallelCrossEntropy`` is 100 lines of TP all-reduce and shard masking,
 and until now **none of it had ever executed**: the trainer does not shard the
 lm_head, so ``cross_entropy_loss`` always took the plain path. Read the coverage
 before trusting a change here -- this is the only thing that runs it.
@@ -51,7 +51,7 @@ import torch.nn.functional as F
 
 from hpmesh.components.loss import (
     IGNORE_INDEX,
-    _LossParallelCrossEntropy,
+    LossParallelCrossEntropy,
     compute_logprobs,
     cross_entropy_loss,
     vocab_shard_bounds,
@@ -127,7 +127,7 @@ def _check_sharded_loss(
 
     # reduction="none" must agree with the scalar path, per token.
     local2 = logits[:, start:end].detach().clone().requires_grad_(True)
-    per_token = _LossParallelCrossEntropy.apply(local2, labels, group, vocab, "none")
+    per_token = LossParallelCrossEntropy.apply(local2, labels, group, vocab, "none")
     ref_none = F.cross_entropy(
         logits.float(), labels, reduction="none", ignore_index=IGNORE_INDEX
     )

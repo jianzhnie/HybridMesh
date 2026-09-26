@@ -143,7 +143,7 @@ def test_build_dataloader_names_a_multimodal_recipe(tmp_path, monkeypatch):
     from hpmesh.datasets.multimodal.mm_datasets import (
         MM_DATASETS,
         MultiModalProcessor,
-        _process_cc12_wd_sample,
+        process_cc12_wd_sample,
     )
 
     corpus = str(tmp_path / "pairs.jsonl")
@@ -162,7 +162,7 @@ def test_build_dataloader_names_a_multimodal_recipe(tmp_path, monkeypatch):
         SingleDataset(
             source=_Base64JsonlSource(patterns=(corpus,)),
             processor=partial(
-                MultiModalProcessor, sample_processor=_process_cc12_wd_sample
+                MultiModalProcessor, sample_processor=process_cc12_wd_sample
             ),
             post_filters=(lambda sample: sample is not None,),
         ),

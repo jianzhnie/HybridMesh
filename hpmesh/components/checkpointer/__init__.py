@@ -41,7 +41,7 @@ hpmesh fills in the first two plus whatever the caller passes in ``states``:
   invisible while the lr is constant, wrong for the rest of the run once warmup
   or decay is set.
 * ``dataloader`` -- the ``BaseDataLoader``, registered only when it is loadable.
-  See the trainer's ``_build_dataloader`` for why the synthetic one is not.
+  See the trainer's ``build_dataloader`` for why the synthetic one is not.
 * ``ema`` -- the ``EMA`` pseudo-optimizer from
   ``components/optimizer/ema.py``, registered only when the run configures one
   (``training.ema_config``). Its state dict is the same flat, FQN-keyed layout

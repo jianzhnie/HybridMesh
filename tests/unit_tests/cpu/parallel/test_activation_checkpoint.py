@@ -37,6 +37,7 @@ require_env(
 
 import pytest
 import torch
+from hpmesh.parallel.parallelize_hf import parallelize_hf_transformers
 from torch.distributed.algorithms._checkpoint.checkpoint_wrapper import (
     CheckpointWrapper,
 )
@@ -53,11 +54,10 @@ from hpmesh.models.hf_wrapper import HFTransformerModel
 from hpmesh.parallel.activation_checkpoint import (
     VALID_AC_MODES,
     _get_default_save_ops,
-    _mm_recompute_shapes,
-    _selective_policy,
     apply_ac,
+    mm_recompute_shapes,
+    selective_policy,
 )
-from hpmesh.parallel.parallelize_hf import parallelize_hf_transformers
 
 _VOCAB = 32
 _HIDDEN = 16
@@ -380,13 +380,13 @@ def test_mm_recompute_shapes_uses_linear_in_out_order() -> None:
 
     # gate_proj is Linear(16 -> 32): weight (32, 16), so (in, out) = (16, 32).
     assert layer.mlp.gate_proj.weight.shape == (32, 16)
-    assert _mm_recompute_shapes(layer, "layers.0", ["gate_proj"]) == {(16, 32)}
-    assert _mm_recompute_shapes(layer, "layers.0", ["down_proj"]) == {(32, 16)}
+    assert mm_recompute_shapes(layer, "layers.0", ["gate_proj"]) == {(16, 32)}
+    assert mm_recompute_shapes(layer, "layers.0", ["down_proj"]) == {(32, 16)}
 
     # A pattern matching a container (not an nn.Linear) is a loud error, so a
     # wrong fqn never passes for "matched nothing".
     with pytest.raises(ValueError, match="nn.Linear"):
-        _mm_recompute_shapes(layer, "layers.0", ["layers.0"])
+        mm_recompute_shapes(layer, "layers.0", ["layers.0"])
 
 
 def test_selective_policy_recomputes_forced_shapes_and_alternates_the_rest() -> None:
@@ -400,7 +400,7 @@ def test_selective_policy_recomputes_forced_shapes_and_alternates_the_rest() -> 
     forced = torch.empty(4, 8)  # mm RHS is (in, out)
     other = torch.empty(4, 16)
 
-    policy = _selective_policy({mm}, {(4, 8)})
+    policy = selective_policy({mm}, {(4, 8)})
     assert policy(Ctx(), mm, lhs, forced) is CheckpointPolicy.PREFER_RECOMPUTE
 
     # A different (in, out) still goes through the save-every-second dial:
@@ -425,7 +425,7 @@ def test_selective_policy_normalizes_linear_weight_to_mm_order() -> None:
 
     linear = torch.ops.aten.linear.default
     # weight (out=8, in=4) is the same GEMM as an mm RHS of (in=4, out=8).
-    policy = _selective_policy({linear}, {(4, 8)})
+    policy = selective_policy({linear}, {(4, 8)})
     assert (
         policy(Ctx(), linear, torch.empty(4, 4), torch.empty(8, 4))
         is CheckpointPolicy.PREFER_RECOMPUTE

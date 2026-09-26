@@ -242,7 +242,7 @@ class MoE(nn.Module):
         * centring keeps ``sum(expert_bias_E) == 0``, so the bias shifts which
           experts win without shifting the routed output as a whole.
 
-        This mirrors torchtitan's ``_update_expert_bias``. It differs from
+        This mirrors torchtitan's ``update_expert_bias``. It differs from
         Eq. 14 of the paper, which moves only the most- and least-loaded
         experts; this moves every expert by one step whose sign depends on
         whether it is above or below the mean.
@@ -513,8 +513,8 @@ class MicrobatchWiseLoadBalanceLoss(AuxLoss):
 
 
 _BALANCING_EXPORTS = {
-    "_update_expert_bias",
-    "_update_quantile_expert_bias",
+    "update_expert_bias",
+    "update_quantile_expert_bias",
     "register_moe_load_balancing_hook",  # noqa: F822 - lazy re-export via __getattr__
     "register_moe_quantile_balancing_hook",  # noqa: F822 - lazy re-export via __getattr__
 }

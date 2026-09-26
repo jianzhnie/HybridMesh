@@ -1,7 +1,7 @@
 """The EP swap's block conversion: HF MoE block -> hpmesh MoE.
 
-Split out of ``swap.py``: ``_convert_block`` builds the hpmesh MoE for one
-probed HF block and moves its weights over; ``_restore_fp32_state_buffers``
+Split out of ``swap.py``: ``convert_block`` builds the hpmesh MoE for one
+probed HF block and moves its weights over; ``restore_fp32_state_buffers``
 undoes the buffer dtype cast ``Module.to`` applies. The layout probes live in
 ``probe.py``, the orchestration in ``swap.py``.
 """
@@ -28,17 +28,17 @@ from ...models.common.token_dispatcher import (
 )
 from .. import matrix
 from .probe import (
-    _fused_experts_of,
-    _read_expert_groups,
-    _read_route_norm,
-    _read_route_scale,
     _resolve_score_func,
     _resolve_top_k,
-    _router_of,
+    fused_experts_of,
+    read_expert_groups,
+    read_route_norm,
+    read_route_scale,
+    router_of,
 )
 
 
-def _restore_fp32_state_buffers(module: nn.Module) -> None:
+def restore_fp32_state_buffers(module: nn.Module) -> None:
     """Undo the dtype conversion ``Module.to(dtype=...)`` applies to float buffers.
 
     ``Module.to`` converts parameters *and* every floating-point buffer, with no
@@ -57,7 +57,7 @@ def _restore_fp32_state_buffers(module: nn.Module) -> None:
             buffer.data = buffer.data.to(torch.float32)
 
 
-def _convert_block(
+def convert_block(
     block: nn.Module,
     *,
     ep_group: dist.ProcessGroup | None,
@@ -72,11 +72,11 @@ def _convert_block(
     ep_size = 1 if ep_group is None else dist_utils.get_world_size(ep_group)
     ep_rank = 0 if ep_group is None else dist_utils.get_rank(ep_group)
 
-    router_gate = _router_of(block)
+    router_gate = router_of(block)
     assert router_gate is not None  # the probe established this
     if getattr(router_gate, "bias", None) is not None:
         matrix.router_bias(router_gate)
-    experts = _fused_experts_of(block)
+    experts = fused_experts_of(block)
     assert experts is not None  # the probe established this
 
     num_experts = experts.num_experts
@@ -92,7 +92,7 @@ def _convert_block(
     num_local = num_experts // ep_size
     lo = ep_rank * num_local
 
-    num_expert_groups, num_limited_groups = _read_expert_groups(block, router_gate)
+    num_expert_groups, num_limited_groups = read_expert_groups(block, router_gate)
     grouped = GroupedExperts(dim, hidden, num_local)
     score_func = _resolve_score_func(block, router_gate)
     if quantile_balancing:
@@ -107,8 +107,8 @@ def _convert_block(
             num_experts,
             dim,
             top_k,
-            route_norm=_read_route_norm(block, router_gate),
-            route_scale=_read_route_scale(block, router_gate),
+            route_norm=read_route_norm(block, router_gate),
+            route_scale=read_route_scale(block, router_gate),
             aux_loss=(
                 MicrobatchWiseLoadBalanceLoss(coeff=aux_loss_coeff)
                 if aux_loss_coeff
@@ -124,8 +124,8 @@ def _convert_block(
             dim,
             top_k,
             score_func=score_func,
-            route_norm=_read_route_norm(block, router_gate),
-            route_scale=_read_route_scale(block, router_gate),
+            route_norm=read_route_norm(block, router_gate),
+            route_scale=read_route_scale(block, router_gate),
             num_expert_groups=num_expert_groups,
             num_limited_groups=num_limited_groups,
             aux_loss=(
@@ -169,13 +169,13 @@ def _convert_block(
     # keep its mode: a fresh module defaults to training=True, which would
     # flip eval-built models (aux-loss injection, token counting) back on.
     moe.to(dtype=router_gate.weight.dtype, device=router_gate.weight.device)
-    _restore_fp32_state_buffers(moe)
+    restore_fp32_state_buffers(moe)
     moe.train(block.training)
     with torch.no_grad():
         router.gate.weight.copy_(router_gate.weight)
         # HF keeps all E experts in two stacked parameters; each rank keeps its
         # own slice of them. ``gate_EFD``/``up_EFD`` are the two halves of
-        # ``gate_up_proj`` split along its output dim -- see ``_fused_experts_of``.
+        # ``gate_up_proj`` split along its output dim -- see ``fused_experts_of``.
         lo = ep_rank * num_local
         grouped.w1_EFD.copy_(experts.gate_EFD[lo : lo + num_local])
         grouped.w3_EFD.copy_(experts.up_EFD[lo : lo + num_local])

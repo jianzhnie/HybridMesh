@@ -248,7 +248,7 @@ def main() -> None:
         )
 
     # -- the trajectory ------------------------------------------------------
-    data_iterator = trainer._data_iterator()
+    data_iterator = trainer.data_iterator()
     pp_losses = []
     for step in range(STEPS):
         trainer.step += 1

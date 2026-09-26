@@ -27,7 +27,7 @@ __all__ = [
 
 
 # HF picks its attention function off ``config._attn_implementation``. Registering
-# a name of our own lets us route through ``_flex_attention_hf`` without tripping
+# a name of our own lets us route through ``flex_attention_hf`` without tripping
 # HF's per-model ``_supports_flex_attn`` gate -- some models support flex but do
 # not advertise it.
 _ATTN_IMPLEMENTATION = "flex_torchtitan"
@@ -159,7 +159,7 @@ def num_flops_per_token(cfg) -> int:
     needs, which suppresses MFU rather than reporting a number derived from
     guessed geometry.
     """
-    arch = _unwrap_text_config(build_model_config_for(cfg))
+    arch = unwrap_text_config(build_model_config_for(cfg))
     hidden = getattr(arch, "hidden_size", None)
     intermediate = getattr(arch, "intermediate_size", None)
     num_layers = getattr(arch, "num_hidden_layers", None)
@@ -188,7 +188,7 @@ def num_flops_per_token(cfg) -> int:
 
 
 
-def _unwrap_text_config(config: PretrainedConfig) -> PretrainedConfig:
+def unwrap_text_config(config: PretrainedConfig) -> PretrainedConfig:
     """Return the text sub-config of a composite (vision-language) model.
 
     A VL checkpoint's top config describes the conditional model, not the text
@@ -222,7 +222,7 @@ def _unwrap_text_config(config: PretrainedConfig) -> PretrainedConfig:
 
 
 
-def _resolve_model_class(config: PretrainedConfig) -> type:
+def resolve_model_class(config: PretrainedConfig) -> type:
     """Find the ``ForCausalLM`` class named by the config.
 
     Prefer the name the config declares; fall back to the ``model_type`` ->

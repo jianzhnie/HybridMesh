@@ -179,7 +179,7 @@ def main() -> None:
     reference, ref_params = _reference_trajectory(cfg)
 
     # -- the trajectory, through the real Trainer -----------------------------
-    data_iterator = trainer._data_iterator()
+    data_iterator = trainer.data_iterator()
     losses = []
     for _ in range(STEPS):
         trainer.step += 1

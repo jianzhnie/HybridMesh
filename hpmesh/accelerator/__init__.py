@@ -22,7 +22,7 @@ them would make ``import hpmesh.accelerator`` pull in the parallel and
 trainer layers and close an import cycle. Topology construction
 (``build_parallel_dims`` / ``build_mesh``) lives with ``ParallelDims`` in
 ``hpmesh/parallel/parallel_dims.py``; the trainer bootstraps its PG via
-``dist_utils._init_dist_pytorch``.
+``dist_utils.init_dist_pytorch``.
 """
 
 _EXPORT_SOURCES = {

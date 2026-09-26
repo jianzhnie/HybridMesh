@@ -26,9 +26,9 @@ from hpmesh.parallel.tensor_parallel.tp import (
     ColwiseLinearNoGather,
     RowParallelLinear,
     ShardingConfig,
-    _match,
-    _resolve_plan,
     colwise,
+    match,
+    resolve_plan,
     rowwise,
 )
 from hpmesh.trainer import ParallelConfig
@@ -83,14 +83,14 @@ def test_plan_resolution_from_hf_string_map() -> None:
             "layers.*.o_proj": "rowwise",
         }
 
-    plan = _resolve_plan(M(), None)
+    plan = resolve_plan(M(), None)
     assert {k: v.kind for k, v in plan.items()} == {
         "layers.*.q_proj": "colwise",
         "layers.*.o_proj": "rowwise",
     }
-    assert _match(plan, "layers.3.q_proj").kind == "colwise"
-    assert _match(plan, "layers.0.o_proj").kind == "rowwise"
-    assert _match(plan, "layers.0.up_proj") is None
+    assert match(plan, "layers.3.q_proj").kind == "colwise"
+    assert match(plan, "layers.0.o_proj").kind == "rowwise"
+    assert match(plan, "layers.0.up_proj") is None
 
 
 def test_plan_resolution_prefers_the_tp_plan_property_over_the_attribute() -> None:
@@ -108,7 +108,7 @@ def test_plan_resolution_prefers_the_tp_plan_property_over_the_attribute() -> No
         def tp_plan(self) -> dict[str, str]:
             return {"model.layers.*.q_proj": "colwise"}
 
-    plan = _resolve_plan(Wrapper(), None)
+    plan = resolve_plan(Wrapper(), None)
     assert set(plan) == {"model.layers.*.q_proj"}
 
 
@@ -116,7 +116,7 @@ def test_a_wrapper_tp_plan_matches_the_modules_it_exposes() -> None:
     """The regression this locks in: TP matched 0 of 15 projections.
 
     Two things had to line up and neither did. The plan lives on the inner HF
-    model, not the wrapper, so ``_resolve_plan`` found nothing; and even once
+    model, not the wrapper, so ``resolve_plan`` found nothing; and even once
     found, HF's patterns are spelled relative to the HF model while the
     wrapper's ``named_modules`` paths sit under ``model.``. ``apply_tp`` then
     matched nothing and left the model replicated -- a TP run that silently
@@ -140,14 +140,14 @@ def test_a_wrapper_tp_plan_matches_the_modules_it_exposes() -> None:
         },
     )
     model = HFTransformerModel(config)
-    plan = _resolve_plan(model, None)
+    plan = resolve_plan(model, None)
 
     assert plan, "the wrapper exposed no usable TP plan"
 
     matched = [
         path
         for path, mod in model.named_modules()
-        if isinstance(mod, nn.Linear) and _match(plan, path) is not None
+        if isinstance(mod, nn.Linear) and match(plan, path) is not None
     ]
     # 7 projections per layer x 2 layers. ``lm_head`` is deliberately absent:
     # HF's plan does not shard it, which is why the vocab-parallel loss path
@@ -161,7 +161,7 @@ def test_qwen3_plan_resolves_rather_than_raising_on_its_qk_norms() -> None:
 
     Qwen3 -- the architecture the repo's own example trains -- marks
     ``q_norm`` / ``k_norm`` with HF's ``replicated_with_grad_allreduce``, a spec
-    ``_resolve_plan`` had no branch for. Every Qwen3 TP run therefore died in
+    ``resolve_plan`` had no branch for. Every Qwen3 TP run therefore died in
     ``apply_tp`` before touching a weight, and no test caught it because the
     only plan under test was a hand-written ``{colwise, rowwise}`` map.
 
@@ -190,7 +190,7 @@ def test_qwen3_plan_resolves_rather_than_raising_on_its_qk_norms() -> None:
     # The plan is the real one, so the entry that used to raise is present.
     assert "replicated_with_grad_allreduce" in model.tp_plan.values()
 
-    plan = _resolve_plan(model, None)  # must not raise
+    plan = resolve_plan(model, None)  # must not raise
 
     norms = [p for p in plan if p.endswith(("q_norm", "k_norm"))]
     assert norms, "q_norm/k_norm are not in the plan -- this test is vacuous"
@@ -199,7 +199,7 @@ def test_qwen3_plan_resolves_rather_than_raising_on_its_qk_norms() -> None:
     matched = [
         path
         for path, mod in model.named_modules()
-        if isinstance(mod, nn.Linear) and _match(plan, path) is not None
+        if isinstance(mod, nn.Linear) and match(plan, path) is not None
     ]
     # 7 projections per layer x 2; the norms are neither nn.Linear nor sharded.
     assert len(matched) == 14

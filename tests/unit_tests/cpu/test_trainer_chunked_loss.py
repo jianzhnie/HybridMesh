@@ -61,7 +61,7 @@ def _cfg(chunked_loss_num_chunks: int, dump_folder: str) -> HybridMeshConfig:
 def _run(cfg: HybridMeshConfig) -> tuple[list[float], dict[str, torch.Tensor]]:
     trainer = Trainer(cfg)
     try:
-        data_iterator = trainer._data_iterator()
+        data_iterator = trainer.data_iterator()
         losses = []
         for _ in range(STEPS):
             trainer.step += 1
@@ -102,7 +102,7 @@ def test_the_reported_token_count_describes_the_data_not_the_split(tmp_path) -> 
     the tokens this step *trained on*, so the cumulative count logged beside it
     has to describe the same data -- if the two disagreed, the loss would not be
     reproducible from the token count. The counter is maintained from the
-    unsharded batch (``_microbatch``), so on one process it must therefore be
+    unsharded batch (``microbatch``), so on one process it must therefore be
     exactly the batch size times the sequence length times the steps taken,
     whatever the loss body did with those tokens.
 
@@ -115,7 +115,7 @@ def test_the_reported_token_count_describes_the_data_not_the_split(tmp_path) -> 
 
     trainer = Trainer(cfg)
     try:
-        data_iterator = trainer._data_iterator()
+        data_iterator = trainer.data_iterator()
         for step in range(STEPS):
             trainer.step += 1
             metrics = trainer.train_step(data_iterator)

@@ -276,18 +276,18 @@ def test_cp_only_still_needs_a_loss_reduction() -> None:
 
 def test_sharding_a_weight_that_does_not_divide_is_rejected() -> None:
     """A ragged split would silently give ranks different-size shards."""
-    from hpmesh.parallel.tensor_parallel.tp import _shard_weight
+    from hpmesh.parallel.tensor_parallel.tp import shard_weight
 
     with pytest.raises(ValueError, match="not divisible by"):
-        _shard_weight(torch.zeros(5, 4), 0, tp_size=2, tp_rank=0)
+        shard_weight(torch.zeros(5, 4), 0, tp_size=2, tp_rank=0)
 
 
 def test_sharding_a_weight_keeps_only_this_ranks_slice() -> None:
     """The non-vacuity check: rank 1 of 2 gets the second half along dim 0."""
-    from hpmesh.parallel.tensor_parallel.tp import _shard_weight
+    from hpmesh.parallel.tensor_parallel.tp import shard_weight
 
     weight = torch.arange(8).reshape(4, 2)
-    assert _shard_weight(weight, 0, tp_size=2, tp_rank=1).tolist() == [[4, 5], [6, 7]]
+    assert shard_weight(weight, 0, tp_size=2, tp_rank=1).tolist() == [[4, 5], [6, 7]]
 
 
 def test_an_unknown_shard_kind_is_rejected() -> None:

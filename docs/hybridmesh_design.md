@@ -372,7 +372,7 @@ compile 一步是 `parallel/compile.py::apply_compile`：默认整体
 默认全关）逐开关打开逐 block compile（`per_block`，`Module.compile` 就地）、async TP
 （`_micro_pipeline_tp` + symm-mem 注册，需 compile+tp>1，配置期校验，装配期对旧
 torch/无 mesh loud-raise）、regional_inductor（`backend="aot_eager"` 且模型走 flex 时
-把 flex region scoop 进 inductor，annotation 在 wrapper 的 `_flex_attention_hf`）与
+把 flex region scoop 进 inductor，annotation 在 wrapper 的 `flex_attention_hf`）与
 `capture_scalar_outputs`（编译的 model part 含 token-choice MoE block 时设置，dense
 不动该全局量）。PP 下每 chunk 过同一函数，顺序与 pp=1 一致。
 
@@ -404,7 +404,7 @@ eval 模式 + `no_grad` 跑一次临时 dataloader，loss 按全局有效 token 
 
 `parallel/parallel_dims.py` 是 mesh 构建的单轨：`build_parallel_dims` /
 `build_mesh` 两个薄入口与 `ParallelDims` 同住一个模块（trainer 的 PG 引导直接调
-`accelerator/dist_utils._init_dist_pytorch`；多 launcher 门面 `init_dist` 保留给
+`accelerator/dist_utils.init_dist_pytorch`；多 launcher 门面 `init_dist` 保留给
 独立脚本）；所有具体视图由 `ParallelDims` 统一构造——它只负责构建/校验，
 运行时 mesh 访问的唯一通道是 `accelerator/spmd_context.py`。world mesh 包含
 PP 外轴，并派生 dataloading、dense storage、dense fwd/bwd、sparse EP、batch、loss 等
@@ -423,19 +423,19 @@ lm_head 复制，因为 hpmesh 尚无 vocab-sharded head + gather-output realize
 
 **MoE-under-TP 已支持（2026-09-25，部分，声明层+装配层就位）**。HF tp_plan 的
 MoE 规格（`packed_colwise` / `packed_rowwise` / `moe_tp_experts`）不再 raise：
-解析为 None 并由结构路径实现——`_shard_experts_for_tp` 把 fused 专家权重沿专家
+解析为 None 并由结构路径实现——`shard_experts_for_tp` 把 fused 专家权重沿专家
 hidden 维 F 原地切分（`down_proj (E,D,F)` 切 dim 2；`gate_up_proj (E,2F,D)` 的
 gate/up 两半各自切 dim 1，同 HF `packed_colwise` 的 per-half 语义），router 保持
-Replicate；`_TPMoeSequenceBoundary` 以 `__class__` swap 在块边界加 sequence
+Replicate；`TPMoeSequenceBoundary` 以 `__class__` swap 在块边界加 sequence
 all-gather / reduce-scatter 对偶 collective（与 dense TP 同一契约：块内是全 token
 流、F 分片，边界回到 T/tp 序列分片）。router 梯度跨 TP 求和复用
-`_allreduce_replicated_tp_grads`（被切专家参数经 `_tp_sharded_param_ids` 排除，
+`_allreduce_replicated_tp_grads`（被切专家参数经 `tp_sharded_param_ids` 排除，
 其 F-shard 梯度天然完备）。state_dict FQN 不变（原地换 Parameter，形状变小，同
 dense TP 约定）；tp=1 逐位不变。组合矩阵（2026-09-25 终态）：**tp>1×ep>1 放行**
 （上游对齐语义：TP 只切 dense，routed 专家由 EP 独占沿专家维切，router
 Replicate——`apply_tp` 在 ep>1 时把 HF MoE 块原样留给 `apply_ep` swap，swap 后
 的块直接消费/产出 T/tp 序列分片，无边界 collective；被切专家参数的梯度排除改
-由 `_tp_sharded_param_ids` 统一判定：dense TP realizer、MoE-under-TP 的 F 分片、
+由 `tp_sharded_param_ids` 统一判定：dense TP realizer、MoE-under-TP 的 F 分片、
 EP 的 `GroupedExperts` E 切片三类排除，router 等 Replicate 权重仍求和）；
 tp>1×ep>1×cp>1 在 config 校验 loud-raise（未验证）；shared-expert 块 ×
 tp 在两条路径都 loud-raise（ep=1 的边界 collective 未组合验证，tp×ep 的 swap 处
@@ -446,7 +446,7 @@ tp 在两条路径都 loud-raise（ep=1 的边界 collective 未组合验证，t
 
 ### 5.4 CP / EP（context_parallel/ + expert_parallel/）
 
-**CP 已接线**。拦截点是 `hf_wrapper._flex_attention_hf` 读取的 `_titan_flex_kernel`：
+**CP 已接线**。拦截点是 `hf_wrapper.flex_attention_hf` 读取的 `_titan_flex_kernel`：
 `apply_cp`（cp>1）walk 每层 attention module 并 attach `CPFlexKernel`
 （`context_parallel/cp_kernel.py`），支持两条真实路径：默认 KV all-gather（K/V 收成
 全长，Q 保持 token 分片），以及 Ulysses（token↔head all-to-all）。Ulysses 要求 heads
@@ -495,7 +495,7 @@ wrapper 的 `named_children()` 只呈现五部件、看不到它们）同样按�
 `apply_tp` → `apply_compile` → `apply_fsdp` 编排已上移 `parallelize.py`
 （与单卡路径同序、同一调用点）；`build_pipeline_schedule` 建 schedule
 （`scale_grads=False`，loss 是 sum 由 trainer 归一）。trainer 侧：
-`_pp_forward_backward_body` 驱动 `schedule.step`——首 stage 收 `input_ids`、末 stage
+`pp_forward_backward_body` 驱动 `schedule.step`——首 stage 收 `input_ids`、末 stage
 收 labels 并返回 detach 求和的 loss 与 token 数、其余 stage 返回哨兵 -1.0；optimizer
 是 `components/optimizer/` 的 `OptimizersContainer`，每个 model_part 一个内层
 optimizer；checkpoint 的 optimizer state 一律按参数 FQN 扁平存取

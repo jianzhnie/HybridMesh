@@ -91,7 +91,7 @@ class AsyncMode(str, enum.Enum):
     ASYNC_WITH_PINNED_MEM = "async_with_pinned_mem"
 
 
-class _FilesystemCheckpointStorage:
+class FilesystemCheckpointStorage:
     """``CheckpointStorage`` backed by ``checkpointer/filesystem``.
 
     Local paths go through ``os``/``shutil`` and remote fsspec URIs through
@@ -184,7 +184,7 @@ class CheckpointManager(BaseCheckpointManager):
 
         self.folder = filesystem.join(folder, config.folder)
         self.interval = config.interval
-        self._storage = _FilesystemCheckpointStorage()
+        self._storage = FilesystemCheckpointStorage()
 
         self.states = states
         self.states.update(

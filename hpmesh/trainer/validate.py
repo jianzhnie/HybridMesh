@@ -3,9 +3,9 @@
 These are module-level functions whose first parameter is deliberately named
 ``self``: the bodies moved here verbatim from ``Trainer``, and ``Trainer``
 keeps same-named thin delegates (``should_validate`` / ``validate`` /
-``_validate_body`` / ``_check_validation_feasibility``) so its public surface,
+``validate_body`` / ``check_validation_feasibility``) so its public surface,
 error types and message texts are unchanged. Everything the bodies touch --
-``_dp_rank_world_size``, ``_loss_sum``, ``metrics``, ... -- stays on the
+``dp_rank_world_size``, ``_loss_sum``, ``metrics``, ... -- stays on the
 trainer; this module owns only the pass itself.
 """
 
@@ -23,7 +23,7 @@ from ..datasets.random_data import DataLoaderExhausted
 from ..datasets.types import Batch
 
 
-def _check_validation_feasibility(
+def check_validation_feasibility(
     validation: ValidationConfig,
     *,
     pp_enabled: bool,
@@ -106,12 +106,12 @@ def validate(self, step: int) -> None:
     for part in self.model_parts:
         part.eval()
     try:
-        self._validate_body(validation, step)
+        self.validate_body(validation, step)
     finally:
         for part in self.model_parts:
             part.train()
 
-def _validate_body(self, validation: ValidationConfig, step: int) -> None:
+def validate_body(self, validation: ValidationConfig, step: int) -> None:
     parallel_dims = self.parallel_dims
     # The same mesh split as ``train_step``: the token count is taken from
     # the unsharded batch, so it is summed over the dp axis alone; the loss
@@ -131,8 +131,8 @@ def _validate_body(self, validation: ValidationConfig, step: int) -> None:
         )
     )
 
-    dp_rank, dp_world_size = self._dp_rank_world_size()
-    batch_size_per_rank = self._batch_size_per_rank(dp_world_size)
+    dp_rank, dp_world_size = self.dp_rank_world_size()
+    batch_size_per_rank = self.batch_size_per_rank(dp_world_size)
     validation_dataloader = build_dataloader(
         self.cfg,
         dp_rank=dp_rank,
@@ -163,7 +163,7 @@ def _validate_body(self, validation: ValidationConfig, step: int) -> None:
             # Counted from the unsharded batch, exactly as in training, so
             # the dp-axis reduction below counts the whole batch once even
             # when CP later slices the sequence.
-            local_valid_tokens = self._count_valid_tokens(batch)
+            local_valid_tokens = self.count_valid_tokens(batch)
             global_valid_tokens = torch.tensor(
                 local_valid_tokens, dtype=torch.int64, device=self.device
             )
@@ -175,7 +175,7 @@ def _validate_body(self, validation: ValidationConfig, step: int) -> None:
                 # forward as a kwarg.
                 batch.pop("num_valid_tokens", None)
             inputs, labels, extra_kwargs = self._example_model.preprocess_inputs(
-                self._to_device(batch),
+                self.to_device(batch),
                 parallel_dims=self.parallel_dims,
                 parallelism=self.cfg.parallel,
                 max_context_length=self.cfg.max_seq_len,

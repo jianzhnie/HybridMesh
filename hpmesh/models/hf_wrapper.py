@@ -61,7 +61,7 @@ from .common.masks import (
     get_document_mask_mod,
 )
 from .common.moe import _iter_moe_layers
-from .hf_factory import _ATTN_IMPLEMENTATION, _resolve_model_class, _unwrap_text_config
+from .hf_factory import _ATTN_IMPLEMENTATION, resolve_model_class, unwrap_text_config
 
 logger = get_logger(__name__)
 
@@ -91,7 +91,7 @@ def _flex_supported() -> str:
     return _ATTN_IMPLEMENTATION if torch.cuda.is_available() else "sdpa"
 
 
-def _flex_attention_hf(module, query, key, value, attention_mask, **kwargs):
+def flex_attention_hf(module, query, key, value, attention_mask, **kwargs):
     """HF ``AttentionInterface`` entry point for flex attention.
 
     When a kernel has been attached under the attention module (the parallelism
@@ -134,7 +134,7 @@ def _uses_dsa(config) -> bool:
 
 
 
-def _first_present(module: nn.Module, names: tuple[str, ...], what: str) -> str:
+def first_present(module: nn.Module, names: tuple[str, ...], what: str) -> str:
     """Return the first of ``names`` that ``module`` has.
 
     HF names the same submodule differently across model families
@@ -197,7 +197,7 @@ class HFTransformerModel(nn.Module):
     def __init__(self, config: PretrainedConfig) -> None:
         super().__init__()
 
-        config = _unwrap_text_config(config)
+        config = unwrap_text_config(config)
         if _uses_dsa(config):
             # Fail fast rather than run silently wrong: hpmesh always builds a
             # flex BlockMask, which DSA's indexer and main attention cannot
@@ -225,9 +225,9 @@ class HFTransformerModel(nn.Module):
                 f"num_key_value_heads ({num_kv_heads})"
             )
         config._attn_implementation = _flex_supported()
-        AttentionInterface._global_mapping[_ATTN_IMPLEMENTATION] = _flex_attention_hf
+        AttentionInterface._global_mapping[_ATTN_IMPLEMENTATION] = flex_attention_hf
 
-        model_cls = _resolve_model_class(config)
+        model_cls = resolve_model_class(config)
         # Select the HF experts forward kernel, honoring the explicit request
         # or failing -- never silently substituting a different kernel
         # (torchtitan's semantics). "native" leaves the model's built-in
@@ -288,12 +288,12 @@ class HFTransformerModel(nn.Module):
         object.__setattr__(
             self,
             "_embed_name",
-            _first_present(self._decoder, ("embed_tokens", "wte"), "token embedding"),
+            first_present(self._decoder, ("embed_tokens", "wte"), "token embedding"),
         )
         object.__setattr__(
             self,
             "_norm_name",
-            _first_present(
+            first_present(
                 self._decoder, ("norm", "final_layernorm", "ln_f"), "final norm"
             ),
         )

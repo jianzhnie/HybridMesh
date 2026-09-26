@@ -18,13 +18,13 @@ from typing import Any
 import torch
 
 from ..components.loss import IGNORE_INDEX, next_token_targets
-from ..datasets import build_dataloader
+from ..datasets import build_dataloader as build_dataset_dataloader
 from ..datasets.loader import BaseDataLoader, DataloaderExhaustedError, TrainerBatch
 from ..datasets.random_data import DataLoaderExhausted, RandomTokenDataLoader
 from ..datasets.types import Batch
 
 
-def _dp_rank_world_size(self) -> tuple[int, int]:
+def dp_rank_world_size(self) -> tuple[int, int]:
     """This rank's position and extent along the dataloading (DP) axis."""
     # ``getattr``, not attribute access: a Trainer built with ``__new__``
     # (the tests' way of exercising the pure helpers) has no mesh, and the
@@ -46,7 +46,7 @@ def _dp_rank_world_size(self) -> tuple[int, int]:
     )
     return dp_mesh.get_local_rank(), dp_mesh.size()
 
-def _batch_size_per_rank(self, dp_world_size: int) -> int:
+def batch_size_per_rank(self, dp_world_size: int) -> int:
     """This rank's share of the global batch, checked rather than floored.
 
         Both loader paths divide the global batch by ``dp_world_size`` -- the
@@ -72,7 +72,7 @@ def _batch_size_per_rank(self, dp_world_size: int) -> int:
         )
     return global_batch_size // dp_world_size
 
-def _build_dataloader(self) -> BaseDataLoader | None:
+def build_dataloader(self) -> BaseDataLoader | None:
     """Build the micro-batch source the config names.
 
         Whatever the source, it rides along in the checkpoint's ``states``:
@@ -82,9 +82,9 @@ def _build_dataloader(self) -> BaseDataLoader | None:
         position by replaying generated batches, which is exact (batch k is a
         pure function of ``(seed, k)``) if not free.
         """
-    dp_rank, dp_world_size = self._dp_rank_world_size()
-    batch_size_per_rank = self._batch_size_per_rank(dp_world_size)
-    loader = build_dataloader(
+    dp_rank, dp_world_size = self.dp_rank_world_size()
+    batch_size_per_rank = self.batch_size_per_rank(dp_world_size)
+    loader = build_dataset_dataloader(
         self.cfg,
         dp_rank=dp_rank,
         dp_world_size=dp_world_size,
@@ -95,7 +95,7 @@ def _build_dataloader(self) -> BaseDataLoader | None:
     )
     return loader
 
-def _data_iterator(self) -> Iterator[Batch | TrainerBatch]:
+def data_iterator(self) -> Iterator[Batch | TrainerBatch]:
     """The raw micro-batch source.
 
         A method rather than an attribute so tests can drive the loop with a
@@ -105,7 +105,7 @@ def _data_iterator(self) -> Iterator[Batch | TrainerBatch]:
         """
     if self.dataloader is not None:
         return iter(self.dataloader)
-    dp_rank, dp_world_size = self._dp_rank_world_size()
+    dp_rank, dp_world_size = self.dp_rank_world_size()
     return iter(
         RandomTokenDataLoader(
             seed=self.cfg.seed,
@@ -155,7 +155,7 @@ def batch_generator(
         self.metrics.add_data_loading_time(perf_counter() - data_load_start)
         yield batch
 
-def _count_valid_tokens(batch: Batch | TrainerBatch) -> int:
+def count_valid_tokens(batch: Batch | TrainerBatch) -> int:
     """The number of labels that contribute to the loss, pre-shard.
 
         The trainer's half of the token accounting, and it stays in the trainer
@@ -187,7 +187,7 @@ def _count_valid_tokens(batch: Batch | TrainerBatch) -> int:
     return num_valid_tokens
 
 
-def _microbatch(self, batch: Batch | TrainerBatch) -> dict[str, Any]:
+def microbatch(self, batch: Batch | TrainerBatch) -> dict[str, Any]:
     """Everything one accumulation group's forward/backward needs.
 
         The split of responsibility here mirrors torchtitan's ``train_step``,
@@ -204,8 +204,8 @@ def _microbatch(self, batch: Batch | TrainerBatch) -> dict[str, Any]:
           ``cp * tp`` because every rank of a CP/TP group reads the same batch
           and the report sums it over the loss mesh (see ``train_step``).
         * **Everything else stays on the host until its group is consumed.**
-          ``_preprocess`` moves one group's tensors to the device just ahead of
-          that group's forward (see ``_to_device``), so holding the rest of the
+          ``preprocess`` moves one group's tensors to the device just ahead of
+          that group's forward (see ``to_device``), so holding the rest of the
           accumulation window costs host memory, not device memory -- the CPU
           invariant ``torchtitan`` documents for ``batch_generator``.
         """
@@ -222,7 +222,7 @@ def _microbatch(self, batch: Batch | TrainerBatch) -> dict[str, Any]:
         1 if parallel_dims is None else parallel_dims.cp * parallel_dims.tp
     )
     self.ntokens_seen += labels.numel() // sequence_shards
-    num_valid_tokens = self._count_valid_tokens(batch)
+    num_valid_tokens = self.count_valid_tokens(batch)
 
     if isinstance(batch, dict):
         # ``num_valid_tokens`` is the model's to ignore, and a plain int
@@ -230,10 +230,10 @@ def _microbatch(self, batch: Batch | TrainerBatch) -> dict[str, Any]:
         batch.pop("num_valid_tokens", None)
     return {"batch": batch, "num_valid_tokens": num_valid_tokens}
 
-def _to_device(self, batch: Batch | TrainerBatch) -> Batch | TrainerBatch:
+def to_device(self, batch: Batch | TrainerBatch) -> Batch | TrainerBatch:
     """Move one consumption group's tensors to the training device.
 
-        Called by ``_preprocess``, once per group just ahead of that group's
+        Called by ``preprocess``, once per group just ahead of that group's
         forward -- not at read time. Reading the whole accumulation window onto
         the device up front would keep every micro-batch resident in device
         memory for the whole window, which is exactly what deferring avoids.
@@ -250,7 +250,7 @@ def _to_device(self, batch: Batch | TrainerBatch) -> Batch | TrainerBatch:
         labels=batch.labels.to(self.device, non_blocking=True),
     )
 
-def _preprocess(
+def preprocess(
     self, microbatch: dict[str, Any]
 ) -> tuple[torch.Tensor, torch.Tensor, dict[str, Any]]:
     """Ask the model to turn its batch into forward inputs.
@@ -261,7 +261,7 @@ def _preprocess(
         so an accumulation window's unread groups stay on the host.
         """
     return self._example_model.preprocess_inputs(
-        self._to_device(microbatch["batch"]),
+        self.to_device(microbatch["batch"]),
         parallel_dims=self.parallel_dims,
         parallelism=self.cfg.parallel,
         max_context_length=self.cfg.max_seq_len,

@@ -3,7 +3,7 @@
 The entry point is ``swap.py`` (``swap_hf_moe_blocks``); the conversion is
 ``convert.py``. This module is the duck-typed detector every HF family is
 identified through, shared by the swap and by ``tensor_parallel/apply.py``
-(``_is_hf_moe_block``).
+(``is_hf_moe_block``).
 
 Every sparse decoder layer of a transformers 5.x MoE model holds the same block
 under ``layer.mlp``: a router, plus two stacked expert parameters. Expert
@@ -24,10 +24,10 @@ releases:
 * **The router.** ``block.gate`` or ``block.router``, either a plain
   ``nn.Linear`` (DeepSeek-V2) or a bespoke module holding the same ``(E, D)``
   weight plus, for DeepSeek-V3/GLM4, an ``e_score_correction_bias`` buffer.
-  Identified by its *weight tensor*, not its type (``_router_of``).
+  Identified by its *weight tensor*, not its type (``router_of``).
 * **The expert weights.** Always ``gate_up_proj (E, 2F, D)`` and
   ``down_proj (E, D, F)``, split by ``chunk(2, dim=-1)`` after the gate+up
-  GEMM. Identified by shape (``_fused_experts_of``).
+  GEMM. Identified by shape (``fused_experts_of``).
 
 Where a family keeps its routing attributes also moved in 5.x: ``top_k``,
 ``n_group``, ``topk_group``, ``norm_topk_prob``, ``scoring_func`` and
@@ -46,7 +46,7 @@ pins both halves of that claim against the HF block being replaced.
 Routing parity with the HF block: Qwen3Moe and Mixtral score with a softmax over
 fp32 logits; DeepSeek-V3/GLM4 score with a sigmoid and apply
 ``routed_scaling_factor``; DeepSeek-V2 scores with a softmax but never
-renormalizes, whatever its config declares (see ``_ignores_norm_topk_prob``).
+renormalizes, whatever its config declares (see ``ignores_norm_topk_prob``).
 ``RouterGateLinear`` computes in fp32, so the same score function reproduces it,
 and ``TokenChoiceTopKRouter`` takes node-limited routing as
 ``num_expert_groups``/``num_limited_groups``. The one deliberate addition is the
@@ -62,10 +62,10 @@ loss curve reveals:
 
 * ``GPT-OSS``: per-expert bias vectors, a transposed ``(E, D, 2F)`` layout, and
   a hardcoded clamped sigmoid-GLU activation rather than a module
-  (see ``_fused_experts_of``).
+  (see ``fused_experts_of``).
 * ``DeepSeek-V2`` with ``topk_method="group_limited_greedy"``: scores a group by
   its single best expert where V3/GLM4 sum the top-2 (see
-  ``_read_expert_groups``). Its default ``"greedy"`` is supported and exact.
+  ``read_expert_groups``). Its default ``"greedy"`` is supported and exact.
 
 ``Qwen2Moe``'s ``shared_expert_gate`` multiplies where ``MoE.shared_experts``
 only adds, and is refused at the point the shared expert is found.
@@ -86,7 +86,7 @@ from .. import matrix
 logger = get_logger(__name__)
 
 
-def _router_of(block: nn.Module) -> nn.Module | None:
+def router_of(block: nn.Module) -> nn.Module | None:
     """The block's router module, whatever the family calls it.
 
     ``gate`` is the common spelling and what every supported family but GPT-OSS
@@ -97,7 +97,7 @@ def _router_of(block: nn.Module) -> nn.Module | None:
     return getattr(block, "gate", None) or getattr(block, "router", None)
 
 
-class _FusedExperts(NamedTuple):
+class FusedExperts(NamedTuple):
     """One family's expert weights, as the three separate tensors hpmesh wants.
 
     A transformers 5.x expert keeps all E experts in two parameters rather than
@@ -113,7 +113,7 @@ class _FusedExperts(NamedTuple):
     num_experts: int
 
 
-def _fused_experts_of(block: nn.Module) -> _FusedExperts | None:
+def fused_experts_of(block: nn.Module) -> FusedExperts | None:
     """Probe a MoE block for the fused expert tensors, or ``None``.
 
     One probe covers every supported family because transformers 5.x moved all
@@ -164,7 +164,7 @@ def _fused_experts_of(block: nn.Module) -> _FusedExperts | None:
             "family in transformers 5.x."
         )
     hidden = double_hidden // 2
-    return _FusedExperts(
+    return FusedExperts(
         gate_EFD=gate_up[:, :hidden],
         up_EFD=gate_up[:, hidden:],
         down_EDF=down,
@@ -183,7 +183,7 @@ def _has_router_weight(router: nn.Module | None) -> bool:
     return isinstance(weight, nn.Parameter) and weight.dim() == 2
 
 
-def _is_hf_moe_block(module: nn.Module) -> bool:
+def is_hf_moe_block(module: nn.Module) -> bool:
     """Structural probe for the HF sparse-MoE block shape.
 
     Deliberately duck-typed rather than an ``isinstance`` against one family's
@@ -200,19 +200,19 @@ def _is_hf_moe_block(module: nn.Module) -> bool:
     and OLMoE on the router.
     """
     try:
-        experts = _fused_experts_of(module)
+        experts = fused_experts_of(module)
     except NotImplementedError:
         # A block this swap refuses to convert is still a MoE, and the caller
         # must see the refusal rather than a generic "not a MoE block" skip.
         raise
     if experts is None:
         return False
-    return _has_router_weight(_router_of(module)) and _resolve_top_k(module) is not None
+    return _has_router_weight(router_of(module)) and _resolve_top_k(module) is not None
 
 
 def _resolve_top_k(block: nn.Module) -> int | None:
     """Top-K per token, from the block or its router."""
-    for owner in (block, _router_of(block)):
+    for owner in (block, router_of(block)):
         if owner is None:
             continue
         for attr in ("top_k", "num_experts_per_tok"):
@@ -222,7 +222,7 @@ def _resolve_top_k(block: nn.Module) -> int | None:
     return None
 
 
-def _ignores_norm_topk_prob(block: nn.Module, router: nn.Module) -> bool:
+def ignores_norm_topk_prob(block: nn.Module, router: nn.Module) -> bool:
     """Whether the block declares ``norm_topk_prob`` without ever applying it.
 
     Only DeepSeek-V2 does. Its routing ignores the field entirely::
@@ -246,14 +246,14 @@ def _ignores_norm_topk_prob(block: nn.Module, router: nn.Module) -> bool:
     return getattr(router, "topk_method", None) is not None
 
 
-def _read_route_norm(block: nn.Module, router: nn.Module) -> bool:
+def read_route_norm(block: nn.Module, router: nn.Module) -> bool:
     """Whether the selected K scores are renormalized to sum to 1.
 
     ``norm_topk_prob`` may live on either the block or the router. When neither
     declares it, sigmoid routing scores are used as-is and anything else is taken
     to be normalized -- matching how torchtitan's probe resolves it.
     """
-    if _ignores_norm_topk_prob(block, router):
+    if ignores_norm_topk_prob(block, router):
         return False
     for owner in (block, router):
         value = getattr(owner, "norm_topk_prob", None)
@@ -289,7 +289,7 @@ def _read_int_attr(block: nn.Module, router: nn.Module, name: str) -> int | None
     return None
 
 
-def _read_route_scale(block: nn.Module, router: nn.Module) -> float:
+def read_route_scale(block: nn.Module, router: nn.Module) -> float:
     """The multiplier applied to the selected K scores after normalization.
 
     HF puts ``routed_scaling_factor`` on whichever object owns the rest of the
@@ -303,7 +303,7 @@ def _read_route_scale(block: nn.Module, router: nn.Module) -> float:
     return 1.0
 
 
-def _moe_block_of(layer: nn.Module) -> tuple[str, nn.Module | None]:
+def moe_block_of(layer: nn.Module) -> tuple[str, nn.Module | None]:
     """The layer's MoE block and the attribute it is held under.
 
     Every supported family keeps it on ``mlp``. The attribute name is returned
@@ -321,7 +321,7 @@ def _moe_block_of(layer: nn.Module) -> tuple[str, nn.Module | None]:
     return MOE_LAYER_ATTRS[0], None
 
 
-def _read_expert_groups(
+def read_expert_groups(
     block: nn.Module, router: nn.Module
 ) -> tuple[int | None, int | None]:
     """The node-limited-routing config, as ``(num_expert_groups, num_limited_groups)``.
@@ -359,7 +359,7 @@ def _read_expert_groups(
     )
     if topk_method == "greedy":
         return None, None
-    if _ignores_norm_topk_prob(block, router):
+    if ignores_norm_topk_prob(block, router):
         matrix.group_limited_greedy()
     return num_groups, _read_int_attr(block, router, "topk_group")
 
@@ -371,7 +371,7 @@ def _probe_expert_layouts() -> None:
     work to pay for on every import of a training package. Run it by hand
     against a new transformers minor.
 
-    Kept because the shapes are the whole premise of ``_fused_experts_of``:
+    Kept because the shapes are the whole premise of ``fused_experts_of``:
     when an upgrade breaks the swap, this says immediately whether the layout
     moved or the probe broke.
 
@@ -382,7 +382,7 @@ def _probe_expert_layouts() -> None:
         mixtral      gate_up_proj (8, 256, 64)  down_proj (8, 64, 128)   silu
         gpt_oss      gate_up_proj (8, 64, 256)  down_proj (8, 128, 64)   clamped glu
 
-    Mixtral and OLMoE have ``2F == D``, which is why ``_fused_experts_of``
+    Mixtral and OLMoE have ``2F == D``, which is why ``fused_experts_of``
     cannot validate the gate/up halves against each other and checks the token
     dim instead.
 

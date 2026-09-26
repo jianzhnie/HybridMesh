@@ -10,7 +10,7 @@ correct on its own -- a rank that attends its own block against its own block
 computes attention over a sequence that does not exist -- so this compares
 against a single-rank reference that attends every token against every other.
 
-This drives ``cp_kernel._cp_all_to_all`` -- the all-to-all the live Ulysses
+This drives ``cp_kernel.cp_all_to_all`` -- the all-to-all the live Ulysses
 kernel runs -- rather than a second copy of the redistribution. The kernel's
 other inputs (a real HF attention call, query/key/value in HF's
 ``(batch, heads, seq, dim)`` layout) are the equivalence harnesses' job; what is
@@ -35,7 +35,7 @@ import torch
 import torch.distributed as dist
 from torch.distributed.device_mesh import init_device_mesh
 
-from hpmesh.parallel.context_parallel.cp_kernel import _cp_all_to_all
+from hpmesh.parallel.context_parallel.cp_kernel import cp_all_to_all
 
 SEQ = 16
 NUM_HEADS = 4
@@ -81,14 +81,14 @@ def _seq_to_head(x_THK, group):
     function rather than on a reimplementation of it.
     """
     x_BHTK = x_THK.permute(1, 0, 2).unsqueeze(0)  # (1, H, T, K)
-    moved = _cp_all_to_all(x_BHTK, group, scatter_dim=HEAD_DIM, gather_dim=SEQ_DIM)
+    moved = cp_all_to_all(x_BHTK, group, scatter_dim=HEAD_DIM, gather_dim=SEQ_DIM)
     return moved[0].permute(1, 0, 2)  # (T, H/cp, K)
 
 
 def _head_to_seq(x_THK, group):
     """The inverse exchange, ``(T, H/cp, K) -> (T/cp, H, K)``."""
     x_BHTK = x_THK.permute(1, 0, 2).unsqueeze(0)
-    moved = _cp_all_to_all(x_BHTK, group, scatter_dim=SEQ_DIM, gather_dim=HEAD_DIM)
+    moved = cp_all_to_all(x_BHTK, group, scatter_dim=SEQ_DIM, gather_dim=HEAD_DIM)
     return moved[0].permute(1, 0, 2)
 
 
