@@ -44,7 +44,7 @@ def init_dist(launcher,
     """Initialize distributed environment.
 
     Note:
-        The hpmesh trainer calls ``_init_dist_pytorch`` directly (it does
+        The hpmesh trainer calls ``init_dist_pytorch`` directly (it does
         not want this wrapper's ``mp.set_start_method('spawn')`` side
         effect); this multi-launcher entry is kept for standalone scripts.
         On vendor accelerators the backend is derived from the device
@@ -78,7 +78,7 @@ def init_dist(launcher,
     if mp.get_start_method(allow_none=True) is None:
         mp.set_start_method('spawn')
     if launcher == 'pytorch':
-        _init_dist_pytorch(backend, init_backend=init_backend, **kwargs)
+        init_dist_pytorch(backend, init_backend=init_backend, **kwargs)
     elif launcher == 'mpi':
         _init_dist_mpi(backend, **kwargs)
     elif launcher == 'slurm':
@@ -87,7 +87,7 @@ def init_dist(launcher,
         raise ValueError(f'Invalid launcher type: {launcher}')
 
 
-def _init_dist_pytorch(backend, init_backend='torch', **kwargs) -> None:
+def init_dist_pytorch(backend, init_backend='torch', **kwargs) -> None:
     """Initialize distributed environment with PyTorch launcher.
 
     Args:

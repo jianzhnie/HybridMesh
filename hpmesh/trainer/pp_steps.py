@@ -1,7 +1,7 @@
 """Pipeline-parallel step machinery, extracted from ``trainer.py``.
 
-Microbatch row-splitting (``_pp_microbatches``) and the schedule-driving
-forward/backward body (``_pp_forward_backward_body``) live here; the trainer
+Microbatch row-splitting (``pp_microbatches``) and the schedule-driving
+forward/backward body (``pp_forward_backward_body``) live here; the trainer
 keeps same-named thin delegates so call sites and tests are unchanged. The
 first parameter stays named ``self`` -- the bodies moved verbatim and keep
 reading the trainer's ``pp_schedule`` / ``pp_has_*`` / ``_pp_loss_sentinel``
@@ -19,7 +19,7 @@ from ..datasets.loader import TrainerBatch
 from ..datasets.types import Batch
 
 
-def _pp_microbatches(self, batch: Batch | TrainerBatch) -> list[dict[str, Any]]:
+def pp_microbatches(self, batch: Batch | TrainerBatch) -> list[dict[str, Any]]:
     """Split the rank's batch into the schedule's micro-batches.
 
         Rows are split, never tokens: each micro-batch is collapsed with the
@@ -59,7 +59,7 @@ def _pp_microbatches(self, batch: Batch | TrainerBatch) -> list[dict[str, Any]]:
         for ids, labels in zip(input_chunks, label_chunks, strict=True)
     ]
 
-def _pp_forward_backward_body(
+def pp_forward_backward_body(
     self,
     batch: Batch | TrainerBatch,
     *,
@@ -93,8 +93,8 @@ def _pp_forward_backward_body(
     arg_mbs: list[tuple[torch.Tensor, ...]] = []
     kwarg_mbs: list[dict[str, Any]] = []
     target_mbs: list[torch.Tensor] | None = [] if self.pp_has_last_stage else None
-    for mb in self._pp_microbatches(batch):
-        inputs, labels, extra_kwargs = self._preprocess({"batch": mb})
+    for mb in self.pp_microbatches(batch):
+        inputs, labels, extra_kwargs = self.preprocess({"batch": mb})
         if self.pp_has_first_stage:
             arg_mbs.append((inputs,))
         kwarg_mbs.append(extra_kwargs)

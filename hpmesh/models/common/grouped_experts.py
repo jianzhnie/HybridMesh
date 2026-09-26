@@ -32,7 +32,7 @@ from .activation import SwiGLU
 __all__ = ["GroupedExperts"]
 
 
-def _grouped_mm_available() -> bool:
+def grouped_mm_available() -> bool:
     """Whether ``torch._grouped_mm`` can run here.
 
     The probe (run the op once on a real-shaped dummy -- a version or device
@@ -71,7 +71,7 @@ class GroupedExperts(nn.Module):
         self.hidden_dim = hidden_dim
         self.dim = dim
         self.use_grouped_mm = (
-            _grouped_mm_available() if use_grouped_mm is None else use_grouped_mm
+            grouped_mm_available() if use_grouped_mm is None else use_grouped_mm
         )
         self.activation_fn = activation_fn if activation_fn is not None else SwiGLU()
 

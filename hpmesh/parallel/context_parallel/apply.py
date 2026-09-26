@@ -15,7 +15,7 @@ logger = get_logger(__name__)
 __all__ = ["apply_cp"]
 
 # HF names the attention submodule differently across model families; probe in
-# the style of hf_wrapper's ``_first_present`` rather than hardcoding one
+# the style of hf_wrapper's ``first_present`` rather than hardcoding one
 # family's spelling.
 _ATTN_MODULE_NAMES = ("self_attn", "attn", "attention")
 

@@ -33,8 +33,8 @@ from hpmesh.models.common.moe import (
     RoutedExperts,
     TokenChoiceTopKRouter,
     _iter_moe_layers,
-    _update_expert_bias,
     register_moe_load_balancing_hook,
+    update_expert_bias,
 )
 from hpmesh.models.common.token_dispatcher import LocalTokenDispatcher
 from hpmesh.models.hf_wrapper import HFTransformerModel
@@ -312,7 +312,7 @@ def test_the_collective_runs_over_a_real_process_group(single_rank_group) -> Non
     moe.tokens_per_expert_E.copy_(torch.tensor([10.0, 0.0, 5.0, 5.0]))
     model = _Holder([moe])
 
-    _update_expert_bias([(model, [moe])], parallel_dims=None)
+    update_expert_bias([(model, [moe])], parallel_dims=None)
 
     # A size-1 group leaves the counts alone, so the update is the same one the
     # direct test asserts.
@@ -326,7 +326,7 @@ def test_every_layer_of_every_part_is_updated() -> None:
     for moe in (a, b, c):
         moe.tokens_per_expert_E.copy_(torch.tensor([10.0, 0.0, 5.0, 5.0]))
 
-    _update_expert_bias([(p, _iter_moe_layers(p)) for p in parts], parallel_dims=None)
+    update_expert_bias([(p, _iter_moe_layers(p)) for p in parts], parallel_dims=None)
 
     for moe in (a, b, c):
         assert float(moe.expert_bias_E[1]) > 0, "a layer was skipped"

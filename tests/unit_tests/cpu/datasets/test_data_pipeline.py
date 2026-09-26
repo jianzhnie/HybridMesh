@@ -670,7 +670,7 @@ def test_mix_of_streaming_children_rejects_a_non_positive_weight(tokenizer, corp
 def test_a_streaming_source_takes_the_iter_dataset_branch(tokenizer, corpus):
     """The streaming half of ``SingleDataset`` is otherwise never entered.
 
-    ``_build_map_dataset`` and ``_build_iter_dataset`` are different pastes of
+    ``build_map_dataset`` and ``build_iter_dataset`` are different pastes of
     the pipeline -- streaming shuffles with a window *before* processing while
     the map path shuffles globally *after* -- and every other test feeds a
     random-access source, so only the map path has ever run.
@@ -722,7 +722,7 @@ def test_concat_rejects_a_streaming_child(tokenizer, corpus):
 def test_concat_shards_map_children_like_a_single_dataset(tokenizer, corpus):
     """Concatenation is transparent to everything downstream of it.
 
-    ``_shard_for_dp`` is applied to the concatenation exactly as it is to one
+    ``shard_for_dp`` is applied to the concatenation exactly as it is to one
     dataset, so the DP disjointness guarantee has to survive the extra layer.
     """
     concat = DatasetConcat(datasets=(text_dataset(corpus), text_dataset(corpus)))

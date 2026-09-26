@@ -35,7 +35,7 @@ __all__ = [
 ]
 
 
-def _decode_image(image: str | bytes | Image.Image) -> torch.Tensor:
+def decode_image(image: str | bytes | Image.Image) -> torch.Tensor:
     """Decode an image to a (C, H, W) uint8 RGB tensor.
 
     Uses torchvision.io.decode_image for bytes/paths (faster SIMD decode),
@@ -246,7 +246,7 @@ def process_image(
     """
     try:
         # Decode to (C, H, W) uint8 tensor
-        img_tensor = _decode_image(image)
+        img_tensor = decode_image(image)
         _, original_height, original_width = img_tensor.shape
 
         resize_h, resize_w, pad_h, pad_w = resize_fn(
@@ -361,7 +361,7 @@ def vision_to_patches(
     ts = temporal_patch_size
 
     # Pad temporal dim by repeating the last frame to reach a multiple of
-    # temporal_patch_size, ref: HF's Qwen2VLImageProcessor._preprocess.
+    # temporal_patch_size, ref: HF's Qwen2VLImageProcessor.preprocess.
     if T % ts != 0:
         pad_t = ts - (T % ts)
         img = torch.cat([img, img[-1:].expand(pad_t, -1, -1, -1)], dim=0)

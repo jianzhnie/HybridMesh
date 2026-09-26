@@ -16,7 +16,7 @@ concatenation -- rather than suffixed ``Config``. A ``...Config`` name promises
 a description of something built later; these are nodes, and the thing built
 from them is a ``GrainDataset`` the caller already holds the type of.
 
-The ordering in :func:`_build_map_dataset` is the part that must not move. It
+The ordering in :func:`build_map_dataset` is the part that must not move. It
 runs pre-filters, then the processor, then post-filters, and only then shuffles,
 shards, and repeats. Shuffling after filtering is what makes the DP slices
 disjoint *and* uniform; sharding before filtering would leave ranks with
@@ -185,13 +185,13 @@ def _build_single(
         raise TypeError("source must be a RandomAccessDataSource or grain.IterDataset")
 
     if isinstance(dataset, grain.MapDataset):
-        return _build_map_dataset(
+        return build_map_dataset(
             node,
             dataset,
             context=context,
             dataset_iteration_policy=dataset_iteration_policy,
         )
-    return _build_iter_dataset(
+    return build_iter_dataset(
         node,
         dataset,
         context=context,
@@ -199,7 +199,7 @@ def _build_single(
     )
 
 
-def _build_map_dataset(
+def build_map_dataset(
     node: SingleDataset,
     dataset: grain.MapDataset,
     *,
@@ -225,7 +225,7 @@ def _build_map_dataset(
     # Shuffle globally, then give each DP rank a disjoint slice.
     if dataset_iteration_policy.shuffle:
         dataset = dataset.shuffle(seed=dataset_iteration_policy.seed)
-    dataset = _shard_for_dp(dataset, dataset_iteration_policy)
+    dataset = shard_for_dp(dataset, dataset_iteration_policy)
     if dataset_iteration_policy.repeat:
         # Grain preserves the epoch through sliced map indices, so the
         # upstream shuffle uses seed + epoch on each repeat.
@@ -233,7 +233,7 @@ def _build_map_dataset(
     return dataset
 
 
-def _build_iter_dataset(
+def build_iter_dataset(
     node: SingleDataset,
     dataset: grain.IterDataset,
     *,
@@ -265,7 +265,7 @@ def _build_iter_dataset(
     return dataset
 
 
-def _shard_for_dp(
+def shard_for_dp(
     dataset: grain.MapDataset,
     dataset_iteration_policy: DatasetIterationPolicy,
 ) -> grain.MapDataset:
@@ -392,7 +392,7 @@ def _build_concat(
     if dataset_iteration_policy.shuffle:
         dataset = dataset.shuffle(seed=dataset_iteration_policy.seed)
 
-    dataset = _shard_for_dp(dataset, dataset_iteration_policy)
+    dataset = shard_for_dp(dataset, dataset_iteration_policy)
 
     if dataset_iteration_policy.repeat:
         dataset = dataset.repeat()

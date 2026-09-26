@@ -10,7 +10,7 @@ driver around it, vendored in shape from torchtitan's
   order for both the split and the unsplit path, so this module never imports
   a sibling parallelism family. Its ``first_stage_module_fqns`` option is
   torchtitan's ``pipeline_with_first_stage_modules``: extra top-level modules
-  co-located with stage 0 (see ``_prepend_first_stage_modules``).
+  co-located with stage 0 (see ``prepend_first_stage_modules``).
 * ``build_pipeline_schedule`` -- instantiates the torch pipelining schedule
   over this rank's stages, with the summed next-token CE the trainer
   normalizes, wrapped down to the bare scalar a schedule requires.
@@ -140,7 +140,7 @@ def _get_pipeline_metadata(
     return num_stages, input_weight, output_weight
 
 
-def _prepend_first_stage_modules(
+def prepend_first_stage_modules(
     module_names_per_stage: list[list[str]],
     model: nn.Module,
     first_stage_module_fqns: Sequence[str],
@@ -187,7 +187,7 @@ def _prepend_first_stage_modules(
     module_names_per_stage[0][:0] = present
 
 
-def _validate_microbatches(
+def validate_microbatches(
     parallel_dims: ParallelDims, cfg: ParallelConfig, global_batch_size: int
 ) -> None:
     """Fail at setup, not mid-step, on a batch that cannot be microbatched.
@@ -243,7 +243,7 @@ def apply_pp(
 
     ``first_stage_module_fqns`` names extra top-level modules (e.g. a
     multimodal encoder) to co-locate with stage 0; see
-    ``_prepend_first_stage_modules`` for the invariants. It only applies to
+    ``prepend_first_stage_modules`` for the invariants. It only applies to
     the auto-generated split -- an explicit ``module_fqns_per_model_part``
     already places modules by hand, so the two are not merged (a warning is
     logged and the explicit split wins). The default ``None`` leaves the
@@ -263,7 +263,7 @@ def apply_pp(
         matrix.pp_weight_tying()
     parallelism = cfg
     pp_mesh = parallel_dims.get_mesh("pp")
-    _validate_microbatches(parallel_dims, cfg, global_batch_size)
+    validate_microbatches(parallel_dims, cfg, global_batch_size)
 
     module_names_per_stage = parallelism.module_fqns_per_model_part
     if module_names_per_stage is None:
@@ -275,7 +275,7 @@ def apply_pp(
             num_stages, num_layers, input_weight, output_weight
         )
         if first_stage_module_fqns:
-            _prepend_first_stage_modules(
+            prepend_first_stage_modules(
                 module_names_per_stage, model, first_stage_module_fqns
             )
     else:

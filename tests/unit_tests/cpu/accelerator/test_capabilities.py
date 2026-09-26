@@ -18,9 +18,9 @@ ALL_NAMES = [
 
 @pytest.fixture(autouse=True)
 def _clear_probe_cache():
-    capabilities._probe.cache_clear()
+    capabilities.probe.cache_clear()
     yield
-    capabilities._probe.cache_clear()
+    capabilities.probe.cache_clear()
 
 
 def test_registry_covers_the_expected_names() -> None:
@@ -85,5 +85,5 @@ def test_has_reflects_a_flipped_probe(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(
         CAPABILITIES["functorch_activation_memory_budget"], "probe", lambda: True
     )
-    capabilities._probe.cache_clear()
+    capabilities.probe.cache_clear()
     assert has("functorch_activation_memory_budget") is True

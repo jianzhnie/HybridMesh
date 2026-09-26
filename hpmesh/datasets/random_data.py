@@ -103,7 +103,7 @@ class RandomTokenDataLoader(BaseDataLoader):
     """The synthetic corpus behind the ``BaseDataLoader`` contract.
 
     Each rank takes a contiguous slice of every global batch, which is the
-    static form of what ``GrainDataLoader`` gets from ``_shard_for_dp`` in the
+    static form of what ``GrainDataLoader`` gets from ``shard_for_dp`` in the
     dataset graph. Slicing here rather than in the trainer keeps the two
     loaders interchangeable: by the time a batch leaves either one it is
     already this rank's shard, and the loop does not need to know which.

@@ -159,7 +159,7 @@ CAPABILITIES: dict[str, _Capability] = {
 
 
 @cache
-def _probe(name: str) -> bool:
+def probe(name: str) -> bool:
     entry = CAPABILITIES.get(name)
     if entry is None:
         raise KeyError(
@@ -170,7 +170,7 @@ def _probe(name: str) -> bool:
 
 def has(capability: str) -> bool:
     """Whether ``capability`` is present in this build (cached)."""
-    return _probe(capability)
+    return probe(capability)
 
 
 def require(capability: str, *, feature: str) -> None:

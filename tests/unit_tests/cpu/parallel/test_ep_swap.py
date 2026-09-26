@@ -39,7 +39,7 @@ from hpmesh.models.common.aux_loss import AuxLoss
 from hpmesh.models.common.moe import MoE, RoutedExperts
 from hpmesh.models.hf_wrapper import HFTransformerModel
 from hpmesh.parallel.expert_parallel import swap_hf_moe_blocks
-from hpmesh.parallel.expert_parallel.swap import _restore_fp32_state_buffers
+from hpmesh.parallel.expert_parallel.swap import restore_fp32_state_buffers
 
 TOL = 1e-6
 
@@ -765,7 +765,7 @@ def test_the_swap_keeps_the_token_count_buffer_in_fp32() -> None:
     """The swapped MoE's state buffers must survive ``.to(dtype=...)`` unscathed.
 
     ``Module.to`` converts every floating-point buffer along with the
-    parameters, and ``_convert_block`` casts the new MoE to match the HF block's
+    parameters, and ``convert_block`` casts the new MoE to match the HF block's
     dtype. In a bf16 run that silently demoted the load-balancing buffers:
     ``tokens_per_expert_E`` is a token *count*, which bf16 cannot hold exactly
     past 256 -- 1001 becomes 1000 -- and ``expert_bias_E`` is an additive
@@ -775,7 +775,7 @@ def test_the_swap_keeps_the_token_count_buffer_in_fp32() -> None:
     silent.
 
     Qwen3Moe carries no ``e_score_correction_bias``, so only the count buffer is
-    present here; ``_restore_fp32_state_buffers`` covers both and
+    present here; ``restore_fp32_state_buffers`` covers both and
     ``test_the_fp32_restore_covers_the_bias_buffer`` pins the other.
     """
     swapped = _model(_config(norm_topk_prob=True))
@@ -796,7 +796,7 @@ def test_the_swap_keeps_the_token_count_buffer_in_fp32() -> None:
 
 
 def test_the_fp32_restore_covers_the_bias_buffer() -> None:
-    """``_restore_fp32_state_buffers`` is what the check above relies on.
+    """``restore_fp32_state_buffers`` is what the check above relies on.
 
     Built directly rather than through the swap, because the families that carry
     ``expert_bias_E`` are a larger fixture than this property needs. The point is
@@ -819,7 +819,7 @@ def test_the_fp32_restore_covers_the_bias_buffer() -> None:
     assert moe.expert_bias_E.dtype == torch.bfloat16  # the bug, demonstrated
 
     moe.to(dtype=torch.bfloat16)  # re-cast so the fix under test starts from it
-    _restore_fp32_state_buffers(moe)
+    restore_fp32_state_buffers(moe)
 
     assert moe.expert_bias_E.dtype == torch.float32
     assert moe.tokens_per_expert_E.dtype == torch.float32

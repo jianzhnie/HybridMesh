@@ -167,7 +167,7 @@ def in_memory_stream(rows: list[dict[str, Any]]) -> grain.IterDataset:
 
     A source slot takes an already-built node as well as a description, and
     this is the local stand-in for one: streaming rather than random-access,
-    so a dataset built on it takes the ``_build_iter_dataset`` branch. That
+    so a dataset built on it takes the ``build_iter_dataset`` branch. That
     branch is otherwise reachable only through the Hugging Face streaming
     source, which needs the network.
     """

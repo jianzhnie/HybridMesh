@@ -38,10 +38,10 @@ from hpmesh.datasets import (
 from hpmesh.datasets.multimodal.mm_collator import MultiModalCollator
 from hpmesh.datasets.multimodal.mm_datasets import (
     MultiModalProcessor,
-    _packing_output_to_mm_sample,
-    _process_cc12_wd_sample,
-    _process_mm_sample,
     build_mm_sample_packing,
+    packing_output_to_mm_sample,
+    process_cc12_wd_sample,
+    process_mm_sample,
 )
 from hpmesh.datasets.multimodal.mm_image import (
     calculate_vision_tokens,
@@ -95,7 +95,7 @@ def mm_tokenizer(tmp_path_factory) -> MultiModalTokenizer:
 
 
 def _png_bytes(height: int, width: int) -> bytes:
-    """Encode a real PNG so ``_decode_image`` takes its bytes path.
+    """Encode a real PNG so ``decode_image`` takes its bytes path.
 
     A real encode/decode round trip rather than a fabricated tensor, so a
     regression in the decode path (channel order, RGB conversion) fails a test.
@@ -312,7 +312,7 @@ def test_insert_vision_placeholders_rejects_a_slot_with_no_token_count():
 
 
 def test_process_mm_sample_rejects_mismatched_text_and_image_lists(mm_tokenizer):
-    assert _process_mm_sample(["a"], [], tokenizer=mm_tokenizer, **MM_KWARGS) is None
+    assert process_mm_sample(["a"], [], tokenizer=mm_tokenizer, **MM_KWARGS) is None
 
 
 def test_process_mm_sample_masks_the_vision_tokens_in_the_labels(
@@ -324,7 +324,7 @@ def test_process_mm_sample_masks_the_vision_tokens_in_the_labels(
     trains the language head against something it never sees. The assertion is
     therefore the negative one: no placeholder survives in ``labels``.
     """
-    result = _process_mm_sample(
+    result = process_mm_sample(
         texts=[None, "hello"],
         images=[image_bytes, None],
         tokenizer=mm_tokenizer,
@@ -347,7 +347,7 @@ def test_process_mm_sample_masks_the_vision_tokens_in_the_labels(
 
 
 def test_process_mm_sample_aligns_every_token_field(mm_tokenizer, image_bytes):
-    result = _process_mm_sample(
+    result = process_mm_sample(
         texts=[None, "hello"],
         images=[image_bytes, None],
         tokenizer=mm_tokenizer,
@@ -365,7 +365,7 @@ def test_process_mm_sample_drops_the_sample_when_one_image_fails(
     """A partially processed sample is dropped, not kept with fewer images than
     placeholders -- keeping it would misalign every image after the failure."""
     assert (
-        _process_mm_sample(
+        process_mm_sample(
             texts=[None, None, "hello"],
             images=[image_bytes, b"broken", None],
             tokenizer=mm_tokenizer,
@@ -376,7 +376,7 @@ def test_process_mm_sample_drops_the_sample_when_one_image_fails(
 
 
 def test_process_cc12_wd_sample_reads_the_pair_format(mm_tokenizer, image_bytes):
-    result = _process_cc12_wd_sample(
+    result = process_cc12_wd_sample(
         {"txt": "hello", "jpg": image_bytes}, tokenizer=mm_tokenizer, **MM_KWARGS
     )
     assert result is not None
@@ -387,7 +387,7 @@ def test_process_cc12_wd_sample_raises_when_the_image_field_is_absent(mm_tokeniz
     """A row without a ``jpg`` key is malformed for this dataset, not an image
     that failed to decode -- so it raises rather than being silently dropped."""
     with pytest.raises(TypeError):
-        _process_cc12_wd_sample({"txt": "hello"}, tokenizer=mm_tokenizer, **MM_KWARGS)
+        process_cc12_wd_sample({"txt": "hello"}, tokenizer=mm_tokenizer, **MM_KWARGS)
 
 
 # --------------------------------------------------------------------------
@@ -398,7 +398,7 @@ def test_process_cc12_wd_sample_raises_when_the_image_field_is_absent(mm_tokeniz
 def _mm_processor(mm_tokenizer, *, max_context_length=256):
     return MultiModalProcessor(
         context=make_context(mm_tokenizer, max_context_length=max_context_length),
-        sample_processor=_process_cc12_wd_sample,
+        sample_processor=process_cc12_wd_sample,
     )
 
 
@@ -464,7 +464,7 @@ def test_multimodal_processor_runs_over_a_jsonl_corpus(
 
     config = SingleDataset(
         source=_Base64JsonlSource(patterns=(path,)),
-        # A class, not a `partial` fixing a different context: `_build_map_dataset`
+        # A class, not a `partial` fixing a different context: `build_map_dataset`
         # calls `processor(context=...)`, and a partial's bound keyword would be
         # silently overridden by that call-site keyword.
         processor=_CtxSizedMMProcessor,
@@ -489,7 +489,7 @@ class _CtxSizedMMProcessor(MultiModalProcessor):
 
         super().__init__(
             context=replace(context, max_context_length=1024),
-            sample_processor=_process_cc12_wd_sample,
+            sample_processor=process_cc12_wd_sample,
         )
 
 
@@ -738,7 +738,7 @@ def test_mm_packing_flattens_per_document_media_into_one_list(mm_tokenizer):
         "pixel_values": [["a", "b"], ["c"]],
         "pixel_values_videos": [["v"]],
     }
-    packed = _packing_output_to_mm_sample(output, max_context_length=32)
+    packed = packing_output_to_mm_sample(output, max_context_length=32)
     assert packed["pixel_values"] == ["a", "b", "c"]
     assert packed["pixel_values_videos"] == ["v"]
     assert bool(packed["padding_mask"][4:].all())

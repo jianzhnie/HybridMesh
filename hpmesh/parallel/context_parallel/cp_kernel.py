@@ -1,7 +1,7 @@
 """The CP flex kernel: redistribute q/k/v across the CP group, then run flex.
 
 ``apply_cp`` attaches one of these to every decoder layer's attention module
-as ``_titan_flex_kernel``; ``hf_wrapper._flex_attention_hf`` then routes the
+as ``_titan_flex_kernel``; ``hf_wrapper.flex_attention_hf`` then routes the
 layer's attention call through it. q/k/v arrive HF-shaped --
 ``(batch, heads, seq, dim)`` -- with the sequence already sharded along dim 2
 by ``shard_batch_for_cp``. Two strategies redistribute them:
@@ -56,7 +56,7 @@ _HEAD_DIM = 1
 _KNOWN_STRATEGIES = ("kv_allgather", "ulysses")
 
 
-def _cp_all_to_all(
+def cp_all_to_all(
     x_BHSD: torch.Tensor,
     group: dist.ProcessGroup,
     *,
@@ -98,7 +98,7 @@ def _cp_all_to_all(
     return y.reshape(merged)
 
 
-def _reject_unrepresentable_attention_kwargs(kwargs: dict) -> None:
+def reject_unrepresentable_attention_kwargs(kwargs: dict) -> None:
     """Refuse attention modifiers the CPU eager fallback cannot express.
 
     The CUDA branch hands every kwarg to HF's ``flex_attention_forward``, whose
@@ -150,7 +150,7 @@ def _run_flex(module, q, k, v, block_mask, kwargs) -> torch.Tensor:
 
         out, _ = flex_attention_forward(module, q, k, v, block_mask, **kwargs)
         return out.transpose(1, 2)
-    _reject_unrepresentable_attention_kwargs(kwargs)
+    reject_unrepresentable_attention_kwargs(kwargs)
     from torch.nn.attention.flex_attention import flex_attention
 
     return flex_attention(
@@ -163,36 +163,36 @@ def _run_flex(module, q, k, v, block_mask, kwargs) -> torch.Tensor:
     )
 
 
-class _SeqToHead(torch.autograd.Function):
+class SeqToHead(torch.autograd.Function):
     """``(b, h, s/cp, d) -> (b, h/cp, s, d)``; the backward is the inverse swap."""
 
     @staticmethod
     def forward(ctx, x_BHSD, group):
         ctx.group = group
-        return _cp_all_to_all(x_BHSD, group, scatter_dim=_HEAD_DIM, gather_dim=_SEQ_DIM)
+        return cp_all_to_all(x_BHSD, group, scatter_dim=_HEAD_DIM, gather_dim=_SEQ_DIM)
 
     @staticmethod
     def backward(ctx, grad_BHSD):
         return (
-            _cp_all_to_all(
+            cp_all_to_all(
                 grad_BHSD, ctx.group, scatter_dim=_SEQ_DIM, gather_dim=_HEAD_DIM
             ),
             None,
         )
 
 
-class _HeadToSeq(torch.autograd.Function):
+class HeadToSeq(torch.autograd.Function):
     """``(b, h/cp, s, d) -> (b, h, s/cp, d)``; the backward is the inverse swap."""
 
     @staticmethod
     def forward(ctx, x_BHSD, group):
         ctx.group = group
-        return _cp_all_to_all(x_BHSD, group, scatter_dim=_SEQ_DIM, gather_dim=_HEAD_DIM)
+        return cp_all_to_all(x_BHSD, group, scatter_dim=_SEQ_DIM, gather_dim=_HEAD_DIM)
 
     @staticmethod
     def backward(ctx, grad_BHSD):
         return (
-            _cp_all_to_all(
+            cp_all_to_all(
                 grad_BHSD, ctx.group, scatter_dim=_HEAD_DIM, gather_dim=_SEQ_DIM
             ),
             None,
@@ -248,7 +248,7 @@ class CPFlexKernel(nn.Module):
         Q, full KV) that pairs with the gathered K/V; for ``ulysses`` it is
         either dropped and rebuilt (single causal document) or used as-is
         (packed corpus, full-length -- see :meth:`_forward_ulysses`). Returns
-        just the attention output tensor -- ``hf_wrapper._flex_attention_hf``
+        just the attention output tensor -- ``hf_wrapper.flex_attention_hf``
         appends the ``None`` LSE itself.
         """
         if self.strategy == "ulysses":
@@ -286,13 +286,13 @@ class CPFlexKernel(nn.Module):
         the full pre-shard sequence), so all ranks take the same branch and no
         rank can stall the all-to-alls on a local surprise.
         """
-        q = _SeqToHead.apply(query.contiguous(), self._cp_group)
-        k = _SeqToHead.apply(key.contiguous(), self._cp_group)
-        v = _SeqToHead.apply(value.contiguous(), self._cp_group)
+        q = SeqToHead.apply(query.contiguous(), self._cp_group)
+        k = SeqToHead.apply(key.contiguous(), self._cp_group)
+        v = SeqToHead.apply(value.contiguous(), self._cp_group)
         if block_mask is None or block_mask.seq_lengths[0] != q.shape[_SEQ_DIM]:
             block_mask = self._full_length_causal_mask(q)
         out = _run_flex(module, q, k, v, block_mask, kwargs)
-        out = _HeadToSeq.apply(out.contiguous(), self._cp_group)
+        out = HeadToSeq.apply(out.contiguous(), self._cp_group)
         return out.transpose(1, 2)  # HF's interface contract is (b, s/cp, h, d)
 
     def _full_length_causal_mask(self, q_BHSD: torch.Tensor):

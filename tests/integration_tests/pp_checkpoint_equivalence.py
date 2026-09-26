@@ -123,7 +123,7 @@ def _phase_full(workdir: str) -> None:
         f"this check assumes 2 ranks, got {trainer.world_size}"
     )
 
-    data_iterator = trainer._data_iterator()
+    data_iterator = trainer.data_iterator()
     losses = _train_steps(trainer, data_iterator, SPLIT_STEP)
 
     # The interval policy agrees this is a checkpointing step; a full state
@@ -186,7 +186,7 @@ def _phase_resume(workdir: str) -> None:
     # The loader's read position came back with the checkpoint (DATALOADER is
     # registered in ``states``), so step N+1 reads what the uninterrupted run
     # read -- no manual fast-forward.
-    data_iterator = trainer._data_iterator()
+    data_iterator = trainer.data_iterator()
 
     losses = _train_steps(trainer, data_iterator, EXTRA_STEPS)
 

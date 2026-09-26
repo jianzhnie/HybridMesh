@@ -24,9 +24,9 @@ from hpmesh.models.hf_factory import build_model_config
 from hpmesh.models.hf_wrapper import HFTransformerModel
 from hpmesh.parallel.parallel_dims import ParallelDims
 from hpmesh.parallel.pipeline_parallel.apply import (
-    _prepend_first_stage_modules,
-    _validate_microbatches,
     apply_pp,
+    prepend_first_stage_modules,
+    validate_microbatches,
 )
 from hpmesh.parallel.pipeline_parallel.pipeline import (
     generate_llm_fqn_per_model_part,
@@ -267,21 +267,21 @@ def _dims(*, pp: int = 2, ep: int = 1, world_size: int = 2) -> ParallelDims:
 def test_zero_or_negative_microbatches_is_rejected() -> None:
     """A 0 would otherwise surface as a ZeroDivisionError on the divisibility
     check -- torchtitan raises this in its config's ``__post_init__``, which
-    hpmesh's config does not do, so ``_validate_microbatches`` owns it."""
+    hpmesh's config does not do, so ``validate_microbatches`` owns it."""
     for n in (0, -2):
         with pytest.raises(ValueError, match="num_pp_microbatches"):
-            _validate_microbatches(
+            validate_microbatches(
                 _dims(), ParallelConfig(num_pp_microbatches=n), global_batch_size=8
             )
 
 
 def test_microbatch_divisibility_is_still_enforced() -> None:
     with pytest.raises(ValueError, match="divisible"):
-        _validate_microbatches(
+        validate_microbatches(
             _dims(), ParallelConfig(num_pp_microbatches=3), global_batch_size=8
         )
     # 8 rows over dp=1, 4 microbatches: legal.
-    _validate_microbatches(
+    validate_microbatches(
         _dims(), ParallelConfig(num_pp_microbatches=4), global_batch_size=8
     )
 
@@ -318,7 +318,7 @@ def test_first_stage_modules_are_prepended_to_stage_0() -> None:
     stage0_before = list(parts[0])
     rest_before = [list(part) for part in parts[1:]]
 
-    _prepend_first_stage_modules(parts, model, ["vision_encoder"])
+    prepend_first_stage_modules(parts, model, ["vision_encoder"])
 
     assert parts[0] == ["vision_encoder"] + stage0_before
     assert parts[1:] == rest_before
@@ -329,7 +329,7 @@ def test_first_stage_module_order_is_preserved() -> None:
     model.audio_encoder = nn.Linear(16, 16, bias=False)
     parts = generate_llm_fqn_per_model_part(2, _NUM_LAYERS)
 
-    _prepend_first_stage_modules(parts, model, ["audio_encoder", "vision_encoder"])
+    prepend_first_stage_modules(parts, model, ["audio_encoder", "vision_encoder"])
 
     assert parts[0][:2] == ["audio_encoder", "vision_encoder"]
 
@@ -340,7 +340,7 @@ def test_absent_first_stage_modules_are_skipped() -> None:
     parts = generate_llm_fqn_per_model_part(2, _NUM_LAYERS)
     expected = [list(part) for part in parts]
 
-    _prepend_first_stage_modules(parts, model, ["vision_encoder"])
+    prepend_first_stage_modules(parts, model, ["vision_encoder"])
 
     assert parts == expected
 
@@ -352,7 +352,7 @@ def test_first_stage_module_already_owned_by_the_split_is_rejected() -> None:
     parts = generate_llm_fqn_per_model_part(2, _NUM_LAYERS)
 
     with pytest.raises(ValueError, match="already assigned"):
-        _prepend_first_stage_modules(parts, model, ["norm"])
+        prepend_first_stage_modules(parts, model, ["norm"])
 
 
 def test_duplicate_first_stage_module_is_rejected() -> None:
@@ -360,7 +360,7 @@ def test_duplicate_first_stage_module_is_rejected() -> None:
     parts = generate_llm_fqn_per_model_part(2, _NUM_LAYERS)
 
     with pytest.raises(ValueError, match="more than once"):
-        _prepend_first_stage_modules(
+        prepend_first_stage_modules(
             parts, model, ["vision_encoder", "vision_encoder"]
         )
 
@@ -371,7 +371,7 @@ def test_split_keeps_first_stage_module_fqns_stable(pp_mesh) -> None:
     model = _model_with_vision_encoder()
     unsplit_keys = {k for k, _ in model.named_parameters()}
     module_names = generate_llm_fqn_per_model_part(2, _NUM_LAYERS)
-    _prepend_first_stage_modules(module_names, model, ["vision_encoder"])
+    prepend_first_stage_modules(module_names, model, ["vision_encoder"])
 
     _, model_parts = split_model_into_stages(
         model, pp_mesh, "1F1B", torch.device("cpu"), module_names

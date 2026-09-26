@@ -167,7 +167,7 @@ C 类上会把项目**故意删掉**的抽象又拽回来。
 | 上游 | 影响 |
 | --- | --- |
 | `distributed/compile.py` | **已移植**（2026-09-24，批 8）：逐 block compile、async TP `_micro_pipeline_tp`、`regional_inductor`、`capture_scalar_outputs` 四件全部落 `hpmesh/parallel/compile.py` + `CompileConfig`，见下"已从 D 移除" |
-| `models/common/moe_sharding.py` | **部分移除**（2026-09-25）。其载荷 MoE-under-TP 已在 `parallel/tensor_parallel/tp.py` 落 B 类适配：HF plan 的 `packed_colwise`/`packed_rowwise`/`moe_tp_experts` 规格不再 raise，专家权重沿 F 维原地切分、router Replicate、块边界 AG/RS 对偶 collective；**tp×ep 同日起按上游语义放行**（TP 只切 dense、EP 独占 routed 专家沿 E 切、router Replicate，`apply_tp` 在 ep>1 时把块留给 swap，专家梯度排除由 `_tp_sharded_param_ids` 统一判定；tp×ep×cp 与 shared-expert×tp 保持 loud-raise）。声明层+装配层就位并有 CPU 单测，但真多卡前后向等价性**环境未覆盖**（本机 torch 2.2.2 无分布式执行栈），待 torch≥2.12 多卡复跑后方可视为完整移除。见下"已从 D 移除（部分）" |
+| `models/common/moe_sharding.py` | **部分移除**（2026-09-25）。其载荷 MoE-under-TP 已在 `parallel/tensor_parallel/tp.py` 落 B 类适配：HF plan 的 `packed_colwise`/`packed_rowwise`/`moe_tp_experts` 规格不再 raise，专家权重沿 F 维原地切分、router Replicate、块边界 AG/RS 对偶 collective；**tp×ep 同日起按上游语义放行**（TP 只切 dense、EP 独占 routed 专家沿 E 切、router Replicate，`apply_tp` 在 ep>1 时把块留给 swap，专家梯度排除由 `tp_sharded_param_ids` 统一判定；tp×ep×cp 与 shared-expert×tp 保持 loud-raise）。声明层+装配层就位并有 CPU 单测，但真多卡前后向等价性**环境未覆盖**（本机 torch 2.2.2 无分布式执行栈），待 torch≥2.12 多卡复跑后方可视为完整移除。见下"已从 D 移除（部分）" |
 | `components/optimizer/ema.py`（2026-09 新增，515 行） | **已移植**（2026-09-24，`hpmesh/components/optimizer/ema.py`）：在线 EMA 模型平均，config/trainer/checkpointer 三侧接线完成，见下"已从 D 移除" |
 | Ulysses CP × varlen/packed（baff3c681） | **已移植**（2026-09-25，批 5）：`apply_cp` 不再 fail-fast，wrapper 全长透传文档 mask、kernel 按 mask Q 长度分派，见下"已从 D 移除" |
 | 多轮对话 SFT 的 renderer 路径（4a0d8dab3） | **已适配为可选路径**（2026-09-25，§9.1 第 12 项）：不引入硬依赖、不复制 Configurable 外形。`datasets/text/renderer.py` 为可选导入适配层（`build_chat_renderer` + `RendererTokenizerWrapper`），`ChatProcessor(renderer=...)` 走多-turn renderer 分支，`--chat_renderer`/`--messages_field` 接线 `local_jsonl_sft`；未装 `renderers` 时启用 loud-raise（ImportError 带安装指引），默认关闭逐位不变。真实库数值**未验证**（本机无 renderers，单测以 fake 模块覆盖接口与 mask 移位语义）；解锁条件：pyproject 加 optional extra `renderers==0.1.11` 后装包复跑 |
@@ -180,22 +180,22 @@ C 类上会把项目**故意删掉**的抽象又拽回来。
 沿专家维 E 取 placement（DP_REPLICATE/EFSDP 为 R,EP 为 S(0)），由上游 Module 协议
 的 parallelize 引擎消费。hpmesh 按 B 类语义适配，不复制其 Config 协议：MoE-under-TP
 的声明改由 HF tp_plan 的 `packed_colwise`/`packed_rowwise`/`moe_tp_experts` 规格承载
-（`_resolve_plan` 解析为 None），执行落在 `parallel/tensor_parallel/tp.py` 的结构路
-径——`_shard_experts_for_tp`（`down_proj (E,D,F)` 切 dim 2，`gate_up_proj (E,2F,D)`
-gate/up 两半各自切 dim 1,router 不动）+ `_TPMoeSequenceBoundary`（`__class__` swap
+（`resolve_plan` 解析为 None），执行落在 `parallel/tensor_parallel/tp.py` 的结构路
+径——`shard_experts_for_tp`（`down_proj (E,D,F)` 切 dim 2，`gate_up_proj (E,2F,D)`
+gate/up 两半各自切 dim 1,router 不动）+ `TPMoeSequenceBoundary`（`__class__` swap
 安装块边界 sequence all-gather / reduce-scatter，与 dense TP 同一对偶契约，序列维
 -2)。梯度语义：边界 collective 的注册反向互为对偶；router 权重 Replicate，梯度由
-`_allreduce_replicated_tp_grads` 求和；被切专家参数经块上 `_tp_sharded_param_ids`
+`_allreduce_replicated_tp_grads` 求和；被切专家参数经块上 `tp_sharded_param_ids`
 从该归约排除。state_dict FQN 不变、tp=1 逐位不变。**tp×ep（同日第二段）**：按上游
 语义放行——TP 只切 dense,routed 专家由 EP 独占沿专家维 E 切，router Replicate;
 `apply_tp` 在 `cfg.ep > 1` 时跳过 MoE 块扫描/分片/边界安装（块留给 `apply_ep`
 swap,swap 后的原生 MoE 直接消费/产出 T/tp 序列分片，即上游 ep+sp 的
 sequence-parallel 布局，无边界 collective);trainer 的排除判定抽为模块级
-`_tp_sharded_param_ids`（三类：dense TP realizer、MoE-under-TP 的 F 分片、EP 的
+`tp_sharded_param_ids`（三类：dense TP realizer、MoE-under-TP 的 F 分片、EP 的
 `GroupedExperts` E 切片；EP 专家梯度按 rank 完备，跨 TP 求和会混不同专家的梯度）。
 组合矩阵终态（config 期校验在各 config `__post_init__`，跨层裁决单一来源 `parallel/matrix.py`；2026-09-26 收窄）：tp>1×ep>1（cp=1）放行；tp>1×ep>1×cp>1 在
 `ParallelConfig.__post_init__` fail-fast（未验证）;shared-expert 块 ×tp 两条路径均
-loud-raise(ep=1 边界处、tp×ep 的 swap `_convert_block` 处）;plan 声明 MoE 规格但
+loud-raise(ep=1 边界处、tp×ep 的 swap `convert_block` 处）;plan 声明 MoE 规格但
 探针找不到块（ep=1）loud-raise;GPT-OSS 布局 loud-raise。aux loss / padding-mask
 LB / quantile hook 的归约轴此前已按 ep_enabled 含 tp 书写，放行后不重复计数、无需
 改动。测试
@@ -243,7 +243,7 @@ Ulysses 拒绝（per-head sinks 只走 TP 分片）不适用：hpmesh 尚无 GPT
 * **regional_inductor**：flex 只有 inductor lowering，故非 inductor backend 下
   flex 模型必须 scoop。`backend="aot_eager"` 且模型走 flex（wrapper 新 property
   `uses_flex_attention`）时用 `torch.fx.passes.regional_inductor` 包
-  `aot_autograd`；annotation 落 `hf_wrapper._flex_attention_hf` 的
+  `aot_autograd`；annotation 落 `hf_wrapper.flex_attention_hf` 的
   `maybe_regional_inductor({})`（默认 nullcontext，inductor/eager 路径零开销）。
   flex 模型配其他非 inductor backend → `ValueError`；torch 无 regional_inductor
   → `NotImplementedError`；sdpa 模型 backend 原样透传。inductor_configs 传空
@@ -263,7 +263,7 @@ Ulysses 拒绝（per-head sinks 只走 TP 分片）不适用：hpmesh 尚无 GPT
 多模态 first-stage 模块并入 stage 0，落为 `apply_pp` 的可选关键字参数
 `first_stage_module_fqns: Sequence[str] | None`（默认 None，默认时切分与
 state-dict 键逐位不变）+ `parallel/pipeline_parallel/apply.py::
-_prepend_first_stage_modules`（仅作用于自动生成的切分，把存在的 FQN 按序前插
+prepend_first_stage_modules`（仅作用于自动生成的切分，把存在的 FQN 按序前插
 stage 0；已被切分占有的 FQN 与重复 FQN loud-raise，缺失模块跳过；显式
 `module_fqns_per_model_part` 给定时忽略并告警，与上游委托语义一致）。配套改动
 `split_model_into_stages`：wrapper `named_children()` 不呈现的额外顶层模块
@@ -276,7 +276,7 @@ stage 0；已被切分占有的 FQN 与重复 FQN loud-raise，缺失模块跳�
 
 **已从 D 移除**（2026-09-24 批 4 移植）：validation 循环——上游
 `components/validate.py::Validator` 落 `trainer/validate.py`（2026-09-26 文件名对齐上游，原 validation.py）
-（`Trainer.validate`/`should_validate`/`_check_validation_feasibility` 的
+（`Trainer.validate`/`should_validate`/`check_validation_feasibility` 的
 薄委托背后）+
 `config/training.py::ValidationConfig`（`training.validation_config`，默认
 None 关闭，关闭时训练循环逐位不变；programmatic-only，同 `ema_config`）。
@@ -389,7 +389,7 @@ hpmesh 侧是 `datasets/multimodal/mm_image.py`），本表的 hpmesh 列是唯�
 
   | 提交 | 结论 |
   |---|---|
-  | `9e159aed7` TP projection 后端重构（#4704） | **语义已对齐，无代码动作**。通信角色不变量在 hpmesh 已成立：column 拥有 input collective（`ColumnParallelLinear` 融合 all-gather）、row 拥有 output collective（`RowParallelLinear` 融合 reduce-scatter）；共享输入多投影在父模块一次性 gather（`_GatherSequenceFirst` + `ColwiseLinearNoGather`，同上游"父模块持有、子投影为 plain Linear"语义）。`_linear()` seam 服务 LoRA/量化（hpmesh 裁剪面，不移植）；`PartialBiasRowwiseLinear` 上游删除并并入 `RowParallelLinear`，hpmesh 同名类的 bias I→P 语义本就一致，保留（仅测试使用）。AsyncTensorParallelTransform 重写是上游 Module-registry 面的模块替换实现，hpmesh async TP 走 inductor `_micro_pipeline_tp` + symm-mem，机制不受影响；"转换后（LoRA/量化）投影不支持 async TP"的约束在 hpmesh 无对应面（两者均裁剪），不登记守卫。上游 `dist_gemm.py` 改名 `async_linear.py`，本文映射随之更新。 |
+  | `9e159aed7` TP projection 后端重构（#4704） | **语义已对齐，无代码动作**。通信角色不变量在 hpmesh 已成立：column 拥有 input collective（`ColumnParallelLinear` 融合 all-gather）、row 拥有 output collective（`RowParallelLinear` 融合 reduce-scatter）；共享输入多投影在父模块一次性 gather（`GatherSequenceFirst` + `ColwiseLinearNoGather`，同上游"父模块持有、子投影为 plain Linear"语义）。`_linear()` seam 服务 LoRA/量化（hpmesh 裁剪面，不移植）；`PartialBiasRowwiseLinear` 上游删除并并入 `RowParallelLinear`，hpmesh 同名类的 bias I→P 语义本就一致，保留（仅测试使用）。AsyncTensorParallelTransform 重写是上游 Module-registry 面的模块替换实现，hpmesh async TP 走 inductor `_micro_pipeline_tp` + symm-mem，机制不受影响；"转换后（LoRA/量化）投影不支持 async TP"的约束在 hpmesh 无对应面（两者均裁剪），不登记守卫。上游 `dist_gemm.py` 改名 `async_linear.py`，本文映射随之更新。 |
   | `847f98a6f` RegionAC AllToAll remat regions（#4837） | **随 RegionAC/DeepEP 缺口锁定，解锁条件不变**（torch_remat + CUDA deep_ep 核）。TokenDispatcher 变 Module 是 remat region 机制的载体，hpmesh 无消费方。可独立移植的语义——dispatch/combine 恒 SAVE——经核对**已在 hpmesh 成立**：selective AC 的 save set 含 `_c10d_functional.all_to_all_single`（`activation_checkpoint.py` 的 `comm_ops`），即 hpmesh AllToAllTokenDispatcher 用的原语，无需动作。 |
   | `090c0c931` graph_trainer none AC MemoryPolicy（#4476） | **实验目录，不适用**。`experiments/graph_trainer/` 无 hpmesh 对应面；等义语义 hpmesh 已有（`activation_checkpoint_mode='none'`）。 |
   上一轮审计（hpmesh `8a2f269` × TorchTitan `c6e416bbd`）引用的

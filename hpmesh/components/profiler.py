@@ -194,7 +194,7 @@ class Profiler:
             self.torch_profiler.__exit__(exc_type, exc_val, exc_tb)
             self.torch_profiler = None
         if self.memory_profiler is not None:
-            if _caused_by_oom(exc_val):
+            if caused_by_oom(exc_val):
                 # The one snapshot that matters most, and the only chance to
                 # take it: the allocator still holds the state that failed.
                 self.memory_profiler.step(exit_ctx=True)
@@ -317,7 +317,7 @@ class Profiler:
         )
 
 
-def _caused_by_oom(exc: BaseException | None) -> bool:
+def caused_by_oom(exc: BaseException | None) -> bool:
     """Whether an ``OutOfMemoryError`` appears anywhere in the cause chain.
 
     The chain matters rather than just the exception type: pipeline parallelism

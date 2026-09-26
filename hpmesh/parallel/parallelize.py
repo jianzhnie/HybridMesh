@@ -55,7 +55,7 @@ from .context_parallel import apply_cp
 from .expert_parallel import apply_ep
 from .fully_shard import apply_fsdp
 from .pipeline_parallel import PipelineParallelSetup, apply_pp, build_pipeline_schedule
-from .stages import PP_STAGE_ORDER, STAGE_ORDER, _stage_enabled
+from .stages import PP_STAGE_ORDER, STAGE_ORDER, stage_enabled
 from .tensor_parallel import apply_tp
 
 logger = get_logger(__name__)
@@ -131,7 +131,7 @@ def parallelize_hf_transformers(
         }
         for i, part in enumerate(model_parts):
             for name in PP_STAGE_ORDER:
-                if _stage_enabled(name, compile=compile):
+                if stage_enabled(name, compile=compile):
                     part = pp_runners[name](part)
             model_parts[i] = part
             # Rebind the stage's submodule in case a transform replaced the chunk.
@@ -189,6 +189,6 @@ def parallelize_hf_transformers(
         "fsdp": lambda m: apply_fsdp(m, cfg, parallel_dims),
     }
     for name in STAGE_ORDER:
-        if _stage_enabled(name, compile=compile):
+        if stage_enabled(name, compile=compile):
             model = runners[name](model)
     return model

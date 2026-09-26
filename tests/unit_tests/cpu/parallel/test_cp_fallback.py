@@ -23,7 +23,7 @@ require_env('spmd_types')
 import pytest
 
 from hpmesh.parallel.context_parallel.cp_kernel import (
-    _reject_unrepresentable_attention_kwargs,
+    reject_unrepresentable_attention_kwargs,
 )
 
 
@@ -35,7 +35,7 @@ def test_the_cpu_fallback_refuses_softcap() -> None:
     dropped) fails this test rather than passing it.
     """
     with pytest.raises(NotImplementedError, match="softcap"):
-        _reject_unrepresentable_attention_kwargs(
+        reject_unrepresentable_attention_kwargs(
             {"scaling": 0.25, "softcap": 50.0, "dropout": 0.0}
         )
 
@@ -45,7 +45,7 @@ def test_the_cpu_fallback_refuses_attention_sinks() -> None:
     import torch
 
     with pytest.raises(NotImplementedError, match="s_aux"):
-        _reject_unrepresentable_attention_kwargs(
+        reject_unrepresentable_attention_kwargs(
             {"scaling": 0.25, "s_aux": torch.zeros(4)}
         )
 
@@ -69,4 +69,4 @@ def test_ordinary_flex_kwargs_pass_through(kwargs: dict) -> None:
     ``kernel_options``) are all representable, and the CPU equivalence harnesses
     drive exactly this path.
     """
-    _reject_unrepresentable_attention_kwargs(kwargs)
+    reject_unrepresentable_attention_kwargs(kwargs)

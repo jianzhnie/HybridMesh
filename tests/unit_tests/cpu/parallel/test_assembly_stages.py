@@ -10,7 +10,7 @@ from hpmesh.parallel.stages import (
     PP_STAGE_ORDER,
     STAGE_ORDER,
     STAGES,
-    _stage_enabled,
+    stage_enabled,
 )
 
 
@@ -42,8 +42,8 @@ def test_every_pp_stage_is_flagged_on_pp_and_vice_versa() -> None:
 
 def test_only_compile_is_conditional() -> None:
     for name in STAGE_ORDER:
-        assert _stage_enabled(name, compile=True) is True
-        assert _stage_enabled(name, compile=False) is (name != "compile")
+        assert stage_enabled(name, compile=True) is True
+        assert stage_enabled(name, compile=False) is (name != "compile")
 
 
 def test_every_stage_documents_why_it_sits_where_it_does() -> None:

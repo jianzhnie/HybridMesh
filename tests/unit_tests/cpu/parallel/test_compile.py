@@ -199,7 +199,7 @@ def test_async_tp_on_unsupported_torch_loud_raises() -> None:
 @requires_runtime
 def test_regional_inductor_not_triggered_without_flex() -> None:
     """CPU/sdpa model + aot_eager: the backend passes through unwrapped."""
-    backend = compile_mod._maybe_regional_inductor_backend(_model(), "aot_eager")
+    backend = compile_mod.maybe_regional_inductor_backend(_model(), "aot_eager")
     assert backend == "aot_eager"
     assert compile_mod._regional_inductor_enabled is False
 

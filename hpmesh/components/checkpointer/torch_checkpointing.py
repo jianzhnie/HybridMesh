@@ -10,7 +10,7 @@ necessary adaptation rather than a redesign.
 at module scope. Doing that here would make this file unimportable on any machine
 without the package -- which is every machine hpmesh runs on today -- and would
 take ``components/checkpointer/__init__.py`` down with it. They are hoisted into
-``_require_torch_checkpointing()`` instead, called from ``__init__``. So:
+``require_torch_checkpointing()`` instead, called from ``__init__``. So:
 
 * this module imports fine, and so does the package that re-exports it;
 * constructing a ``TorchCheckpointingManager`` without the backend installed
@@ -92,7 +92,7 @@ _INSTALL_HINT = (
 )
 
 
-def _require_torch_checkpointing():
+def require_torch_checkpointing():
     """Import the backend lazily, or fail with an actionable message.
 
     torchtitan imports these at module scope. Doing that here would make this
@@ -269,7 +269,7 @@ def _writer_config(backend: _Backend, *, use_barrier: bool):
     )
 
 
-def _async_save_config(backend: _Backend):
+def async_save_config(backend: _Backend):
     return backend.AsyncCheckpointSaverConfig(
         writer_config=_writer_config(backend, use_barrier=True),
         staging_config=backend.CheckpointStagerConfig(use_pinned_memory=True),
@@ -345,7 +345,7 @@ class TorchCheckpointingManager(BaseCheckpointManager):
         if not self.enable:
             return
 
-        backend = _require_torch_checkpointing()
+        backend = require_torch_checkpointing()
         self._backend = backend
 
         self.save_future: Future[Any] | None = None
@@ -399,7 +399,7 @@ class TorchCheckpointingManager(BaseCheckpointManager):
         save_config = (
             _sync_save_config(backend, use_barrier=False)
             if self.load_only
-            else _async_save_config(backend)
+            else async_save_config(backend)
         )
         manager_config = _default_backend_config(
             backend,

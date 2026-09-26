@@ -458,21 +458,21 @@ def test_the_grouped_mm_probe_follows_the_op(monkeypatch) -> None:
         raise RuntimeError("strides should be multiple of 16 bytes")
 
     monkeypatch.setattr(torch, "_grouped_mm", _works, raising=False)
-    assert ge._grouped_mm_available() is True
+    assert ge.grouped_mm_available() is True
 
     monkeypatch.setattr(torch, "_grouped_mm", _raises, raising=False)
-    assert ge._grouped_mm_available() is False
+    assert ge.grouped_mm_available() is False
 
     # An op that is simply absent counts as unavailable, not as an error.
     monkeypatch.delattr(torch, "_grouped_mm", raising=False)
-    assert ge._grouped_mm_available() is False
+    assert ge.grouped_mm_available() is False
 
 
 def test_the_grouped_mm_probe_agrees_with_the_real_op_here() -> None:
     """On whatever host this runs, the probe must match the actual call."""
-    from hpmesh.models.common.grouped_experts import _grouped_mm_available
+    from hpmesh.models.common.grouped_experts import grouped_mm_available
 
-    reported = _grouped_mm_available()
+    reported = grouped_mm_available()
     try:
         torch._grouped_mm(
             torch.zeros(8, 8, dtype=torch.bfloat16),
@@ -498,9 +498,9 @@ def test_the_fused_path_matches_the_loop_bit_for_bit_in_bf16() -> None:
     assertion and would hide a mis-segmented expert. Skipped where the op is
     unavailable.
     """
-    from hpmesh.models.common.grouped_experts import _grouped_mm_available
+    from hpmesh.models.common.grouped_experts import grouped_mm_available
 
-    if not _grouped_mm_available():
+    if not grouped_mm_available():
         pytest.skip("torch._grouped_mm is unavailable on this build")
 
     loop = _grouped(use_grouped_mm=False, dtype=torch.bfloat16)
@@ -536,9 +536,9 @@ def test_the_fused_path_is_refused_for_a_wider_dtype() -> None:
 
 def test_the_default_follows_the_probe() -> None:
     """``None`` means "decide here", and the decision is the probe's."""
-    from hpmesh.models.common.grouped_experts import _grouped_mm_available
+    from hpmesh.models.common.grouped_experts import grouped_mm_available
 
-    assert _grouped(use_grouped_mm=None).use_grouped_mm == _grouped_mm_available()
+    assert _grouped(use_grouped_mm=None).use_grouped_mm == grouped_mm_available()
     # An explicit value still wins, which is what lets a test pin a path.
     assert _grouped(use_grouped_mm=False).use_grouped_mm is False
     assert _grouped(use_grouped_mm=True).use_grouped_mm is True

@@ -94,7 +94,7 @@ __all__ = [
 ]
 
 
-def _process_mm_sample(
+def process_mm_sample(
     texts: list[str | None],
     images: list[bytes | None],
     tokenizer: MultiModalTokenizer,
@@ -223,7 +223,7 @@ def _process_obelics_sample(
     **kwargs,
 ) -> dict[str, Any] | None:
     """Process a sample from the OBELICS dataset (interleaved text and images)."""
-    return _process_mm_sample(
+    return process_mm_sample(
         texts=sample.get("texts", []),
         images=sample.get("images", []),
         tokenizer=tokenizer,
@@ -238,7 +238,7 @@ def _process_obelics_sample(
     )
 
 
-def _process_cc12_wd_sample(
+def process_cc12_wd_sample(
     sample: dict[str, Any],
     tokenizer: MultiModalTokenizer,
     patch_size: int,
@@ -257,7 +257,7 @@ def _process_cc12_wd_sample(
     texts = [None, text]
     images = [image, None]
 
-    return _process_mm_sample(
+    return process_mm_sample(
         texts=texts,
         images=images,
         tokenizer=tokenizer,
@@ -368,7 +368,7 @@ MM_DATASETS: dict[str, SingleDataset] = {
         ),
         processor=partial(
             MultiModalProcessor,
-            sample_processor=_process_cc12_wd_sample,
+            sample_processor=process_cc12_wd_sample,
         ),
         post_filters=(lambda sample: sample is not None,),
     ),
@@ -382,7 +382,7 @@ MM_DATASETS: dict[str, SingleDataset] = {
         ),
         processor=partial(
             MultiModalProcessor,
-            sample_processor=_process_cc12_wd_sample,
+            sample_processor=process_cc12_wd_sample,
         ),
         post_filters=(lambda sample: sample is not None,),
     ),
@@ -445,7 +445,7 @@ def build_mm_sample_packing(
     )
     return dataset_graph.map(
         partial(
-            _packing_output_to_mm_sample,
+            packing_output_to_mm_sample,
             max_context_length=context.max_context_length,
         )
     )
@@ -462,7 +462,7 @@ def _mm_sample_to_packing_input(sample: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def _packing_output_to_mm_sample(
+def packing_output_to_mm_sample(
     packing_output: dict[str, Any],
     *,
     max_context_length: int,

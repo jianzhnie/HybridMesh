@@ -56,8 +56,8 @@ from hpmesh.parallel.context_parallel import (
 )
 from hpmesh.parallel.context_parallel.cp_kernel import (
     CPFlexKernel,
-    _HeadToSeq,
-    _SeqToHead,
+    HeadToSeq,
+    SeqToHead,
 )
 from hpmesh.trainer import (
     HybridMeshConfig,
@@ -212,7 +212,7 @@ def _check_all_to_all(cp_mesh, failures: list[str]) -> dict[str, float]:
     lo, hi = rank * s // cp, (rank + 1) * s // cp
     shard = full[:, :, lo:hi].clone().requires_grad_(True)
 
-    swapped = _SeqToHead.apply(shard, group)
+    swapped = SeqToHead.apply(shard, group)
     # Full sequence, this rank's head slice -- anything else is a misplacement.
     head_lo, head_hi = rank * h // cp, (rank + 1) * h // cp
     want = full[:, head_lo:head_hi]
@@ -230,7 +230,7 @@ def _check_all_to_all(cp_mesh, failures: list[str]) -> dict[str, float]:
     if grad_diff > TOL:
         failures.append(f"all-to-all backward: grad diff {grad_diff:.3e}")
 
-    restored = _HeadToSeq.apply(swapped.detach(), group)
+    restored = HeadToSeq.apply(swapped.detach(), group)
     rt_diff = (restored - shard.detach()).abs().max().item()
     if rt_diff > TOL:
         failures.append(f"all-to-all round trip: {rt_diff:.3e}")

@@ -12,7 +12,7 @@ working and cannot disagree with the tensors in front of it.
 Two names here are hpmesh's rather than upstream's: ``next_token_targets`` and
 ``vocab_shard_bounds``. Nothing in torchtitan defines either. ``next_token_targets``
 is the row-wise label shift the trainer applies; ``vocab_shard_bounds`` is the
-bound formula lifted out of upstream's ``_LossParallelCrossEntropy.forward`` so
+bound formula lifted out of upstream's ``LossParallelCrossEntropy.forward`` so
 the vocab-parallel embedding and the vocab-parallel loss cannot disagree about
 which rank owns which token. ``IGNORE_INDEX`` is genuinely upstream.
 
@@ -125,7 +125,7 @@ def cross_entropy_loss(
     """
     if tp_group is not None and global_vocab_size is not None:
         if pred.shape[-1] != global_vocab_size:
-            return _LossParallelCrossEntropy.apply(
+            return LossParallelCrossEntropy.apply(
                 pred.float(), labels, tp_group, global_vocab_size, "sum"
             )
 
@@ -156,7 +156,7 @@ def _shard_local_labels(
     return local_labels, out_of_range
 
 
-class _LossParallelCrossEntropy(torch.autograd.Function):
+class LossParallelCrossEntropy(torch.autograd.Function):
     """Vocab-parallel cross-entropy on local ``[T, V_local]`` logits.
 
     For tensor parallelism that shards the lm_head weight on its vocab dim:
@@ -204,13 +204,13 @@ class _LossParallelCrossEntropy(torch.autograd.Function):
         local_vocab_size = max(0, vocab_end - vocab_start)
         if logits.shape[-1] != local_vocab_size:
             raise ValueError(
-                "_LossParallelCrossEntropy expected local vocab size "
+                "LossParallelCrossEntropy expected local vocab size "
                 f"{local_vocab_size} for global vocab size {global_vocab_size}, "
                 f"got {logits.shape[-1]}."
             )
         if local_vocab_size == 0:
             raise ValueError(
-                "_LossParallelCrossEntropy does not support empty vocab shards. "
+                "LossParallelCrossEntropy does not support empty vocab shards. "
                 f"Global vocab {global_vocab_size} is smaller than the TP degree "
                 f"{tp_world_size}."
             )
@@ -488,7 +488,7 @@ def compute_logprobs(
     inference generator does. Reachability note: nothing in hpmesh shards the
     lm_head yet, so today this takes the plain path -- it is here because the
     local-vocab case is the whole reason hpmesh has an
-    ``_LossParallelCrossEntropy`` at all.
+    ``LossParallelCrossEntropy`` at all.
 
     When ``return_entropy`` is set, also returns per-token Shannon entropy
     ``H(p) = logsumexp(logits) - sum(softmax(logits) * logits)``, shape ``[T]``.
@@ -504,7 +504,7 @@ def compute_logprobs(
             else:
                 # reduction="none" is the vocab-parallel path's per-token form:
                 # it returns -NLL directly, so no vocab all-gather is needed.
-                logprobs = -_LossParallelCrossEntropy.apply(
+                logprobs = -LossParallelCrossEntropy.apply(
                     logits, labels, tp_group, global_vocab_size, "none"
                 )
                 if not return_entropy:

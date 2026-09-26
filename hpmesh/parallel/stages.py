@@ -17,7 +17,7 @@ __all__ = [
     "STAGE_ORDER",
     "STAGES",
     "Stage",
-    "_stage_enabled",
+    "stage_enabled",
 ]
 
 # The order IS the contract (see parallelize.py's docstring).
@@ -74,6 +74,6 @@ STAGE_ORDER: tuple[str, ...] = tuple(stage.name for stage in STAGES)
 PP_STAGE_ORDER: tuple[str, ...] = tuple(stage.name for stage in STAGES if stage.on_pp)
 
 
-def _stage_enabled(name: str, *, compile: bool) -> bool:
+def stage_enabled(name: str, *, compile: bool) -> bool:
     """Whether a stage runs this call: only ``compile`` is conditional."""
     return name != "compile" or compile

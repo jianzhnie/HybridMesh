@@ -1,6 +1,6 @@
 """Tests for MoE-under-TP: plan specs, weight sharding, and the fail-fast matrix.
 
-The boundary collectives (``_TPMoeSequenceBoundary``'s all-gather /
+The boundary collectives (``TPMoeSequenceBoundary``'s all-gather /
 reduce-scatter pair) need a real process group, and the fused path needs CUDA;
 neither runs in this environment. What is pinned here is everything around
 them: the plan-spec resolution, the expert-weight shard layout, the
@@ -27,9 +27,9 @@ import torch.nn as nn
 from hpmesh.errors import UnsupportedCombinationError
 from hpmesh.parallel.tensor_parallel import apply_tp
 from hpmesh.parallel.tensor_parallel.tp import (
-    _MOE_PLAN_SPECS,
-    _resolve_plan,
-    _shard_experts_for_tp,
+    MOE_PLAN_SPECS,
+    resolve_plan,
+    shard_experts_for_tp,
 )
 from hpmesh.trainer import ParallelConfig
 
@@ -67,7 +67,7 @@ class _MoeBlock(nn.Module):
     """A minimal HF-style MoE block: router + fused experts, top-k routing.
 
     Carries the attributes the swap probe reads (``gate`` weight, ``top_k``)
-    so ``_is_hf_moe_block`` recognizes it.
+    so ``is_hf_moe_block`` recognizes it.
     """
 
     def __init__(self, num_experts: int, dim: int, hidden: int, top_k: int) -> None:
@@ -136,7 +136,7 @@ def _applied_model(tp_size: int, tp_rank: int, seed: int = 0) -> _MoeModel:
 
 
 def test_moe_plan_specs_resolve_instead_of_raising() -> None:
-    plan = _resolve_plan(_MoeModel(), None)
+    plan = resolve_plan(_MoeModel(), None)
     assert set(plan) == set(MOE_PLAN)
     # The MoE spec strings resolve to None: nothing for the per-Linear engine
     # to swap; the structural MoE path realizes them. "rowwise" on the packed
@@ -152,7 +152,7 @@ def test_ep_plan_strings_still_raise_on_the_tp_path() -> None:
         _tp_plan = {"layers.*.mlp.experts.gate_up_proj": "grouped_gemm"}
 
     with pytest.raises(ValueError, match="Unsupported TP plan entry"):
-        _resolve_plan(M(), None)
+        resolve_plan(M(), None)
 
 
 # -- weight sharding ----------------------------------------------------------
@@ -168,7 +168,7 @@ def test_expert_shards_reconstruct_the_full_weights() -> None:
     for rank in range(2):
         torch.manual_seed(0)
         b = _MoeBlock(num_experts=4, dim=16, hidden=8, top_k=2)
-        ids = _shard_experts_for_tp(b, tp_size=2, tp_rank=rank)
+        ids = shard_experts_for_tp(b, tp_size=2, tp_rank=rank)
         assert id(b.experts.gate_up_proj) in ids
         assert id(b.experts.down_proj) in ids
         # The router is never sharded.
@@ -207,7 +207,7 @@ def test_partial_expert_outputs_sum_to_the_unsharded_reference() -> None:
     for rank in range(2):
         torch.manual_seed(0)
         block = _MoeBlock(num_experts=4, dim=16, hidden=8, top_k=2)
-        _shard_experts_for_tp(block, tp_size=2, tp_rank=rank)
+        shard_experts_for_tp(block, tp_size=2, tp_rank=rank)
         with torch.no_grad():
             contribution = block(x)
         partial = contribution if partial is None else partial + contribution
@@ -220,7 +220,7 @@ def test_partial_expert_outputs_sum_to_the_unsharded_reference() -> None:
 def test_shard_experts_raises_when_f_is_not_divisible() -> None:
     block = _MoeBlock(num_experts=4, dim=16, hidden=6, top_k=2)
     with pytest.raises(ValueError, match="not divisible"):
-        _shard_experts_for_tp(block, tp_size=4, tp_rank=0)
+        shard_experts_for_tp(block, tp_size=4, tp_rank=0)
 
 
 # -- engine behavior ----------------------------------------------------------
@@ -244,7 +244,7 @@ def test_apply_tp_shards_the_block_and_keeps_state_dict_fqns() -> None:
     assert torch.equal(block.gate.weight, router_before)
     # The boundary mixin and the grad-allreduce exclusion marker are installed.
     assert block._tp_seq_group is not None or hasattr(block, "_tp_seq_group")
-    assert block._tp_sharded_param_ids == frozenset(
+    assert block.tp_sharded_param_ids == frozenset(
         {id(block.experts.gate_up_proj), id(block.experts.down_proj)}
     )
 
@@ -315,7 +315,7 @@ def test_apply_tp_defers_the_moe_blocks_to_ep_when_ep_is_on() -> None:
     # No F-sharding, no boundary mixin, no exclusion marker.
     assert block.experts.gate_up_proj.shape == (4, 16, 16)
     assert block.experts.down_proj.shape == (4, 16, 8)
-    assert not hasattr(block, "_tp_sharded_param_ids")
+    assert not hasattr(block, "tp_sharded_param_ids")
     assert "_tp_moe_boundary" not in block.__dict__
     assert not type(block).__name__.startswith("TPMoe")
     for k, v in model.state_dict().items():
@@ -334,14 +334,14 @@ def test_swap_refuses_a_shared_expert_block_under_tp_x_ep() -> None:
 def test_tp_sharded_param_ids_covers_dense_tp_and_ep_experts_not_router() -> None:
     from hpmesh.models.common.grouped_experts import GroupedExperts
     from hpmesh.parallel.tensor_parallel.tp import ColumnParallelLinear
-    from hpmesh.trainer.trainer import _tp_sharded_param_ids
+    from hpmesh.trainer.trainer import tp_sharded_param_ids
 
     grouped = GroupedExperts(dim=8, hidden_dim=4, num_experts=2)
     router = nn.Linear(8, 2, bias=False)
     dense_tp = ColumnParallelLinear(torch.randn(8, 8), tp_size=2, tp_rank=0, group=None)
     part = nn.ModuleDict({"ge": grouped, "gate": router, "proj": dense_tp})
 
-    ids = _tp_sharded_param_ids([part])
+    ids = tp_sharded_param_ids([part])
     assert id(dense_tp.weight) in ids  # dense TP shard
     for p in grouped.parameters():
         assert id(p) in ids  # EP expert slice: grad complete per rank
@@ -356,4 +356,4 @@ def test_tp_one_leaves_a_moe_model_bit_identical() -> None:
     assert apply_tp(model, mesh=None, cfg=cfg) is model
     for k, v in model.state_dict().items():
         assert torch.equal(v, before[k])
-    assert "moe_tp_experts" in _MOE_PLAN_SPECS
+    assert "moe_tp_experts" in MOE_PLAN_SPECS
