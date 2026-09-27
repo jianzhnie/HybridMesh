@@ -23,8 +23,9 @@ runtime schedules, which are rejected rather than honored.
 from __future__ import annotations
 
 import math
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
+from typing import Any
 
 import torch
 import torch.nn as nn
@@ -77,15 +78,50 @@ def _scalar_loss_fn(
     trainer's pair-returning version cannot be handed over -- this is the same
     computation in the shape the schedule needs.
 
-    ``global_valid_tokens`` arrives through the schedule's ``loss_kwargs`` (it
-    has to: the denominator spans every rank and every microbatch, so no single
-    call could compute it). Dividing here is what makes the schedule's own
-    backward produce summed/G -- the step's normalized gradient -- with one
-    division per microbatch instead of a rescale applied afterwards.
+    ``global_valid_tokens`` is handed in by :func:`make_schedule_loss_fn` (it
+    has to be passed down: the denominator spans every rank and every
+    microbatch, so no single call could compute it). Dividing here is what
+    makes the schedule's own backward produce summed/G -- the step's normalized
+    gradient -- with one division per microbatch instead of a rescale applied
+    afterwards.
 
     The caller divides it back out for reporting.
     """
     return cross_entropy_loss(pred, labels) / loss_kwargs["global_valid_tokens"]
+
+
+def make_schedule_loss_fn(
+    schedule: _PipelineSchedule,
+) -> Callable[..., torch.Tensor]:
+    """The schedule's ``loss_fn``, reading the denominator from either route.
+
+    The two schedule drivers hand ``global_valid_tokens`` over differently, and
+    this is the one place that difference is absorbed:
+
+    * Torch's public ``PipelineSchedule.step`` forwards ``loss_kwargs`` into
+      ``loss_fn(output, target, **loss_kwargs)``. That is upstream torchtitan's
+      wiring, and the kwarg therefore wins when it is present.
+    * The private pre-split driver (``_step_microbatches``, which llmtuner uses
+      so its already-cut micro-batches are not re-split) has no loss-kwargs
+      parameter at all; the denominator is read off the schedule attribute that
+      ``pp_forward_backward_body`` publishes before every call.
+
+    Returning the closure rather than a lambda also makes this testable without
+    a live pipeline, which a lambda defined inline could not be.
+    """
+
+    def _schedule_loss_fn(
+        pred: torch.Tensor, labels: torch.Tensor, **loss_kwargs: Any
+    ) -> torch.Tensor:
+        return _scalar_loss_fn(
+            pred,
+            labels,
+            global_valid_tokens=loss_kwargs.get(
+                "global_valid_tokens", schedule._llmtuner_global_valid_tokens
+            ),
+        )
+
+    return _schedule_loss_fn
 
 
 def _get_pipeline_metadata(
@@ -355,12 +391,17 @@ def build_pipeline_schedule(
     # kwargs itself; llmtuner has already built microbatches because positions
     # and labels are sequence-sharded before PP. Keep the denominator as a
     # per-step schedule attribute and use the internal pre-split driver below.
+    #
+    # The ``loss_fn=`` handed to the constructor above is a placeholder: the
+    # real one has to read the schedule object that only exists after the
+    # constructor returns, so it is installed here.
+    #
+    # ``make_schedule_loss_fn`` absorbs the one difference between the two
+    # drivers: the public ``step`` carries the denominator in ``loss_kwargs``
+    # (upstream torchtitan's wiring), the private pre-split driver reads it off
+    # the schedule attribute that the body republishes on every call.
     schedule._llmtuner_global_valid_tokens = torch.ones((), dtype=torch.float32)
-    schedule._loss_fn = lambda pred, labels: _scalar_loss_fn(
-        pred,
-        labels,
-        global_valid_tokens=schedule._llmtuner_global_valid_tokens,
-    )
+    schedule._loss_fn = make_schedule_loss_fn(schedule)
     logger.info(
         f"Using pipeline schedule {parallelism.pipeline_parallel_schedule} "
         f"with {num_microbatches} microbatches and {num_total_stages} stages."

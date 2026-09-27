@@ -115,16 +115,16 @@ def pp_activation_checkpoint() -> None:
 
 
 def pp_validation() -> None:
-    """The pipeline schedule is driven through its training seam (the loss is computed
-    and backwarded inside the schedule step); there is no eval-only pipeline
-    path.
+    """llmtuner wires only the pipeline schedule's training driver, so a validation pass
+    has no driver of its own to run on.
     """
     raise UnsupportedCombinationError(
         "validation with pipeline parallelism is not supported: "
-        "llmtuner drives the pipeline schedule through its training "
-        "seam, where the last stage's loss is computed and backwarded "
-        "inside the schedule step. There is no eval-only pipeline "
-        "path; run validation with pipeline_parallel_size=1."
+        "llmtuner wires the pipeline schedule for training only -- the "
+        "last stage's loss is computed and backwarded inside the schedule "
+        "step, and the loss denominator rides on the schedule object "
+        "(trainer/pp_steps.py). An eval driver is not wired to that "
+        "seam; run validation with pipeline_parallel_size=1."
     )
 
 

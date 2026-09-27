@@ -43,11 +43,11 @@ def check_validation_feasibility(
           and loss reductions every rank must enter together).
         * ``steps=-1`` against the synthetic corpus has no exhaustion at all:
           the random source is infinite, so "one finite pass" never ends.
-        * Pipeline parallelism drives the schedule through a train-shaped seam
-          (the loss is computed and backwarded *inside* the schedule step);
-          there is no eval-only pipeline path to run a validation pass
-          through, so the combination loud-raises rather than silently
-          skipping validation or training on the pass.
+        * llmtuner wires the pipeline schedule for training only (the loss is
+          computed and backwarded *inside* the schedule step, and the loss
+          denominator is published on the schedule object); the schedule's own
+          eval driver is not wired to that seam, so the combination loudly
+          rejects rather than silently skipping validation or training.
         """
     if pp_enabled:
         matrix.pp_validation()

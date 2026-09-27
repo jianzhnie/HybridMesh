@@ -90,6 +90,7 @@ calls into, not loop logic, and llmtuner has no counterparts to call.
 
 from __future__ import annotations
 
+import os
 from collections.abc import Iterable, Iterator
 from contextlib import nullcontext
 from datetime import timedelta
@@ -241,7 +242,22 @@ class Trainer:
         if device_type != "cpu":
             device_module.manual_seed_all(seed)
         if deterministic:
+            # torchtitan's ``set_determinism``, minus the parts that only exist
+            # for its own stack (the DTensor mesh-aware RNG tracker, the
+            # flex-attention kernels) and plus this one spelled out:
+            # ``use_deterministic_algorithms(True)`` turns on
+            # ``fill_uninitialized_memory``, whose fill kernel races with side
+            # streams and is what made HF's RoPE init observe NaN, so upstream
+            # turns it back off for the same reason.
+            #
+            # ``warn_only=False`` is llmtuner's fixed, stricter setting;
+            # upstream reads it from ``debug.deterministic_warn_only``.
             torch.use_deterministic_algorithms(True, warn_only=False)
+            torch.backends.cudnn.deterministic = True
+            torch.backends.cudnn.benchmark = False
+            torch.utils.deterministic.fill_uninitialized_memory = False
+            # Deterministic cuBLAS needs a workspace split, not the default one.
+            os.environ["CUBLAS_WORKSPACE_CONFIG"] = ":4096:8"
 
     # -- batch handling (bodies live in batch.py) -------------------------------
 
@@ -323,6 +339,13 @@ class Trainer:
 
         A *group*, not a micro-batch: with pipeline parallelism one group is one
         schedule step, which internally drives several micro-batches.
+
+        The returned tensor is the **un-normalized** token sum. The division by
+        ``global_valid_tokens`` happens inside this call's graph, so the
+        gradients are normalized already; ``train_step`` applies it again when
+        it reports. torchtitan normalizes inside its ``loss_fn`` and returns the
+        normalized value instead -- the numbers agree either way, but the tensor
+        that comes back from here is *not* an average.
 
         Two bodies, matching torchtitan's split. The PP one takes the raw batch
         and calls ``preprocess_inputs`` itself, once per schedule micro-batch;
@@ -487,11 +510,18 @@ class Trainer:
     def _param_context(self):
         """The context a forward/backward runs inside.
 
-        Currently a placeholder: it is where activation checkpointing and the
-        no-typecheck region go, both of which torchtitan wraps around the body.
-        Returning ``nullcontext`` rather than inlining nothing keeps the seam
-        visible, so it is added by naming it -- not by threading a parameter
-        through a function that has since grown around its absence.
+        Currently empty (``nullcontext``), and kept as a named, mockable seam
+        rather than inlined because three bodies share it: the non-PP body, the
+        PP schedule body and validation; the tests substitute ``nullcontext``
+        for it.
+
+        This is *not* where activation checkpointing lives. AC is applied in the
+        parallel layer (``parallel/parallelize.py``'s ``apply_ac`` stage, fed by
+        ``builder``), which is where torchtitan applies its ``ac_config`` too --
+        not around the loop body. The one upstream wrapper with no counterpart
+        here is ``spmd.no_typecheck()`` around ``loss.backward()``; it was
+        dropped deliberately (see ``models/common/rope.py``), because it is a
+        type-checker annotation with no runtime effect on this path.
         """
         return nullcontext()
 
@@ -622,7 +652,18 @@ class Trainer:
         accumulated_loss: torch.Tensor | None = None
         # int32 is supported by NCCL reductions, unlike bool.
         loss_is_finite = torch.ones((), dtype=torch.int32, device=self.device)
-        for microbatch in microbatches:
+        for accumulation_index, microbatch in enumerate(microbatches):
+            # HSDP needs the replicate all-reduce once per optimizer step, not
+            # once per accumulation group: every group but the last accumulates
+            # into the local replica, and the flag is turned back on for the
+            # last one, which then reduces the accumulated total. This is
+            # torchtitan's ``forward_backward_microbatch`` toggle; its
+            # ``disable_cuda_graphs`` disjunct is unconditional here because
+            # llmtuner runs no graph path.
+            if parallel_dims is not None and parallel_dims.dp_replicate_enabled:
+                is_last = accumulation_index == len(microbatches) - 1
+                for part in self.model_parts:
+                    part.set_requires_all_reduce(is_last)
             detached_loss = self.forward_backward_step(
                 microbatch, global_valid_tokens=global_valid_tokens
             )
@@ -925,6 +966,13 @@ class Trainer:
                         # partial batch: a batch's worth of tokens either all
                         # contribute to a gradient or none of them do.
                         logger.warning("Ran out of data; the last step was canceled.")
+                        # ``self.step`` counts *completed* optimizer steps, so
+                        # the abandoned one is given back. torchtitan's
+                        # ``num_completed_steps`` only advances at the end of a
+                        # successful update, and a counter that kept this step
+                        # would make ``state_dict`` resume past a step whose
+                        # weights were never updated.
+                        self.step -= 1
                         break
 
                     if step_metrics is not None:

@@ -14,10 +14,13 @@ from tests.caps import require_env
 require_env('pipelining', 'flex_attention', 'spmd_types')
 
 
+from types import SimpleNamespace
+
 import pytest
 import torch
 import torch.distributed as dist
 import torch.nn as nn
+import torch.nn.functional as F
 from torch.distributed.device_mesh import init_device_mesh
 
 from llmtuner.models.hf_factory import build_model_config
@@ -25,6 +28,7 @@ from llmtuner.models.hf_wrapper import HFTransformerModel
 from llmtuner.parallel.parallel_dims import ParallelDims
 from llmtuner.parallel.pipeline_parallel.apply import (
     apply_pp,
+    make_schedule_loss_fn,
     prepend_first_stage_modules,
     validate_microbatches,
 )
@@ -404,3 +408,32 @@ def test_split_without_first_stage_modules_is_unchanged(pp_mesh) -> None:
         assert not any(
             k.startswith("vision_encoder.") for k, _ in part.named_parameters()
         )
+
+
+def test_schedule_loss_fn_reads_the_denominator_from_either_route() -> None:
+    """Both schedule drivers must reach the same loss, denominator included.
+
+    Torch's public ``step`` forwards ``loss_kwargs`` into the loss function,
+    while llmtuner's pre-split driver leaves the denominator on the schedule
+    attribute. A loss function wired for only one of the two would make the
+    other path raise -- ``TypeError`` for the kwarg route, ``KeyError`` for the
+    attribute route -- so the routes are pinned to agree here, without needing
+    a live pipeline.
+    """
+    schedule = SimpleNamespace(
+        _llmtuner_global_valid_tokens=torch.tensor(4.0),
+    )
+    loss_fn = make_schedule_loss_fn(schedule)
+
+    torch.manual_seed(0)
+    pred = torch.randn(6, 5)
+    labels = torch.randint(0, 5, (6,))
+    reference = F.cross_entropy(pred, labels, reduction="sum")
+
+    # The kwarg wins when the public ``step`` supplies it ...
+    torch.testing.assert_close(
+        loss_fn(pred, labels, global_valid_tokens=torch.tensor(2.0)),
+        reference / 2.0,
+    )
+    # ... and the published attribute is the fallback the private driver needs.
+    torch.testing.assert_close(loss_fn(pred, labels), reference / 4.0)

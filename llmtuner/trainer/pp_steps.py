@@ -81,11 +81,13 @@ def pp_forward_backward_body(
         the sequence, which is why the caller's denominator -- counted before
         the sequence was cut up -- is the right one.
 
-        ``global_valid_tokens`` is threaded to the schedule through
-        ``loss_kwargs``, where the loss function divides by it before the
-        schedule's backward. The losses the schedule reports are therefore
-        sum/G, and they are multiplied back by G here so the caller keeps
-        receiving the raw sum it normalizes and reports.
+        ``global_valid_tokens`` reaches the loss function before the
+        schedule's backward -- through ``loss_kwargs`` on the public ``step``,
+        or the ``_llmtuner_global_valid_tokens`` schedule attribute on the
+        private pre-split driver -- and it divides there. The losses the
+        schedule reports are therefore sum/G, and they are multiplied back by
+        G here so the caller keeps receiving the raw sum it normalizes and
+        reports.
 
         The token count is not taken here: the caller needs it before the
         micro-batches are cut, and a stage's count would be over its own slice.
@@ -103,12 +105,17 @@ def pp_forward_backward_body(
 
     losses: list[torch.Tensor] | None = [] if self.pp_has_last_stage else None
     with self._param_context(), spmd_context(self.parallel_dims):
-        # ``_step_microbatches`` is the Torch 2.10-compatible equivalent
-        # of the older public ``step(arg_mbs=..., kwarg_mbs=...)`` seam.
-        # The public API would split the already-split lists as kwargs and
-        # attempts to shard scalar loss kwargs along dimension 0.
+        # ``_step_microbatches`` is the pre-split driver behind torch's public
+        # ``step``, and it is used directly when present: the wrapper re-splits
+        # the arguments it is handed, which is wrong for lists llmtuner already
+        # cut (the sequence was CP/TP-sharded before PP). The public call --
+        # upstream torchtitan's exact call -- stays as the fallback for builds
+        # whose private driver is absent. Both read the same loss function;
+        # only the denominator's route in differs, so it is published on the
+        # schedule before either runs, and ``loss_kwargs`` wins when the public
+        # path supplies it.
+        self.pp_schedule._llmtuner_global_valid_tokens = global_valid_tokens
         if hasattr(self.pp_schedule, "_step_microbatches"):
-            self.pp_schedule._llmtuner_global_valid_tokens = global_valid_tokens
             self.pp_schedule._step_microbatches(
                 arg_mbs if self.pp_has_first_stage else None,
                 kwarg_mbs,
