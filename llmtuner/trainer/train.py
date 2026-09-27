@@ -56,31 +56,21 @@ from llmtuner.config import (
     ProfilerConfig,
     TrainingConfig,
 )
+from llmtuner.config.cli import PARSER_GROUPS, cli_groups
 from llmtuner.errors import ConfigError
 
 from .trainer import Trainer
 
-# Parser order is significant: parse_args_into_dataclasses() returns one
-# instance per class in this exact order.
-_GROUP_CLASSES = (
-    ModelConfig,
-    ParallelConfig,
-    OptimizerConfig,
-    LRSchedulerConfig,
-    TrainingConfig,
-    CheckpointConfig,
-    DataloaderConfig,
-    MetricsConfig,
-    ProfilerConfig,
-)
-
 
 def parse_config() -> LLMTunerConfig:
-    parser = HfArgumentParser(list(_GROUP_CLASSES))
+    # ``PARSER_GROUPS`` is the parser's group set and order (see
+    # ``config/cli.py``, which also explains the views ``cli_groups`` builds:
+    # they hide the fields the CLI cannot carry). Parsing returns one instance
+    # per view, in that order, so the two tuples zip; the instances are
+    # subclasses of the groups, which is how they are keyed below.
+    parser = HfArgumentParser(list(cli_groups(PARSER_GROUPS)))
     # Each group is its own parser group, so every scalar field becomes a flag.
-    parsed = dict(
-        zip(_GROUP_CLASSES, parser.parse_args_into_dataclasses(), strict=True)
-    )
+    parsed = dict(zip(PARSER_GROUPS, parser.parse_args_into_dataclasses(), strict=True))
     cfg = LLMTunerConfig.from_groups(
         model=parsed[ModelConfig],
         parallel=parsed[ParallelConfig],

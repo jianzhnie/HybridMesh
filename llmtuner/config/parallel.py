@@ -191,7 +191,7 @@ class ParallelConfig:
       handed a mask over a different order than the tokens it is attending.
     """
 
-    context_parallel_load_balancer: str | None = "headtail"
+    context_parallel_load_balancer: str | None = None
     """
     Load balancer type for context parallelism. Options:
     - "headtail": Use HeadTailLoadBalancer for SDPA
@@ -200,7 +200,9 @@ class ParallelConfig:
       (``parallel/context_parallel/input_shard.py``), because it needs a
       BlockMask to derive its schedule from and llmtuner's kernel does not
       consume one. Use "headtail" or None.
-    - None: Disable load balancing
+    - None (default): contiguous input sharding, upstream's own default. The
+      balanced split is opt-in -- it changes which tokens each rank attends,
+      so it is never chosen on a user's behalf.
     """
     expert_parallel_size: int = 1
     """

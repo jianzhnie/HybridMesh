@@ -187,8 +187,10 @@ PYTHONPATH=. torchrun --nproc_per_node=2 tests/integration_tests/cp_wiring_equiv
 - **routed experts 上的纯 TP 是有意保留的差异**：上游已弃用该路径并加了守卫，llmtuner
   的结构化实现（沿 F 维原地切分 + 块边界 AG/RS 对偶）不需要复制 token，因此不照搬守卫，
   见 §8 第 11 条。
-- **vocab 分片的 `lm_head` + 端到端 vocab-parallel loss 未接线**：`components/loss.py`
-  的数学与 CPU 等价性测试就位，缺的是模型/训练器侧的两步接线（登记为 D 类）。
+- **vocab 分片的 `lm_head` + 端到端 vocab-parallel loss 完成第一步**：loss 侧已接线
+  （四个调用点收 `tp_group`/`global_vocab_size`，按形状分派，复制 head 下逐位不变），
+  缺的是模型侧第二步——head 真分片 + "head 已分片但 loss 未被告知" 时的 loud-raise，
+  需多卡环境复跑（登记为 D 类两步走）。
 - 本机（Intel macOS / torch 2.2.2）只能验证 `import llmtuner` 与 CPU 单测；多卡、
   数值等价性与端到端 smoke 都需要 torch≥2.12 + 多卡或目标设备。
 

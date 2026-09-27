@@ -13,24 +13,36 @@ test cannot pass by the constructor rejecting everything.
 
 from __future__ import annotations
 
-from tests.caps import require_env
+from tests.caps import require_env, skip_without
 
-require_env('dtensor')
+# ``ParallelConfig.__post_init__`` imports ``torch.distributed.pipelining`` to
+# validate the schedule name, so *every* config construction needs it -- that,
+# not DTensor, is this module's hard dependency. The two tests that also read
+# the checkpointer's state keys carry their own ``dcp`` guard below.
+require_env("pipelining")
 
+
+import re
 
 import pytest
+import torch
+from transformers import HfArgumentParser
 
-from llmtuner.components.checkpointer import LR_SCHEDULER, MODEL, OPTIMIZER
 from llmtuner.config import (
     CheckpointConfig,
     CompileConfig,
+    DataloaderConfig,
+    LLMTunerConfig,
     LRSchedulerConfig,
     MemoryBudgetACConfig,
     MetricsConfig,
+    ModelConfig,
+    OptimizerConfig,
     ParallelConfig,
     ProfilerConfig,
     TrainingConfig,
 )
+from llmtuner.config.cli import PARSER_GROUPS, cli_groups
 from llmtuner.errors import UnsupportedCombinationError
 
 # -- ParallelConfig ----------------------------------------------------------
@@ -124,28 +136,50 @@ def test_ulysses_cannot_share_a_load_balancer() -> None:
     so the order the mask was built and sharded in -- is recoverable from the
     rearranged shards by the all-gather.
 
-    Worth noting how easy this is to trip: the load balancer defaults to
-    ``'headtail'``, so selecting ``ulysses`` on its own is already the illegal
-    pairing -- the user has to actively turn the balancer off.
+    The balancer defaults to ``None`` (contiguous sharding), so the illegal
+    pairing has to be asked for: it is the *combination* that is refused, not
+    ulysses on its own.
     """
     with pytest.raises(
         UnsupportedCombinationError, match="requires.*load_balancer=None"
     ):
-        ParallelConfig(context_parallel_strategy="ulysses")
+        ParallelConfig(
+            context_parallel_strategy="ulysses",
+            context_parallel_load_balancer="headtail",
+        )
+    # Ullysses alone is legal, and so is the default balancer for the default
+    # strategy -- the refusal is exactly the pair.
+    assert (
+        ParallelConfig(context_parallel_strategy="ulysses").context_parallel_strategy
+        == "ulysses"
+    )
 
     cfg = ParallelConfig(
         context_parallel_strategy="ulysses",
         context_parallel_load_balancer=None,
     )
     assert cfg.context_parallel_load_balancer is None
-    # The default strategy keeps the default balancer; the pairing is only
-    # constrained the other way round.
-    assert ParallelConfig().context_parallel_load_balancer == "headtail"
+    # The default balancer is upstream's: None means contiguous sharding, and
+    # the balanced split is opt-in. The pairing is only constrained the other
+    # way round, so this is the one direction that must hold.
+    assert ParallelConfig().context_parallel_load_balancer is None
 
 
+def _symm_mem_supported() -> bool:
+    """Mirror of the guard in ``ParallelConfig.__post_init__``.
+
+    Symmetric memory needs a device that can do it: any ROCm build, or an
+    NVIDIA one at compute capability 9.0+. The test below pins the *rejection*,
+    so it is only meaningful where this is False.
+    """
+    if not torch.cuda.is_available():
+        return False
+    return torch.version.hip is not None or torch.cuda.get_device_capability() >= (9, 0)
+
+
+@pytest.mark.skipif(_symm_mem_supported(), reason="needs a device below CC 9.0")
 def test_symmetric_memory_is_rejected_off_a_supported_device() -> None:
     """On a machine without the capability there is no silent fallback to catch."""
-    # The development machine is CPU-only, so this is the unsupported path.
     with pytest.raises(ValueError, match="compute capability 9.0"):
         ParallelConfig(enable_fsdp_symm_mem=True)
 
@@ -208,18 +242,24 @@ def test_negative_retention_is_rejected() -> None:
         CheckpointConfig(keep_latest_k=-1)
 
 
+@skip_without("dcp")
 def test_the_model_can_never_be_excluded_from_a_load() -> None:
     """Loading everything *except* the weights is never what a user means."""
+    from llmtuner.components.checkpointer import MODEL
+
     with pytest.raises(ValueError, match="shouldn't be in exclude_from_loading"):
         CheckpointConfig(exclude_from_loading=[MODEL])
 
 
+@skip_without("dcp")
 def test_excluding_the_optimizer_must_exclude_the_schedule_too() -> None:
     """``LRSchedulersContainer`` reads ``base_lrs`` off the optimizers it restores.
 
     A schedule without its optimizers would restore against a cold optimizer and
     silently restart the lr curve. The pairing is enforced rather than inferred.
     """
+    from llmtuner.components.checkpointer import LR_SCHEDULER, OPTIMIZER
+
     with pytest.raises(ValueError, match=f"{LR_SCHEDULER} must be excluded"):
         CheckpointConfig(exclude_from_loading=[OPTIMIZER])
     # The paired form is accepted.
@@ -340,8 +380,6 @@ def test_profiling_must_fit_one_cycle_into_the_interval() -> None:
 
 def test_accumulation_and_gc_freq_reach_the_flat_view() -> None:
     """The trainer reads both off ``cfg``, not off ``cfg.training``."""
-    from llmtuner.trainer import LLMTunerConfig
-
     cfg = LLMTunerConfig(
         training=TrainingConfig(gradient_accumulation_steps=3, gc_freq=7)
     )
@@ -354,10 +392,72 @@ def test_accumulation_and_gc_freq_reach_the_flat_view() -> None:
 
 def test_cp_must_divide_seq_len() -> None:
     """A ragged sequence split would give ranks unequal token counts."""
-    from llmtuner.trainer import LLMTunerConfig
-
     with pytest.raises(ValueError):
         LLMTunerConfig(
             parallel=ParallelConfig(context_parallel_size=3),
             training=TrainingConfig(max_seq_len=64),
         )
+
+
+# -- the CLI view -------------------------------------------------------------
+
+
+def test_the_fields_the_cli_cannot_carry_are_not_offered_as_flags() -> None:
+    """A flag that rejects every value is worse than no flag.
+
+    ``arch_overrides`` (a dict), ``param_groups`` (a list of nested
+    dataclasses) and ``purge_exempt`` (a callable) are programmatic-only, and
+    ``HfArgumentParser`` rejects any value given to them -- but it still lists
+    them in ``--help``, looking usable. ``cli_groups`` hides them by handing the
+    parser an ``init=False`` view of each group; this pins that, and pins the
+    flags that must *not* disappear with them.
+
+    Matched as option lines, not substrings: the prose of neighbouring help
+    strings legitimately mentions these names (e.g. "``purge_exempt=None``").
+    """
+    parser = HfArgumentParser(list(cli_groups(PARSER_GROUPS)))
+    help_text = parser.format_help()
+
+    for hidden in ("arch_overrides", "param_groups", "purge_exempt"):
+        assert not re.search(rf"^\s+--{hidden}\b", help_text, re.M), hidden
+    for kept in ("tensor_parallel_size", "learning_rate", "steps"):
+        assert re.search(rf"^\s+--{kept}\b", help_text, re.M), kept
+
+
+def test_the_cli_view_parses_into_the_real_groups() -> None:
+    """The views are drop-in: defaults, ``__post_init__`` and ``isinstance``.
+
+    ``parse_args_into_dataclasses`` returns the subclasses ``cli_groups``
+    generates, so every passthrough the graft table keys by group still works --
+    and the hidden fields keep the group's own defaults rather than becoming
+    missing attributes.
+    """
+    parser = HfArgumentParser(list(cli_groups(PARSER_GROUPS)))
+    parsed = parser.parse_args_into_dataclasses(
+        ["--vocab_size", "64", "--tensor_parallel_size", "2", "--learning_rate", "1e-3"]
+    )
+    by_group = dict(zip(PARSER_GROUPS, parsed, strict=True))
+
+    for group, instance in by_group.items():
+        assert isinstance(instance, group), group.__name__
+
+    cfg = LLMTunerConfig.from_groups(
+        model=by_group[ModelConfig],
+        parallel=by_group[ParallelConfig],
+        optimizer=by_group[OptimizerConfig],
+        lr_scheduler=by_group[LRSchedulerConfig],
+        training=by_group[TrainingConfig],
+        checkpoint=by_group[CheckpointConfig],
+        dataloader=by_group[DataloaderConfig],
+        metrics=by_group[MetricsConfig],
+        profiler=by_group[ProfilerConfig],
+    )
+    assert cfg.model.vocab_size == 64
+    assert cfg.parallel.tensor_parallel_size == 2
+    assert cfg.optimizer.learning_rate == 1e-3
+    # The hidden fields are the group defaults, not absent.
+    assert cfg.model.arch_overrides == {}
+    assert cfg.checkpoint.purge_exempt is None
+    # ``__post_init__`` still ran: no explicit param_groups means the
+    # catch-all group the optimizer builds for a run.
+    assert len(cfg.optimizer.param_groups) == 1

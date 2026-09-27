@@ -166,7 +166,7 @@ step 1 恢复 optimizer、scheduler、dataloader 和 train state 后完成并保
 |---|---|---|
 | `resolve_fsdp_mesh`, `resolve_sparse_fsdp_mesh` | `distributed/fsdp.py` mesh dims | llmtuner 把多轴 mesh 重建为 FSDP 可理解的 1D/2D mesh，**通过（适配）** |
 | `apply_fsdp_to_decoder` | 同名上游函数 | 支持 HF ModuleList、MoE expert placement、prefetch。2026-09-23 移植上游 4b5023b80 同源修复：专家分片度经 `_fsdp_shard_degree` 只计 shard 轴，HSDP 下不再误选 `Shard(1)`，**通过（适配）** |
-| `enable_fsdp_symm_mem` | 同名上游函数 | 2026-09-23 起支持 `scope="all"/"dense"/None`（上游 65e495dda），非法 scope 抛 ValueError；经 `fsdp_symm_mem_scope` config 字段（默认 "all"）对用户开放，**通过（适配）** |
+| `enable_fsdp_symm_mem` | 同名上游函数 | 2026-09-23 起支持 `scope="all"/"dense"/None`（上游 65e495dda），非法 scope 抛 ValueError；经 `fsdp_symm_mem_scope` config 字段（默认 "all"）对用户开放，**通过（适配）**。2026-09-27 复核：上游把"关"表达为 `fsdp_symm_mem_scope=None`（单字段，且 `tyro.conf.Suppress` 不进 CLI），llmtuner 拆成 `enable_fsdp_symm_mem=False` + `fsdp_symm_mem_scope="all"` 两字段并允许 CLI 传入——**默认语义等价**（两个默认都是关；scope 默认值在 enable=False 时不可达），差异只在形态与可见性，故不改 |
 | `disable_fsdp_gradient_division` | 同名上游 helper | global valid-token loss 自行缩放，故禁用 FSDP 平均，**通过** |
 | `apply_fsdp` | 各模型 `parallelize.py` 的 driver | 固定 dtype 策略，非 NCCL 强制 SUM；兼容 Torch 2.10 类型缺失，**通过（适配）**。配置面收窄登记：`cpu_offload` 未接线（`fully_shard/apply.py` 恒 `False`），param/reduce dtype 固定（模型 dtype / fp32），所有 DP 轴为 1 时不装 MixedPrecisionPolicy（数值等价） |
 
@@ -439,13 +439,14 @@ helper 在前文涉及关键算法时单列。成组条目（`config/`、`traine
 | `parallel/fully_shard/apply.py` | `apply_fsdp` HF driver | B，各模型 parallelize |
 | `parallel/parallel_dims.py`（`build_parallel_dims` / `build_mesh` 2026-09-25 自 `accelerator/mesh.py` 并入） | `ParallelDims` 与 mesh accessors、dims/mesh/distributed init | A2，`distributed/parallel_dims.py`；mesh 构建段上游无单一对应物 |
 | `parallel/head_sharding.py`（2026-09-27） | attention 头数整除守卫：`apply_tp` 的 `% tp` 与 ulysses CP 的 `% (tp*cp)` 共用一个实现 | B，`config/validation.py::validate_context_parallel` 的 `head_shard_degree`（上游在解析期校验，llmtuner 在装配期，因为头数只存在于模型 config 里） |
+| `parallel/context_parallel/apply.py` 读的 `context_parallel_load_balancer` 默认值（2026-09-27） | CP 输入分片是否做 headtail 均衡 | B，`config/parallelism.py` 的 `context_parallel_load_balancer`（上游默认 `None`=连续分片，headtail 由 recipe 显式打开；上游自测 `test_config_manager.py` 亦断言默认 `None`）→ llmtuner 同日把默认从 `"headtail"` 改为 `None` 对齐，均衡分片改为显式选择（它改变每个 rank 参与 attention 的 token 集合，不该由默认替用户决定） |
 | `parallel/parallelize.py`（2026-09-26 文件名对齐上游，原 parallelize_hf.py） | 五种并行的总装配 | B，transformers backend parallelize |
 | `parallel/stages.py` | `STAGES` / `STAGE_ORDER` / `PP_STAGE_ORDER`：装配顺序契约的单一来源 | C，上游无对应物 |
 | `parallel/pipeline_parallel/pipeline.py` | FQN split 与 stage 构造 | A2，transformers backend pipeline |
 | `parallel/pipeline_parallel/apply.py` | metadata、apply、schedule build | B，`distributed/pipeline_parallel.py` |
 | `parallel/tensor_parallel/linear.py` | fused/fallback collective GEMM | A2，`models/common/async_linear.py`（原 `distributed/linear.py`，上游经 dist_gemm.py 搬迁改名） |
 | `parallel/tensor_parallel/tp.py` + `apply.py` | HF plan realizer 与 `apply_tp` 入口 | B，各模型 TP plan（上游 `distributed/tensor_parallel.py` 于 `7e7f271e0` 删除，后继为 `protocols/sharding.py` + `hf_sharding.py` / `decoder_sharding.py` 的声明面） |
-| `config/`（`model/parallel/optimizer/checkpoint/data/training/root.py`） | 全部配置 dataclass，逐组 `__post_init__` 校验 | B，`config/configs.py` + 嵌套 Config |
+| `config/`（`model/parallel/optimizer/checkpoint/data/training/root.py` + `cli.py`） | 全部配置 dataclass，逐组 `__post_init__` 校验；`cli.py` 是解析面的视图（`PARSER_GROUPS` + `cli_groups`），把 CLI 载不动的字段摘出 `--help` | B，`config/configs.py` + 嵌套 Config |
 | `trainer/train.py` | parse/main | B，根 `train.py` |
 | `trainer/trainer.py` + `builder.py`（装配段）/ `validate.py` / `pp_steps.py` / `batch.py` / `seed.py` | 完整训练生命周期 | B，根 `trainer.py` + `training_engine.py` |
 | `components/checkpointer/checkpoint_keys.py` | checkpoint state key 常量 | C |

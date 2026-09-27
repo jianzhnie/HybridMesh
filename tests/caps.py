@@ -128,3 +128,18 @@ def require_env(*names: str) -> None:
     absent = missing(list(names))
     if absent:
         pytest.skip(f"[env] missing: {', '.join(absent)}", allow_module_level=True)
+
+
+def skip_without(*names: str):
+    """Test-level guard: skip one test when a capability is absent.
+
+    The module-level :func:`require_env` is the right tool when the *imports*
+    need a capability; this one is for the case a single test does, so that a
+    module whose other tests run everywhere is not gated wholesale. Same skip
+    reason, so the coverage report reads the same either way.
+    """
+    import pytest
+
+    return pytest.mark.skipif(
+        bool(missing(list(names))), reason=f"[env] missing: {', '.join(names)}"
+    )

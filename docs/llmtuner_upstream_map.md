@@ -173,7 +173,7 @@ A2 分类（见上表），mesh 构建这一段记在该行的"改写点"里，�
 | `models/common/token_dispatcher.py` 的 DeepEP/HybridEP 两个 dispatcher | 登记缺口（2026-09-25，§9.1 第 13 项）：CUDA-only（`deep_ep`/`hybridep` 内核 + GB200/NVLink72 假设）且 dispatch/combine 经上游 `distributed/deepep/` wrappers（1155 行）驱动，可选导入无法忠实表达契约，故不 vendor；`ParallelConfig.ep_token_dispatcher="deepep"/"hybridep"` 配置期 NotImplementedError（含解锁条件），swap 入口防御性同语义。解锁条件：vendor 上游 wrappers + pyproject 加 CUDA-only optional extra + CUDA 目标设备复跑数值。`AllToAllTokenDispatcher` 满足同一 dispatch/combine 契约 |
 | `models/common/token_dispatcher.py` 的 `TorchAOTokenDispatcher` | **已适配为可选导入适配层**（2026-09-25，§9.1 第 13 项）：torchao 不进 pyproject、不复制上游 Config 嵌套。`TorchAOTokenDispatcher(num_experts, top_k, pad_multiple)` 继承 `AllToAllTokenDispatcher`，仅 `_permute`/`_unpermute` 改委托 torchao `permute_and_pad`（expert-major 重排 + 每组 pad 到 `pad_multiple`，EP=1 本地 padded permute 路径一并移植），构造期 lazy import，未装 torchao loud-raise ImportError（带 `pip install torchao` 指引）；`ParallelConfig.ep_token_dispatcher="torchao"` + `ep_torchao_pad_multiple`（默认 16=FP8）接线 `apply_ep` → swap，默认 `alltoall` 逐位不变。数值**环境未覆盖**（本机无 torchao/CUDA，单测以 sys.modules fake 覆盖 sentinel-row padding 契约与 EP=1 combine 等价性）；解锁条件：CUDA 目标设备装 torchao 复跑 |
 | DSA（DeepSeek sparse attention）的稠密 additive mask 路径 | 上游 `model.py` 的 `_build_dense_attention_mask` + indexer 支持；**2026-09-24 起 llmtuner wrapper 构造期对 `index_topk` fail-fast**（静默走 flex BlockMask 的错误语义已消除），稠密 mask 执行路径本身仍未移植，无消费者 |
-| vocab-sharded `lm_head` + 端到端 vocab-parallel loss | **登记为 D 类，2026-09-27 写提案，未实现**。上游 HF 路径无条件把 `lm_head` 的 weight/bias 沿 vocab 维 `S(0)` 切、输入从 sequence-parallel gather 回全长、输出 `S(-1)`（vocab 分片），由 core `cross_entropy_loss` 检测到 vocab 分片后走 vocab-parallel CE（`hf_sharding.py` 的 `lm_head` 段）。llmtuner 目前把 HF plan 的 `colwise_gather_output` 解析为 None、`lm_head` 保持复制（`tensor_parallel/tp.py` 的 `resolve_plan`），所以 `components/loss.py` 里那套 vocab-parallel 数学**没有可达路径**（`compute_logprobs` 自己写了这条 reachability note）。**依赖与契约**：`components/loss.py` 的数学与覆盖已就位（含 V=8/7/5 的 uneven shard、IGNORE_INDEX、`reduction="none"` 用例，见 `integration_tests/vocab_parallel_loss_equivalence.py`，本机可跑且通过），缺的是模型/训练器侧接线。**分两步，顺序不可颠倒**：(1) 先把四处 loss 调用点改成 vocab-aware——`Trainer._loss_sum`（trainer.py）、`chunked_lm_head_cross_entropy`（loss.py，现在用裸 `F.cross_entropy`，与分片 head 不兼容）、PP 的 `_scalar_loss_fn`、`Validator` 经 `_loss_sum` 的复核路径——统一传 `tp_group` + `global_vocab_size`；因为 `cross_entropy_loss` 是**按形状**选择路径，head 仍复制时这一步是严格 no-op（shape == global_vocab_size 走 plain 分支），可独立验收；(2) 再把 `colwise_gather_output` 映射到 vocab-shard realizer 并配等价性测试。**失败模式**：只做 (2) 不做 (1) 会让 `F.cross_entropy` 在本地 V/tp 上静默算出错误的 loss（不报错、loss 有限），因此 (2) 落地时必须同时加守卫——head 分片而 loss 未被告知 vocab 分片时 loud-raise，而不是静默退化。**验证计划**：(1) 用现有 CPU 套件 + 现有 gloo vocab 测试确认 no-op；(2) 需要 torch≥2.12 + 多卡的 TP 等价性（分片 head 的 logits/loss/梯度 == 单卡全长参照），本机环境不可达。 |
+| vocab-sharded `lm_head` + 端到端 vocab-parallel loss | **D 类，两步走，第一步已完成（2026-09-27）**。第二步（模型侧）未实现：上游 HF 路径把 `lm_head` 的 weight/bias 沿 vocab 维 `S(0)` 切、输入从 sequence-parallel gather 回全长、输出 `S(-1)`（vocab 分片），core `cross_entropy_loss` 检测到分片后走 vocab-parallel CE（`hf_sharding.py` 的 `lm_head` 段）。llmtuner 仍把 HF plan 的 `colwise_gather_output` 解析为 None、`lm_head` 保持复制（`tensor_parallel/tp.py::resolve_plan`）。**第一步（loss 侧接线，已完成）**：`Trainer._loss_vocab_kwargs()` + `HFTransformerModel.vocab_size` 把 `tp_group`/`global_vocab_size` 送到四个调用点（`Trainer._loss_sum`、`chunked_lm_head_cross_entropy`、PP `_scalar_loss_fn`、Validator），`components/loss.py` 按形状分派，因此复制 head 下逐位不变；第二步（vocab-shard realizer + head 已分片但 loss 未被告知时 loud-raise）在多卡环境复跑后再做。
 
 **已从 D 移除（部分）**（2026-09-25）：`models/common/moe_sharding.py`——上游该文件是
 声明层：`ShardingConfig` 声明 router 参数 TP Replicate、routed 专家权重仅在 EP 开时
@@ -403,7 +403,7 @@ llmtuner 侧是 `datasets/multimodal/mm_image.py`），本表的 llmtuner 列是
 | 序列切分顺序 | 先 CP（`models/hf_wrapper.py:591`）后 TP（`:623`），TP 切在 CP 分片内 | `hf_sharding.py:52 _hf_sequence_parallel_placement()` = `PartitionSpec(DP, (CP, TP), None)` | **等价**：CP 外、TP 内的联合切分 |
 | norm 权重 | q/k norm 保持复制（HF 4.57 起 plan 已不声明它们），梯度由 `Trainer._allreduce_replicated_tp_grads`（`trainer/trainer.py:470`）汇总 | `decoder_sharding.py:177 norm_config`：SP 时权重 `R`，"BWD AR 交给 FSDP" | **等价**（同 D14：上游归 FSDP、llmtuner 归 trainer，数值一致） |
 | token 计数 / loss mesh | `trainer/batch.py:221` 计 `labels.numel() // (cp*tp)`；loss mesh 含 tp（`parallel/parallel_dims.py:220`） | loss mesh 只含 dp×cp（`parallel_dims.py:260`） | **耦合差异**：上游把 tp 的归约放进 vocab-parallel CE，llmtuner 的 head 是复制的、必须跨 tp 求和。两侧各自自洽，随 lm_head 缺口一同处理 |
-| lm_head 与 loss | HF 的 `colwise_gather_output` 解析为 None → head 保持复制（全 vocab）+ 普通 CE | head `S(0)`/`S(-1)` vocab 分片 + `components/loss.py:43` 检测 tp>1 走 vocab-parallel CE | **D 类缺口（已登记两步走）**，见上"D —— 真正缺失"表 |
+| lm_head 与 loss | HF 的 `colwise_gather_output` 解析为 None → head 保持复制（全 vocab）+ 普通 CE；loss 侧参数已接线（按形状分派，复制下 no-op） | head `S(0)`/`S(-1)` vocab 分片 + core `cross_entropy_loss` 检测分片走 vocab-parallel CE | **D 类缺口，两步走的第二步未做**：loss 侧接线 2026-09-27 完成，head 真分片与"未接线即 loud-raise"待做，见上"D —— 真正缺失"表 |
 | 注意力头整除 | 本轮之前只有 ulysses CP 路径检查 `% (tp*cp)` | `config/validation.py:150 head_shard_degree`：解析期即校验 `heads % (tp*cp)` | **本轮修复**：新增 `parallel/head_sharding.py`；`apply_tp` 查 `% tp`、ulysses CP 查 `% (tp*cp)`，合起来即上游那一次检查 |
 | 未实现的 HF 规格 | `colwise_rep` / `rowwise_rep` / `local_*` / `gather` / `replicate` / `sequence_parallel` loud-raise | 这些是 DTensor 时代的 replicated-activation 布局，上游由 SPMD 声明承担 | **有意拒绝**：llmtuner 的 GEMM 是 SP 对偶 collective，没有全复制激活路径；本轮把报错改成指名 + 说明理由 |
 
@@ -528,6 +528,51 @@ llmtuner 侧是 `datasets/multimodal/mm_image.py`），本表的 llmtuner 列是
   `vocab_parallel_loss_equivalence.py` 的 gather 值/梯度等价块；
   `cp_ulysses_equivalence.py` 的同名调用点；以及本文、符号指南、设计文档与
   `llmtuner/README.md` 的登记行。
+- 2026-09-27 五次增量（lm_head 缺口第一步 + config 走查）：
+  1. **vocab-parallel loss 四处接线**（D 类 `lm_head` 缺口的第一步，纯 no-op）：
+     `Trainer._loss_vocab_kwargs()`（TP mesh + 模型自身 HF config 的 `vocab_size`，
+     新增 `HFTransformerModel.vocab_size` 属性）驱动 `Trainer._loss_sum`、
+     `chunked_lm_head_cross_entropy`、PP 的 `_scalar_loss_fn` 与 Validator 路径；
+     选择仍按形状（`components/loss.py`），所以 lm_head 复制的今天每条路径都走
+     普通 CE，逐位不变。测试：`test_chunked_loss.py` 增 1 例（分片参数下值与三份
+     梯度不变）、`test_trainer.py` 增 2 例（缺 TP 轴/缺词表 → 空 kwargs）、
+     `test_pipeline.py` 增 1 例（schedule loss 同样收参数且仍为 no-op）、
+     `test_hf_wrapper.py` 增 1 例（属性取内层 config，缺字段返回 None）。
+  2. **CP `context_parallel_load_balancer` 默认对齐上游**：`"headtail"` → `None`
+     （上游 `config/parallelism.py` 默认 None，headtail 由 recipe 显式打开，其
+     `test_config_manager.py` 亦断言默认 None）。均衡分片改变每个 rank 参与的
+     token 集合，不该由默认替用户决定；`test_config.py` 的默认断言与 ulysses
+     配对用例同步改写（拒绝仍是"组合"拒绝）。
+  3. **非 CLI 字段不再出现在 `--help`**：新增 `config/cli.py`——`arch_overrides`
+     （dict）、`param_groups`（嵌套 dataclass 列表）、`purge_exempt`（callable）
+     三个字段，HfArgumentParser 会为它们建 flag 但拒绝一切取值（实测
+     `invalid dict value` / `invalid ParamGroupConfig value` / `invalid Callable
+     value`），既不能用又占帮助面。`init=False` 是 HfArgumentParser 唯一的跳过
+     钩子，于是给解析器一份生成视图（子类 + `init=False` + 沿用基类默认值），
+     `isinstance`/`__post_init__`/默认值全部不变；`PARSER_GROUPS` 一并搬到该模块，
+     组集合与顺序自此单一来源。测试：`test_config.py` 增 2 例（三个 flag 不在
+     option 行、视图解析后仍是真组且默认值在位）——实测 flag 数 127 → 124。
+  4. **`test_config.py` 门禁收窄**：`require_env('dtensor')` → `require_env('pipelining')`
+     （真正的硬依赖是 `ParallelConfig.__post_init__` 里的 `get_schedule_class` 导入，
+     不是 DTensor）；checkpointer 常量改为用例内局部导入 + `skip_without('dcp')`
+     （`tests/caps.py` 新增的用例级守卫）；两处 `llmtuner.trainer.LLMTunerConfig`
+     改为 `llmtuner.config.LLMTunerConfig`（配置测试不该为此拖入引擎层）。
+     `symm_mem` 用例改为能力判定（CC≥9 设备上 skip），不再假设开发机是 CPU。
+  5. **复核后不改的两项**：`pipeline_parallel_schedule_csv`——上游同样在装配期
+     校验（`distributed/pipeline_parallel.py:360`，先查文件存在、再 `_load_csv`），
+     移进 `__post_init__` 反而偏离，保持现状；`fsdp_symm_mem_scope`——上游用
+     `scope=None` 表达"关"且 `tyro.conf.Suppress` 不进 CLI，llmtuner 用
+     `enable_fsdp_symm_mem=False` + scope 两字段，**默认语义等价**，见符号指南该行。
+  6. 顺带发现（未修，登记）：`train.py` docstring 称"YAML/JSON 文件可位置传入"，
+     实测 `HfArgumentParser.parse_args_into_dataclasses(['x.json'])` 直接报
+     "Some specified arguments are not used by the HfArgumentParser"（该版本
+     transformers 不支持此路径），docstring 与实现不符。
+  本轮验证：`test_config.py` 在垫片环境下 38 passed / 1 failed（唯一失败是垫片
+  `get_schedule_class` 不抛 ValueError 造成的既有假阴性，HEAD 同）；四处新增用例
+  在本机分别随 `test_chunked_loss.py`（12 passed）与脱门禁的
+  `test_trainer.py`/`test_pipeline.py`/`test_hf_wrapper.py` 通过（+2/+1/+1）；
+  全量 CPU 套件 151 passed / 59 skipped / 9 failed（失败集与基线一致）。
+- 检查后续漂移：`git -C <torchtitan> log f35966713..HEAD -- torchtitan/`。
 - 检查后续漂移：`git -C <torchtitan> log f35966713..HEAD -- torchtitan/`。
 - 2026-09-23 映射修订：上游 `distributed/linear.py` 已删除、内容迁入
   `models/common/dist_gemm.py`（改名 `AsyncAllGatherLinear`/`AsyncLinearReduceScatter`，

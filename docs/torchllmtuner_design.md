@@ -182,8 +182,10 @@ import trainer 或读取全局 run config；跨 models/parallel 的依赖必须�
 llmtuner/
   __init__.py / __main__.py / errors.py
                                 包面 + CLI 入口（python -m llmtuner）+ 三类异常
-  config/       8 模块          model/parallel/optimizer/checkpoint/data/
-                                training/root.py + __init__(全量再导出)
+  config/       9 模块          model/parallel/optimizer/checkpoint/data/
+                                training/root.py + cli.py（CLI 视图，把
+                                CLI 载不动的字段挡在 --help 之外）
+                                + __init__(全量再导出)
   trainer/      8 模块          trainer.py / train.py / builder.py（装配段，
                                 顺序契约见模块 docstring）/ validate.py /
                                 pp_steps.py / batch.py / seed.py
@@ -316,8 +318,9 @@ cp 整除 seq_len、async_tp×{compile,tp}），与其余字段校验同处、�
 
 `LLMTunerConfig`（config/root.py，经 `llmtuner.config` 再导出）由四组 dataclass **组合**（不是多继承）：
 `ModelArguments / ParallelArguments / OptimizerArguments / TrainingArguments`。CLI 用
-`HfArgumentParser` 平铺解析四组 flag，组合后经 `cfg.auto_fill_model()`（hub id 时从
-HF 拉架构补齐）得到唯一配置对象。
+`HfArgumentParser` 平铺解析九组 flag（`config/cli.py` 把 CLI 载不动的三个字段——dict /
+嵌套 dataclass 列表 / callable——从 `--help` 里摘掉，它们只能程序化传入），组合后经
+`cfg.auto_fill_model()`（hub id 时从 HF 拉架构补齐）得到唯一配置对象。
 
 配置流动遵守 G2：只有 trainer 组装层读 `LLMTunerConfig`；往下传递时拆成显式参数——
 `ParallelDims.from_config(cfg.parallel, world_size)` 读度数，`apply_*` 收
@@ -424,7 +427,9 @@ PP 外轴，并派生 dataloading、dense storage、dense fwd/bwd、sparse EP、
 reduce-scatter），均为 sequence-parallel 形态。plan 为 None 时读 `model.tp_plan`（即
 HF `_tp_plan` 的重写版），按路径深度倒序替换 `nn.Linear`；遇 bias 直接 raise。可选
 注册对称内存（`enable_fsdp_symm_mem`）。`colwise_gather_output` 当前保守地保持
-lm_head 复制，因为 llmtuner 尚无 vocab-sharded head + gather-output realizer。
+lm_head 复制，因为 llmtuner 尚无 vocab-sharded head + gather-output realizer
+（loss 侧的两步走第一步已完成：四个 loss 调用点已按形状接收 vocab-parallel 参数，
+复制 head 下逐位不变；见上游映射表 D 类该行）。
 
 **MoE-under-TP 已支持（2026-09-25，部分，声明层+装配层就位）**。HF tp_plan 的
 MoE 规格（`packed_colwise` / `packed_rowwise` / `moe_tp_experts`）不再 raise：
