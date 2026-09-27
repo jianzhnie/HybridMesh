@@ -605,8 +605,9 @@ vocab-parallel embedding 的全局 `padding_idx` 越界/梯度抑制（上游 #4
 `parallel/matrix.py`，下列条目与矩阵行一一对应）：
 
 1. pp+cp / pp+ep 组合未接线；PP+activation checkpoint、PP+chunked loss 与 tied
-   embeddings 的 PP 均明确拒绝；PP × validation 同样构造期拒绝（无 eval-only
-   管线通路，见 §5.1）。
+   embeddings 的 PP 均明确拒绝；PP × validation 同样构造期拒绝——原因不是"不存在
+   eval-only 通路"（torch 的 schedule 有 `eval`，上游校验器正在用），而是 llmtuner 只把
+   训练驱动器接到了 PP 接缝上（见 §5.1 与 `llmtuner_trainer_walkthrough.md` 的 D18）。
 2. ptrr load balancer 未实现；Ulysses 不与 load balancer 组合（packed/varlen 自
    2026-09-25 起支持，文档 mask 全长透传，见 §CP 与
    `tests/integration_tests/cp_ulysses_varlen_equivalence.py`）。

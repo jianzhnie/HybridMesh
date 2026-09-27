@@ -441,7 +441,26 @@ llmtuner 侧是 `datasets/multimodal/mm_image.py`），本表的 llmtuner 列是
   （`tests/unit_tests/cpu/parallel/test_activation_checkpoint.py`、
   `tests/integration_tests/ep_fsdp_equivalence.py`）。该缺陷此前一直被环境门禁跳过掩盖，
   在 torch≥2.12 的环境里会是 `ModuleNotFoundError`；已于 `142bb6d` 修复。
-- 检查后续漂移：`git -C <torchtitan> log c8a3e7666..HEAD -- torchtitan/`。
+- 2026-09-27 二次增量（同日，走查驱动）：基线再前进到 TorchTitan `f35966713`
+  （`c8a3e7666` 之后 14 个提交、177 个文件，`git -C <torchtitan> log --oneline c8a3e7666..f35966713`）。
+  与本仓相关的面逐项核对如下（其余在 `rl/`、`experiments/`、`quantization/`、
+  `models/qwen3_5|6|8`、`torchtitan_recipes/tests`，范围外）：
+
+  | 上游改动 | 分类 | llmtuner 处理 |
+  |---|---|---|
+  | `trainer.py`、`train.py`、`components/loss.py` **未变** | —— | 无动作；`llmtuner_trainer_walkthrough.md` 引用的行号据此复核通过 |
+  | `training_engine.py`（42 行）、`components/validate.py`（25 行）：PP 编排、`max_num_documents` 的传入点 | **A/B（PP、校验面）** | 走查已覆盖：校验器的 PP 分支是 llmtuner 的 loud-raise 缺口（D18）、`max_num_documents` 的裁剪理由经复核成立（D19）；PP 损失函数的双驱动接线缺陷已修（D17，`make_schedule_loss_fn`），见 `llmtuner_trainer_walkthrough.md` §11.3 |
+  | `distributed/{parallel_dims,pipeline_parallel,utils,fsdp,activation_checkpoint}.py`，`distributed/context_parallel/` 包重整为 `context_parallel.py` | **B（并行面，未在本轮走查）** | 未动作：属 `parallel/` 批次（`llmtuner_trainer_walkthrough.md` §12 第 2 项）。本轮只确认本表引用的 `torchtitan/distributed/parallel_dims.py:260` 与 `set_determinism`（`torchtitan/distributed/utils.py:118`）语义未变 |
+  | `config/{parallelism,validation,configs}.py`：`max_num_documents` 的 CUDA graph 校验（`torchtitan/config/validation.py:49`） | C | llmtuner 无图通路（D10），不适用 |
+
+  本轮验证（与 `llmtuner_trainer_walkthrough.md` 同轮）：CPU 单测
+  **143 passed / 59 skipped / 9 failed**，9 个失败与前一轮同因（7 个
+  `torch.OutOfMemoryError`、2 个 `torch.distributed.pipelining` 缺失），都在未触碰的文件；
+  新增 1 个受 `pipelining` 门禁的用例
+  （`tests/unit_tests/cpu/parallel/test_pipeline.py:413`），本机跳过、torch≥2.12 环境执行。
+  文档 `文件:行号` 引用经机械校验（文件存在 + 行号在范围内）全部命中，脚本见
+  `llmtuner_torchtitan_alignment_workflow.md` §7.1。
+- 检查后续漂移：`git -C <torchtitan> log f35966713..HEAD -- torchtitan/`。
 - 2026-09-23 映射修订：上游 `distributed/linear.py` 已删除、内容迁入
   `models/common/dist_gemm.py`（改名 `AsyncAllGatherLinear`/`AsyncLinearReduceScatter`，
   数学不变；上游 9e159aed7 再把该文件改名 `async_linear.py`），此后上游

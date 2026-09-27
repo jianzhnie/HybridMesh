@@ -190,7 +190,38 @@ quantile routing、Ulysses×varlen、validation 循环、`pipeline_with_first_st
 ruff check llmtuner tests
 python -m compileall -q llmtuner
 git diff --check
+python check_doc_refs.py docs/*.md          # 见下
 ```
+
+文档引用校验（六份文档全部用 `文件:行号` 定位，行号会随源码改动漂移，必须机械复核）。
+保存为 `check_doc_refs.py` 并在仓库根目录运行：`python check_doc_refs.py docs/*.md`。
+
+```python
+import pathlib, re, sys
+
+UPSTREAM = pathlib.Path("<torchtitan checkout>")   # 与文档 §0 记录的基线一致
+ROOT = {"torchtitan/": UPSTREAM, "llmtuner/": pathlib.Path("."),
+        "tests/": pathlib.Path("."), "docs/": pathlib.Path(".")}
+REF = re.compile(r"`([A-Za-z0-9_./\-]+\.(?:py|md|toml|yaml|json|sh)):(\d+)(?:-(\d+))?`")
+
+total = bad = 0
+for doc in sys.argv[1:]:
+    for m in REF.finditer(pathlib.Path(doc).read_text()):
+        total += 1
+        path, start, end = m.group(1), int(m.group(2)), m.group(3)
+        root = next((r for p, r in ROOT.items() if path.startswith(p)), None)
+        src = root / path if root is not None else None
+        lines = len(src.read_text().splitlines()) if src and src.exists() else 0
+        if not lines:
+            print(f"{doc}: {m.group(0)} -> 文件不存在"); bad += 1
+        elif not 1 <= start <= int(end or start) <= lines:
+            print(f"{doc}: {m.group(0)} -> 越界（文件 {lines} 行）"); bad += 1
+print(f"引用 {total} 条，问题 {bad} 条")
+```
+
+局限：只认完整的 `` `路径:行号` ``。文档里的续引（``（`:207`）``、`` `:244-260` ``）
+脚本看不到，改动附近代码后要人工回看；反过来，脚本通过**不等于**符号对得上——
+上游文件变化过（见 upstream map 的"版本与漂移"）时必须抽查符号内容。
 
 同时检查：
 
