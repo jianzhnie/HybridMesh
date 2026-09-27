@@ -304,6 +304,8 @@ def chunked_lm_head_cross_entropy(
     *,
     num_chunks: int,
     grad_scale: torch.Tensor | float,
+    tp_group: dist.ProcessGroup | None = None,
+    global_vocab_size: int | None = None,
 ) -> torch.Tensor:
     """Summed next-token CE, computed in sequence chunks to bound peak memory.
 
@@ -336,6 +338,12 @@ def chunked_lm_head_cross_entropy(
     token axis; chunking that local shard composes with the sum reduction the
     same way.
 
+    ``tp_group`` / ``global_vocab_size`` are passed straight through to
+    :func:`cross_entropy_loss`, so a vocab-sharded ``lm_head`` takes the
+    vocab-parallel path per chunk and a replicated one takes the plain path --
+    the selection is by shape, so the default (both ``None``, or a full-vocab
+    head) is bit-for-bit the old behaviour.
+
     ``hidden_states`` must require grad -- this is a training path, and a
     silent no-backward would look like a working step.
     """
@@ -366,11 +374,11 @@ def chunked_lm_head_cross_entropy(
         # in ``.grad`` for assembly below.
         detached = hidden_chunk.detach().requires_grad_(True)
         logits = lm_head(detached)
-        chunk_loss = F.cross_entropy(
-            logits.float(),
+        chunk_loss = cross_entropy_loss(
+            logits,
             label_chunk,
-            reduction="sum",
-            ignore_index=IGNORE_INDEX,
+            tp_group=tp_group,
+            global_vocab_size=global_vocab_size,
         )
         total = total + chunk_loss.detach()
         (chunk_loss * grad_scale).backward()

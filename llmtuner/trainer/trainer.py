@@ -98,7 +98,6 @@ from typing import Any
 
 import torch
 import torch.distributed as dist
-import torch.nn.functional as F
 from torch.distributed.device_mesh import DeviceMesh
 from torch.distributed.tensor import DTensor
 
@@ -113,8 +112,8 @@ from ..accelerator.dist import all_reduce
 from ..accelerator.spmd_context import spmd_context
 from ..components.checkpointer import CheckpointManager
 from ..components.loss import (
-    IGNORE_INDEX,
     chunked_lm_head_cross_entropy,
+    cross_entropy_loss,
 )
 from ..components.metrics import MetricsProcessor
 from ..components.optimizer import (
@@ -399,9 +398,10 @@ class Trainer:
                     labels,
                     num_chunks=self._chunked_loss_num_chunks,
                     grad_scale=1.0 / global_valid_tokens,
+                    **self._loss_vocab_kwargs(),
                 )
             logits = self.model(inputs, **extra_kwargs)
-            loss_sum = self._loss_sum(logits, labels)
+            loss_sum = self._loss_sum(logits, labels, **self._loss_vocab_kwargs())
             del logits
             # Normalize BEFORE backward, while the sum is still differentiable.
             # Dividing after backwarding the raw sum would work for a single
@@ -415,10 +415,47 @@ class Trainer:
             (loss_sum / global_valid_tokens).backward()
         return loss_sum.detach()
 
+    def _loss_vocab_kwargs(self) -> dict[str, Any]:
+        """The vocab-parallel arguments for the loss seam, when TP is on.
+
+        Both are handed to :func:`cross_entropy_loss`, which selects the
+        sharded path by *shape*: while the ``lm_head`` is replicated every call
+        still holds ``pred.shape[-1] == global_vocab_size`` and takes the plain
+        path, so today this is a no-op and the wiring exists in one place
+        instead of at every loss call site.
+
+        ``global_vocab_size`` is read from the model rather than from
+        ``cfg.model.vocab_size``: the head is built against the HF config's
+        number (which wins for a hub id and for a local checkpoint directory,
+        and which the config field may never have been filled from), and that
+        is the only value that keeps a replicated head on the plain path.
+
+        Empty when there is no model in hand (the ``pp > 1`` body drives the
+        schedule's own loss, which carries its own copy of these) or no TP axis
+        to reduce across.
+        """
+        tp_mesh = (
+            None
+            if self.parallel_dims is None or self.model is None
+            else self.parallel_dims.get_optional_mesh("tp")
+        )
+        # ``getattr`` rather than an attribute read: a test double for the
+        # model is often a plain module, and the missing vocabulary must fall
+        # back to the plain loss rather than raise.
+        vocab_size = (
+            None if self.model is None else getattr(self.model, "vocab_size", None)
+        )
+        if tp_mesh is None or vocab_size is None:
+            return {}
+        return {"tp_group": tp_mesh.get_group(), "global_vocab_size": vocab_size}
+
     @staticmethod
     def _loss_sum(
         logits: torch.Tensor,
         labels: torch.Tensor,
+        *,
+        tp_group: dist.ProcessGroup | None = None,
+        global_vocab_size: int | None = None,
     ) -> torch.Tensor:
         """Summed next-token cross-entropy over the predictable labels.
 
@@ -439,9 +476,17 @@ class Trainer:
         since been sliced by context parallelism cannot be recounted. Passing
         the count in here would suggest this function has a use for it, and a
         recount would silently undercount by a factor of ``cp``.
+
+        ``tp_group`` / ``global_vocab_size`` select the vocab-parallel form when
+        the logits are a vocab shard, exactly as in
+        :func:`cross_entropy_loss`; both default to ``None``, which is the plain
+        path a replicated head takes.
         """
-        return F.cross_entropy(
-            logits.float(), labels, reduction="sum", ignore_index=IGNORE_INDEX
+        return cross_entropy_loss(
+            logits,
+            labels,
+            tp_group=tp_group,
+            global_vocab_size=global_vocab_size,
         )
 
     # -- pipeline-parallel steps (bodies live in pp_steps.py) -------------------

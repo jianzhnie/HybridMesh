@@ -28,6 +28,7 @@ from dataclasses import dataclass
 from typing import Any
 
 import torch
+import torch.distributed as dist
 import torch.nn as nn
 from torch.distributed.pipelining import PipelineStage
 from torch.distributed.pipelining.schedules import (
@@ -86,12 +87,27 @@ def _scalar_loss_fn(
     afterwards.
 
     The caller divides it back out for reporting.
+
+    ``tp_group`` / ``global_vocab_size`` ride along in ``loss_kwargs`` and go
+    straight to :func:`cross_entropy_loss`; a full-vocab (replicated) head
+    keeps ``pred.shape[-1] == global_vocab_size`` and takes the plain path, so
+    the default is the old behaviour.
     """
-    return cross_entropy_loss(pred, labels) / loss_kwargs["global_valid_tokens"]
+    return (
+        cross_entropy_loss(
+            pred,
+            labels,
+            tp_group=loss_kwargs.get("tp_group"),
+            global_vocab_size=loss_kwargs.get("global_vocab_size"),
+        )
+        / loss_kwargs["global_valid_tokens"]
+    )
 
 
 def make_schedule_loss_fn(
     schedule: _PipelineSchedule,
+    *,
+    vocab_kwargs: dict[str, Any] | None = None,
 ) -> Callable[..., torch.Tensor]:
     """The schedule's ``loss_fn``, reading the denominator from either route.
 
@@ -108,7 +124,15 @@ def make_schedule_loss_fn(
 
     Returning the closure rather than a lambda also makes this testable without
     a live pipeline, which a lambda defined inline could not be.
+
+    ``vocab_kwargs`` is this path's copy of ``Trainer._loss_vocab_kwargs``:
+    ``tp_group`` and ``global_vocab_size`` are constant for the whole run, so
+    they are captured here at build time (where the pre-split model still
+    exists and knows its vocabulary) rather than read off the schedule on every
+    call the way the per-step denominator has to be. The closure is what the
+    schedule actually calls, so both drivers receive them.
     """
+    vocab = dict(vocab_kwargs or {})
 
     def _schedule_loss_fn(
         pred: torch.Tensor, labels: torch.Tensor, **loss_kwargs: Any
@@ -119,6 +143,7 @@ def make_schedule_loss_fn(
             global_valid_tokens=loss_kwargs.get(
                 "global_valid_tokens", schedule._llmtuner_global_valid_tokens
             ),
+            **vocab,
         )
 
     return _schedule_loss_fn
@@ -349,6 +374,8 @@ def build_pipeline_schedule(
     stages: list[PipelineStage],
     *,
     cfg: ParallelConfig,
+    tp_group: dist.ProcessGroup | None = None,
+    global_vocab_size: int | None = None,
 ) -> _PipelineSchedule:
     """Build the schedule that drives this rank's stages.
 
@@ -356,6 +383,12 @@ def build_pipeline_schedule(
     csv-loaded runtime schedule. ``scale_grads=False`` because the loss is a
     sum over tokens -- the trainer normalizes by the global token count after
     the reduction, so the schedule must not average over microbatches.
+
+    ``tp_group`` / ``global_vocab_size`` are the vocab-parallel loss arguments
+    for this run, or ``None`` when TP is off or the vocabulary is unknown; they
+    are handed to :func:`make_schedule_loss_fn` and are a no-op while the
+    ``lm_head`` is replicated, because :func:`cross_entropy_loss` dispatches on
+    the logits' shape.
     """
     parallelism = cfg
     if parallelism.pipeline_parallel_schedule_csv:
@@ -401,7 +434,13 @@ def build_pipeline_schedule(
     # (upstream torchtitan's wiring), the private pre-split driver reads it off
     # the schedule attribute that the body republishes on every call.
     schedule._llmtuner_global_valid_tokens = torch.ones((), dtype=torch.float32)
-    schedule._loss_fn = make_schedule_loss_fn(schedule)
+    schedule._loss_fn = make_schedule_loss_fn(
+        schedule,
+        vocab_kwargs={
+            "tp_group": tp_group,
+            "global_vocab_size": global_vocab_size,
+        },
+    )
     logger.info(
         f"Using pipeline schedule {parallelism.pipeline_parallel_schedule} "
         f"with {num_microbatches} microbatches and {num_total_stages} stages."

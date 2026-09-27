@@ -324,6 +324,18 @@ class HFTransformerModel(nn.Module):
         setattr(self._decoder, self._norm_name, value)
 
     @property
+    def vocab_size(self) -> int | None:
+        """The vocabulary the ``lm_head`` was built for, or ``None`` if unnamed.
+
+        Read by the loss seam: a vocab-parallel cross-entropy slices the
+        shards against the *global* class count, and the only value that keeps
+        a replicated head on the plain path is the one the head was built with
+        -- the HF config's, which for a hub id or a local checkpoint directory
+        need not equal the ``ModelConfig.vocab_size`` field.
+        """
+        return getattr(self.model.config, "vocab_size", None)
+
+    @property
     def lm_head(self) -> nn.Module | None:
         return getattr(self.model, "lm_head", None)
 

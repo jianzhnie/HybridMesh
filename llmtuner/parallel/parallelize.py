@@ -137,7 +137,17 @@ def parallelize_hf_transformers(
             # Rebind the stage's submodule in case a transform replaced the chunk.
             stages[i].submod = part
         return PipelineParallelSetup(
-            schedule=build_pipeline_schedule(stages, cfg=cfg),
+            # The schedule's loss runs on the last stage's logits, so it needs
+            # the same vocab-parallel arguments the trainer's loss does. They
+            # come from the un-split ``model`` and the TP axis, both still in
+            # scope here; ``vocab_size`` is read defensively because this
+            # function's contract is a plain ``nn.Module``.
+            schedule=build_pipeline_schedule(
+                stages,
+                cfg=cfg,
+                tp_group=None if tp_mesh is None else tp_mesh.get_group(),
+                global_vocab_size=getattr(model, "vocab_size", None),
+            ),
             stages=stages,
             model_parts=model_parts,
             has_first_stage=has_first_stage,

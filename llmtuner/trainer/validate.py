@@ -182,7 +182,7 @@ def validate_body(self, validation: ValidationConfig, step: int) -> None:
             )
             with self._param_context(), spmd_context(self.parallel_dims):
                 logits = self._example_model(inputs, **extra_kwargs)
-                loss_sum = self._loss_sum(logits, labels)
+                loss_sum = self._loss_sum(logits, labels, **self._loss_vocab_kwargs())
             if accumulated_loss is None:
                 accumulated_loss = loss_sum.clone()
             else:

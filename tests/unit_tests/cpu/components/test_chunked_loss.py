@@ -92,6 +92,44 @@ def test_chunked_matches_full_loss_and_gradients(num_chunks: int) -> None:
         torch.testing.assert_close(g, w, rtol=1e-5, atol=1e-7, msg=name)
 
 
+def test_vocab_loss_kwargs_are_a_no_op_for_a_full_vocab_head() -> None:
+    """``tp_group``/``global_vocab_size`` must change nothing while the head is
+    replicated: the dispatch is by shape, so with ``V_local == V`` the per-chunk
+    CE takes the plain path.
+
+    The sentinel group is what proves the branch was not taken -- it would raise
+    if the sharded path touched it -- and the gradients are compared, not just
+    the value, because the sharded path's backward is a different graph.
+    """
+    hidden, labels, lm_head = _inputs()
+    grad_scale = 1.0 / float((labels != IGNORE_INDEX).sum())
+
+    want = _chunked(hidden, labels, lm_head, 3, grad_scale)
+
+    head = nn.Linear(H, V)
+    head.load_state_dict(lm_head.state_dict())
+    got_hidden = hidden.detach().requires_grad_(True)
+    got_loss = chunked_lm_head_cross_entropy(
+        head,
+        got_hidden,
+        labels,
+        num_chunks=3,
+        grad_scale=grad_scale,
+        tp_group=object(),
+        global_vocab_size=V,
+    )
+
+    torch.testing.assert_close(got_loss, want[0], rtol=1e-5, atol=1e-7)
+    for name, g, w in zip(
+        ("hidden.grad", "weight.grad", "bias.grad"),
+        (got_hidden.grad, head.weight.grad, head.bias.grad),
+        want[1:],
+        strict=True,
+    ):
+        assert g is not None, f"{name} missing on the chunked path"
+        torch.testing.assert_close(g, w, rtol=1e-5, atol=1e-7, msg=name)
+
+
 def test_a_chunk_with_only_ignored_labels_contributes_nothing() -> None:
     """An all-ignored chunk must sum 0 and backprop zeros, not NaN.
 

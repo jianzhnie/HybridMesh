@@ -437,3 +437,33 @@ def test_schedule_loss_fn_reads_the_denominator_from_either_route() -> None:
     )
     # ... and the published attribute is the fallback the private driver needs.
     torch.testing.assert_close(loss_fn(pred, labels), reference / 4.0)
+
+
+def test_schedule_loss_takes_the_vocab_kwargs_the_builder_hands_over() -> None:
+    """The schedule's loss is the trainer's loss by another route, so it must
+    carry the same vocab-parallel arguments -- and must stay a no-op when the
+    logits are full-vocab.
+
+    The sentinel group is what proves the sharded branch was not taken (it
+    would raise if a collective touched it); the default, no ``vocab_kwargs``
+    at all, is the call a caller that does not know the vocabulary makes, and
+    it must not change the value either.
+    """
+    schedule = SimpleNamespace(
+        _llmtuner_global_valid_tokens=torch.tensor(4.0),
+    )
+
+    torch.manual_seed(0)
+    pred = torch.randn(6, 5)
+    labels = torch.randint(0, 5, (6,))
+    reference = F.cross_entropy(pred, labels, reduction="sum")
+
+    with_vocab = make_schedule_loss_fn(
+        schedule,
+        vocab_kwargs={"tp_group": object(), "global_vocab_size": pred.shape[-1]},
+    )
+    torch.testing.assert_close(with_vocab(pred, labels), reference / 4.0)
+
+    torch.testing.assert_close(
+        make_schedule_loss_fn(schedule)(pred, labels), reference / 4.0
+    )

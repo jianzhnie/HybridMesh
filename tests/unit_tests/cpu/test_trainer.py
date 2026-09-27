@@ -932,6 +932,50 @@ def test_preprocess_inputs_drops_a_padding_mask_the_forward_would_reject() -> No
     assert set(extra_kwargs) == {"positions"}
 
 
+def test_loss_vocab_kwargs_need_a_tp_axis_and_a_named_vocabulary() -> None:
+    """The vocab-parallel loss arguments exist only when both are known.
+
+    Either half missing must fall back to the plain loss rather than raise: a
+    single-process run has no TP axis, and a model double (a plain module) has
+    no vocabulary. ``cross_entropy_loss`` needs both non-``None`` before it
+    even looks at the logits' shape, so ``{}`` is the no-op.
+    """
+    trainer = Trainer.__new__(Trainer)
+    trainer.model = SimpleNamespace(vocab_size=9)
+
+    trainer.parallel_dims = None
+    assert trainer._loss_vocab_kwargs() == {}
+
+    trainer.parallel_dims = SimpleNamespace(
+        get_optional_mesh=lambda name: SimpleNamespace(get_group=lambda: object())
+    )
+    trainer.model = nn.Linear(2, 2)  # a double that names no vocabulary
+    assert trainer._loss_vocab_kwargs() == {}
+
+    trainer.model = None
+    assert trainer._loss_vocab_kwargs() == {}
+
+
+def test_loss_vocab_kwargs_carry_the_models_own_vocabulary() -> None:
+    """The global size comes from the model, not from the config field.
+
+    The head is built against the HF config's number -- which for a hub id or a
+    local checkpoint directory need not equal ``ModelConfig.vocab_size``, and
+    which is the value that keeps a replicated head on the plain path.
+    """
+    group = object()
+    trainer = Trainer.__new__(Trainer)
+    trainer.parallel_dims = SimpleNamespace(
+        get_optional_mesh=lambda name: SimpleNamespace(get_group=lambda: group)
+    )
+    trainer.model = SimpleNamespace(vocab_size=151936)
+
+    assert trainer._loss_vocab_kwargs() == {
+        "tp_group": group,
+        "global_vocab_size": 151936,
+    }
+
+
 def test_loss_sum_scores_every_label_ignored_ones_included() -> None:
     """The shift, not the loss, is what removes positions from the denominator.
 

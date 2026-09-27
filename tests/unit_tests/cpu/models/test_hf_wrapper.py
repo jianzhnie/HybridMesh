@@ -608,3 +608,24 @@ def test_tp_plan_reads_the_inner_attribute_and_falls_back_to_the_property() -> N
         pass
 
     assert HFTransformerModel.tp_plan.fget(SimpleNamespace(model=Neither())) == {}
+
+
+def test_vocab_size_is_the_inner_configs_number(model: HFTransformerModel) -> None:
+    """The loss seam reads the vocabulary off the model, not off the config field.
+
+    ``global_vocab_size`` has to match the head the model was actually built
+    with: a hub id's ``AutoConfig`` wins over ``ModelConfig.vocab_size`` (and a
+    local checkpoint directory never fills that field at all), so the model's
+    own config is the only value that keeps a replicated head on the plain CE
+    path. Also pinned: a config that names no vocabulary yields ``None`` rather
+    than raising, which is what makes the trainer's fallback possible.
+    """
+    from types import SimpleNamespace
+
+    assert model.vocab_size == _VOCAB
+    assert (
+        HFTransformerModel.vocab_size.fget(
+            SimpleNamespace(model=SimpleNamespace(config=SimpleNamespace()))
+        )
+        is None
+    )
