@@ -120,6 +120,10 @@ class ParallelConfig:
     layers.3 and layers.4.
     This provides more explicit control over which modules belong to each chunk
     compared to split points.
+
+    Name drift: upstream has since renamed this field
+    ``pipeline_parallel_module_fqns_per_model_part``. The flag here keeps the
+    spelling it was audited under.
     """
 
     pipeline_parallel_first_stage_less_layers: int = 1
@@ -145,21 +149,24 @@ class ParallelConfig:
     """
 
     pipeline_parallel_schedule: str = "1F1B"
-    # Supported schedules (see schedules.py#L2161 for the list):
-    # https://github.com/pytorch/pytorch/blob/de4c2a3b4e89d96334dc678d1c3f2ae51a6630a0/torch/distributed/pipelining/schedules.py  # noqa: E501
     """
-    Specify the Pipeline Parallel schedule to use. The schedule must be
-    compatible with the split points and stages_per_rank.
-    Looped schedules (e.g. Interleaved1F1B) require specifying
-    pipeline_parallel_size = number of ranks,
-    and split_points = number of stages - 1
+    Name of the Pipeline Parallel schedule. The supported set is whatever
+    ``torch.distributed.pipelining.schedules.get_schedule_class`` accepts --
+    that function is the authority and this field is validated against it in
+    ``__post_init__``, so ask it rather than a link (the list moves between
+    torch releases). The schedule must be compatible with the split points and
+    stages per rank: looped schedules (e.g. Interleaved1F1B) require
+    pipeline_parallel_size = number of ranks and split_points = number of
+    stages - 1.
     """
 
     pipeline_parallel_schedule_csv: str | None = ""
     """
-    Specify the path to the pipeline parallel schedule csv file to use.
-    The pipeline_parallel_schedule argument must be either
-    PipelineScheduleSingle, PipelineScheduleMulti, or _PipelineScheduleRuntime.
+    Upstream's path to a CSV describing a runtime pipeline schedule. Accepted
+    for config compatibility but NOT implemented: llmtuner builds schedules by
+    name only, so any non-empty value is refused when the schedule is built
+    (``parallel/pipeline_parallel/apply.py``). Leave it empty and name a
+    schedule with ``pipeline_parallel_schedule`` instead.
     """
 
     num_pp_microbatches: int = 1
@@ -208,6 +215,12 @@ class ParallelConfig:
     1 (rejected in ``__post_init__``, the tp x ep x cp combination is
     unverified). tp x ep itself IS supported: TP shards only the dense parts
     and EP owns the routed experts.
+
+    Deliberate divergence: upstream requires ep >= tp on MoE models, having
+    deprecated pure TP on routed experts. llmtuner keeps tp > 1 with ep == 1
+    working -- its TP plan shards the expert weights in place along F rather
+    than replicating the token compute -- so that guard is not ported. See
+    docs/torchllmtuner_design.md, section 8 item 11.
     """
 
     router_aux_loss_coef: float | None = None

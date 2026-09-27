@@ -82,8 +82,6 @@ class LLMTunerConfig:
         )
 
     def __post_init__(self) -> None:
-        # Lazy import, same cycle reason as ParallelConfig.__post_init__.
-
         # Cross-group check: CP must divide the sequence length.
         if self.training.max_seq_len % self.parallel.cp != 0:
             raise ConfigError(

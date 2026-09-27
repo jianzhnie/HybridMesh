@@ -72,7 +72,11 @@ class CheckpointConfig:
     """Number of recent checkpoints to retain, or zero to retain all."""
 
     purge_exempt: Callable[[int], bool] | None = None
-    """Optional predicate that exempts checkpoint steps from purging."""
+    """Optional predicate that exempts checkpoint steps from purging.
+
+    Programmatic-only, like ``optimizer.param_groups``: the parser can build a
+    flag out of the field but cannot call the value, so set this from code.
+    """
 
     load_step: int = -1
     """Load the checkpoint at the specified step. If -1, load the latest one."""

@@ -521,7 +521,7 @@ class TrainingConfig:
             )
         if self.activation_checkpoint_mode == "region":
             raise EnvironmentUnsupportedError(
-                "self.activation_checkpoint_mode='region' (upstream "
+                "training.activation_checkpoint_mode='region' (upstream "
                 "RegionAC) needs torch_remat and model-declared remat "
                 "regions, which llmtuner has no equivalent of; see "
                 "parallel/activation_checkpoint.py's docstring."
@@ -533,7 +533,7 @@ class TrainingConfig:
             "memory_budget",
         ):
             raise ConfigError(
-                "self.activation_checkpoint_mode must be one of: 'none', "
+                "training.activation_checkpoint_mode must be one of: 'none', "
                 "'full', 'selective', 'memory_budget' (got "
                 f"{self.activation_checkpoint_mode!r})"
             )
@@ -542,7 +542,7 @@ class TrainingConfig:
             and not self.compile
         ):
             raise ConfigError(
-                "self.activation_checkpoint_mode='memory_budget' requires "
-                "self.compile=True: the budget is consumed by the compile "
+                "training.activation_checkpoint_mode='memory_budget' requires "
+                "training.compile=True: the budget is consumed by the compile "
                 "partitioner, so without compile it would silently do nothing."
             )

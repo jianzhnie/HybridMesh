@@ -66,7 +66,6 @@ __all__ = [
     "CompileConfig",
     "DataloaderConfig",
     "EMAConfig",
-    "ValidationConfig",
     "LLMTunerConfig",
     "LRSchedulerConfig",
     "MemoryBudgetACConfig",
@@ -78,4 +77,5 @@ __all__ = [
     "ProfilerConfig",
     "SelectiveACConfig",
     "TrainingConfig",
+    "ValidationConfig",
 ]

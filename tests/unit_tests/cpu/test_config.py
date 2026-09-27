@@ -23,8 +23,12 @@ import pytest
 from llmtuner.components.checkpointer import LR_SCHEDULER, MODEL, OPTIMIZER
 from llmtuner.config import (
     CheckpointConfig,
+    CompileConfig,
     LRSchedulerConfig,
+    MemoryBudgetACConfig,
+    MetricsConfig,
     ParallelConfig,
+    ProfilerConfig,
     TrainingConfig,
 )
 from llmtuner.errors import UnsupportedCombinationError
@@ -272,6 +276,58 @@ def test_a_non_positive_loop_parameter_is_rejected(field: str, bad: int) -> None
     """Each of these divides or iterates; zero is a hang or a ZeroDivision."""
     with pytest.raises(ValueError, match=f"{field} must be >= 1"):
         TrainingConfig(**{field: bad})
+
+
+def test_activation_checkpoint_messages_name_the_training_field() -> None:
+    """The messages spell the dotted path, like every other guard here.
+
+    This is the pair of ``parallel/test_activation_checkpoint.py``'s
+    ``match="requires training.compile"``: a message that spells ``self.compile``
+    silently fails that test on any machine where its module is not env-skipped.
+    """
+    with pytest.raises(ValueError, match="training.activation_checkpoint_mode"):
+        TrainingConfig(activation_checkpoint_mode="bogus")
+    with pytest.raises(ValueError, match="requires training.compile"):
+        TrainingConfig(activation_checkpoint_mode="memory_budget")
+
+
+# -- CompileConfig / MemoryBudgetACConfig ------------------------------------
+
+
+def test_an_empty_compile_backend_is_rejected() -> None:
+    """``torch.compile(backend="")`` fails inside inductor, far from the flag."""
+    with pytest.raises(ValueError, match="compile.backend cannot be empty"):
+        CompileConfig(backend="")
+    assert CompileConfig().backend == "inductor"
+
+
+def test_memory_budget_is_a_fraction() -> None:
+    """The bounds are the partitioner's, so both endpoints are legal."""
+    assert MemoryBudgetACConfig(memory_budget=0.0).memory_budget == 0.0
+    assert MemoryBudgetACConfig(memory_budget=1.0).memory_budget == 1.0
+    for bad in (-0.1, 1.5):
+        with pytest.raises(ValueError, match="memory_budget must be finite"):
+            MemoryBudgetACConfig(memory_budget=bad)
+
+
+# -- MetricsConfig / ProfilerConfig ------------------------------------------
+
+
+def test_a_non_positive_log_freq_is_rejected() -> None:
+    """A zero-length window would divide by zero on the first log."""
+    with pytest.raises(ValueError, match="metrics.log_freq must be greater than 0"):
+        MetricsConfig(log_freq=0)
+    assert MetricsConfig(log_freq=1).log_freq == 1
+
+
+def test_profiling_must_fit_one_cycle_into_the_interval() -> None:
+    """A cycle is ``profiler_warmup + profiler_active``; a shorter interval
+    would never reach the active iterations it exists to capture."""
+    assert ProfilerConfig(enable_profiling=True, profile_freq=4).profile_freq == 4
+    with pytest.raises(ValueError, match="profiler.profile_freq must be greater"):
+        ProfilerConfig(enable_profiling=True, profile_freq=3)
+    # Off is off: the interval is not read, so a small value is not an error.
+    assert ProfilerConfig(profile_freq=1).profile_freq == 1
 
 
 # -- the flat view the trainer reads -------------------------------------------
