@@ -81,6 +81,7 @@ CLI 用 `HfArgumentParser` 把九个配置组摊平成扁平旗标（`--tensor_p
 | `parallel/stages.py`                                                           | 装配顺序契约，以数据表形式存在（不导入引擎，任何层都可读）                                                                                                                              |
 | `parallel/matrix.py`                                                           | 跨层组合裁决的唯一来源（装配期 / probe 期），config 期校验留在配置里                                                                                                                    |
 | `parallel/parallel_dims.py`                                                    | 进程拓扑：`ParallelDims` + `build_mesh`                                                                                                                                                 |
+| `parallel/head_sharding.py`                                                    | attention 头数整除守卫（`heads % tp` / `heads % (tp*cp)`），对应上游 `config/validation.py` 的 `head_shard_degree`                                                                      |
 | `parallel/tensor_parallel/`                                                    | 声明式 TP plan + 融合原语（`AllGatherLinear` / `LinearReduceScatter`）                                                                                                                  |
 | `parallel/fully_shard/`                                                        | FSDP2 `fully_shard`（HSDP；纯 `dp_replicate` 走 DDP 兜底）                                                                                                                              |
 | `parallel/context_parallel/`                                                   | CP：kv_allgather 与 Ulysses 两种策略、flex kernel、输入分片与 load balancer                                                                                                             |
@@ -110,7 +111,7 @@ CLI 用 `HfArgumentParser` 把九个配置组摊平成扁平旗标（`--tensor_p
 | ---------- | -------------------------------- | ----------------------------- | ------------------------------------------------------------------------------ |
 | FSDP2      | `--data_parallel_shard_size`     | `parallel/fully_shard/`       | 已落地；mesh 按 torchtitan 轴语义重建                                          |
 | HSDP / DDP | `--data_parallel_replicate_size` | 同上                          | 已落地（纯 replicate 走 DDP 兜底）                                             |
-| TP         | `--tensor_parallel_size`         | `parallel/tensor_parallel/`   | 已落地；TP 天然 sequence-parallel（`enable_sequence_parallel=false` 直接拒绝） |
+| TP         | `--tensor_parallel_size`         | `parallel/tensor_parallel/`   | 已落地；TP 天然 sequence-parallel（`enable_sequence_parallel=false` 直接拒绝）；头数须整除 `tp`，装配期即拒绝 |
 | CP         | `--context_parallel_size`        | `parallel/context_parallel/`  | 已落地：kv_allgather / ulysses，varlen 与 packed 支持，headtail 负载均衡       |
 | EP         | `--expert_parallel_size`         | `parallel/expert_parallel/`   | 已落地：Qwen3Moe / OLMoE / Mixtral / DeepSeek-V2/V3 / GLM4 的可表示布局        |
 | PP         | `--pipeline_parallel_size`       | `parallel/pipeline_parallel/` | 1F1B / Interleaved1F1B 闭环 + DCP 续训；数值等价性有未闭合项，见下             |

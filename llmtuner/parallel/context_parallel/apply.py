@@ -8,6 +8,7 @@ from torch.distributed.device_mesh import DeviceMesh
 from llmtuner.config import ParallelConfig
 
 from ...utils.logger_utils import get_logger
+from ..head_sharding import require_heads_divisible_by
 from .cp_kernel import CPFlexKernel
 
 logger = get_logger(__name__)
@@ -101,18 +102,16 @@ def apply_cp(
         # TP shards heads first, so what ulysses must divide evenly is each
         # rank's local head count -- equivalently, the global count must divide
         # tp * cp (upstream's head_shard_degree in config/validation.py).
-        head_shard_degree = cfg.tp * cp_mesh.size()
-        for field_name in ("num_attention_heads", "num_key_value_heads"):
-            heads = getattr(model_config, field_name, None) or getattr(
-                model_config, "num_attention_heads", None
-            )
-            if heads is None or heads % head_shard_degree != 0:
-                raise ValueError(
-                    f"Ulysses CP shards heads across the group: {field_name} "
-                    f"({heads}) must be divisible by tp*cp "
-                    f"({cfg.tp}*{cp_mesh.size()}={head_shard_degree}), so the "
-                    f"local heads per rank divide evenly across cp."
-                )
+        require_heads_divisible_by(
+            model,
+            degree=cfg.tp * cp_mesh.size(),
+            divisor="tp*cp",
+            why=(
+                f"ulysses splits each TP rank's local heads across the CP group "
+                f"(tp={cfg.tp}, cp={cp_mesh.size()}), so the global count must "
+                "divide tp*cp"
+            ),
+        )
 
     layers = getattr(model, "layers", None)
     if layers is None:

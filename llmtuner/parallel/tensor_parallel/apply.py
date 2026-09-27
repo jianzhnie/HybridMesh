@@ -14,6 +14,7 @@ from torch.distributed.device_mesh import DeviceMesh
 from llmtuner.config import ParallelConfig
 
 from .. import matrix
+from ..head_sharding import require_heads_divisible_by
 from .tp import (
     MOE_PLAN_SPECS,
     ColumnParallelLinear,
@@ -24,6 +25,7 @@ from .tp import (
     enable_symm_mem,
     looks_like_attention,
     match,
+    model_tp_plan,
     resolve_plan,
     shard_experts_for_tp,
     supports_symm_mem,
@@ -46,6 +48,22 @@ def apply_tp(
     """
     if mesh is None or cfg.tp <= 1:
         return model
+
+    # A head count that does not divide ``tp`` has no valid local head split,
+    # and no downstream guard catches it: the projection-level check in
+    # ``shard_weight`` only sees the feature dim, which 8 KV heads at
+    # head_dim=128 (1024 features) satisfy at tp=16. Upstream rejects this at
+    # config parse (``head_shard_degree``, config/validation.py); here the
+    # model's own config is the first place the counts exist.
+    require_heads_divisible_by(
+        model,
+        degree=cfg.tp,
+        divisor="tp",
+        why=(
+            "tensor parallelism shards attention heads across the TP group, so "
+            "each rank must hold a whole number of heads"
+        ),
+    )
 
     # Validate the plan before touching the mesh: a plan that resolves to
     # nothing, or that matches no module, used to leave the model fully
@@ -72,9 +90,7 @@ def apply_tp(
     # RAW plan, before resolve_plan maps those specs to None.
     raw_plan = plan
     if raw_plan is None:
-        raw_plan = (
-            getattr(model, "tp_plan", None) or getattr(model, "_tp_plan", None) or {}
-        )
+        raw_plan = model_tp_plan(model)
     plan_declares_moe = any(
         isinstance(spec, str) and spec in MOE_PLAN_SPECS for spec in raw_plan.values()
     )

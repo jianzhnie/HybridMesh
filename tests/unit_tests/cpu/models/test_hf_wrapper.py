@@ -568,3 +568,43 @@ def test_native_experts_implementation_is_the_default_and_builds() -> None:
 
     # llmtuner never rewrites the kernel choice on the native path.
     assert getattr(model.model.config, "_experts_implementation", None) is None
+
+
+def test_tp_plan_reads_the_inner_attribute_and_falls_back_to_the_property() -> None:
+    """HF builds the plan as an instance ``_tp_plan`` (config plan + each child's
+    own), and exposes it through the ``tp_plan`` property. The wrapper must read
+    that attribute -- the property switches to ``_ep_plan`` when the config asks
+    for expert parallelism, and those are EP specs, not TP ones -- but a model
+    that only answers through the property must not read as "no plan", because
+    ``apply_tp`` would then silently shard nothing.
+
+    Driven with a stand-in for ``self`` (the getter only touches ``self.model``),
+    so the two spellings are pinned without building a model whose HF version
+    happens to carry both.
+    """
+    from types import SimpleNamespace
+
+    class AttributeOnly:
+        _tp_plan = {"layers.*.self_attn.q_proj": "rowwise"}
+
+        @property
+        def tp_plan(self) -> dict[str, str]:
+            return {"layers.*.self_attn.q_proj": "colwise"}
+
+    assert HFTransformerModel.tp_plan.fget(SimpleNamespace(model=AttributeOnly())) == {
+        "model.layers.*.self_attn.q_proj": "rowwise"
+    }
+
+    class PropertyOnly:
+        @property
+        def tp_plan(self) -> dict[str, str]:
+            return {"layers.*.self_attn.q_proj": "colwise"}
+
+    assert HFTransformerModel.tp_plan.fget(SimpleNamespace(model=PropertyOnly())) == {
+        "model.layers.*.self_attn.q_proj": "colwise"
+    }
+
+    class Neither:
+        pass
+
+    assert HFTransformerModel.tp_plan.fget(SimpleNamespace(model=Neither())) == {}

@@ -377,6 +377,21 @@ def rowwise() -> ShardingConfig:
 # -- engine -------------------------------------------------------------------
 
 
+def model_tp_plan(model: nn.Module) -> dict:
+    """The TP plan ``model`` declares, or ``{}``.
+
+    Prefers the ``tp_plan`` property over the raw ``_tp_plan`` attribute.
+    ``transformers`` exposes the plan as a property on ``PreTrainedModel`` (its
+    instance ``_tp_plan`` built from ``config.base_model_tp_plan`` plus each
+    child module's own plan), and ``HFTransformerModel`` re-parents the HF model
+    under ``self.model``, so *its* plan has to be rewritten to survive the extra
+    level. A wrapper that exposes only the property -- the shape HF itself
+    guarantees -- would otherwise be read as "no plan" and shard nothing, so
+    this is the one place the two spellings are reconciled.
+    """
+    return getattr(model, "tp_plan", None) or getattr(model, "_tp_plan", None) or {}
+
+
 def resolve_plan(model: nn.Module, plan) -> dict[str, ShardingConfig | None]:
     """Normalize a plan into ``{module_path_pattern: ShardingConfig}``.
 
@@ -406,14 +421,22 @@ def resolve_plan(model: nn.Module, plan) -> dict[str, ShardingConfig | None]:
     EP-plan strings (``grouped_gemm``, ``ep_router``) are not TP declarations
     and still raise.
 
-    When ``plan`` is omitted the model's own declaration is used, preferring the
-    ``tp_plan`` property over the raw ``_tp_plan`` attribute: a wrapper that
-    re-parents the HF model has to rewrite the patterns to its own module paths
-    (see ``HFTransformerModel.tp_plan``), and reading the raw attribute on such a
-    wrapper yields either nothing or patterns that match no module.
+    When ``plan`` is omitted the model's own declaration is used (see
+    ``model_tp_plan``).
+
+    What is *not* here: HF's replicated-activation styles. ``colwise_rep`` /
+    ``rowwise_rep`` (shard the weight, keep the activation full --
+    ``ColwiseParallel(output_layouts=Replicate())`` and its dual) and the
+    ``local_*`` / ``gather`` / ``replicate`` / ``sequence_parallel`` MoE-side
+    styles describe a DTensor layout whose activations never leave Replicate,
+    while this engine's GEMMs are the sequence-parallel pair (gather in,
+    reduce-scatter out). Realizing them faithfully would mean a second,
+    replicated-activation TP path; the models that ship those plans (Apertus,
+    GLM-4V, Phi-4-multimodal, Llama-4, FlexOlmo) are therefore refused rather
+    than run with a layout their neighbouring ops do not expect.
     """
     if plan is None:
-        plan = getattr(model, "tp_plan", None) or getattr(model, "_tp_plan", None) or {}
+        plan = model_tp_plan(model)
     resolved: dict[str, ShardingConfig | None] = {}
     for pattern, spec in plan.items():
         if isinstance(spec, ShardingConfig):
@@ -439,7 +462,18 @@ def resolve_plan(model: nn.Module, plan) -> dict[str, ShardingConfig | None]:
             # swapped for a dense realizer.
             resolved[pattern] = None
         else:
-            raise ValueError(f"Unsupported TP plan entry for {pattern!r}: {spec!r}")
+            raise ValueError(
+                f"Unsupported TP plan entry for {pattern!r}: {spec!r}. This "
+                "engine realizes 'colwise' / 'rowwise' (plus the replicated "
+                "'replicated_with_grad_allreduce' / 'colwise_gather_output' and "
+                "the MoE specs, which it leaves whole), and refuses HF's "
+                "replicated-activation styles: 'colwise_rep' / 'rowwise_rep' "
+                "keep the activation full on every rank, which is not the "
+                "layout the surrounding SP realizers produce or consume. "
+                "Rewrite the plan to 'colwise' / 'rowwise' for a model whose "
+                "ops tolerate sequence-parallel activations, or run it without "
+                "TP."
+            )
     return resolved
 
 

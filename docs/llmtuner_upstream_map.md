@@ -113,7 +113,7 @@ C 类上会把项目**故意删掉**的抽象又拽回来。
 | `models/hf_wrapper.py`（+ `hf_factory.py` 构建侧） | `experiments/transformers_modeling_backend/model.py` 的包装层；上游另有 `models/*/model.py` 各一份 | 0.059 |
 | `models/hf_state_dict_adapter.py` | `experiments/transformers_modeling_backend/state_dict_adapter.py`；llmtuner 更强：读 safetensors index 做 missing/unexpected 严格校验；上游的 `hf_to_titan_moe_state_dict` 转换对因 llmtuner EP swap 直接搬运 HF 权重（无第二 key 布局）而不需要 | — |
 | `parallel/parallelize.py`（2026-09-26 文件名对齐上游，原 parallelize_hf.py） | `experiments/transformers_modeling_backend/parallelize.py` + 各 `models/*/parallelize.py` | 0.089 |
-| `parallel/tensor_parallel/tp.py`（+ `apply.py` 入口） | 各模型 TP plan；上游 `distributed/tensor_parallel.py` 已随 DTensor 后端删除、无后继文件。llmtuner 是**手写 plan realizer**，不是声明式 `_sharding_config` | 0.056 |
+| `parallel/tensor_parallel/tp.py`（+ `apply.py` 入口） | 各模型 TP plan；上游的 TP 声明层已随 DTensor 后端迁到 `protocols/sharding.py` + 各模型 `*_sharding.py`，旧的 `distributed/tensor_parallel.py` 于 `7e7f271e0` 删除。llmtuner 是**手写 plan realizer**，对应上游的声明式 `_sharding_config` 面（逐项对应见本文「TP/SP 对齐结论」） | 0.056 |
 | `parallel/expert_parallel/apply.py` + `swap.py` | `experiments/.../moe_replacement.py` + 各模型 EP parallelize；llmtuner 搬运 HF 权重而非重新初始化 | 0.036–0.146 |
 | `parallel/fully_shard/apply.py` | 各 `models/*/parallelize.py` 的 FSDP driver；HF 五部件适配 | 0.155 |
 | `parallel/pipeline_parallel/apply.py` | `distributed/pipeline_parallel.py`；llmtuner 直接消费 HF stage 部件 | 0.130 |
@@ -366,7 +366,7 @@ region"建立在 llmtuner 没有的 `Module.configure_remat_regions` 协议上�
 | `parallel/expert_parallel/__init__.py` | 20 | 上游无对应（见 C 类） |
 | `parallel/fully_shard/__init__.py` | 5 | 上游无对应子包（只再导出 `apply_fsdp`） |
 | `parallel/pipeline_parallel/__init__.py` | 12 | 上游无对应 |
-| `parallel/tensor_parallel/__init__.py` | 23 | 上游 `distributed/tensor_parallel.py` 已删除、无后继 |
+| `parallel/tensor_parallel/__init__.py` | 23 | 上游 `distributed/tensor_parallel.py` 已删除，后继是 `protocols/sharding.py` + 各模型 `*_sharding.py` 的声明面 |
 | `trainer/__init__.py` | 27 | 上游无对应（配置再导出为兼容别名） |
 | `utils/__init__.py` | 0 | 空文件 |
 
@@ -388,6 +388,30 @@ region"建立在 llmtuner 没有的 `Module.configure_remat_regions` 协议上�
 
 **上游路径对应关系因此不再一一成立**（`hf_datasets/multimodal/utils/image.py` 在
 llmtuner 侧是 `datasets/multimodal/mm_image.py`），本表的 llmtuner 列是唯一权威。
+
+## TP/SP 对齐结论（2026-09-27）
+
+本轮把 llmtuner 的 TP / sequence-parallel 与 TorchTitan `f35966713` 逐项核对。结论：
+**数学与通信角色逐条等价，差异集中在"声明形态"、两处已修缺口与一处已登记的 D 类缺口**。
+
+| 面 | llmtuner | 上游 | 判定 |
+| --- | --- | --- | --- |
+| 声明形态 | `parallel/tensor_parallel/tp.py` 的 `ShardingConfig` + `resolve_plan`（消费 HF `tp_plan` 的规格字符串） | `protocols/sharding.py::ShardingConfig` 挂在模块 `_sharding_config` 上，由 `Module._parallelize` 分发 | **等价（形态不同）**：两者都是"权重切分 + 激活布局"的声明，llmtuner 的词汇表来自 HF |
+| colwise | `ColumnParallelLinear`：weight 切 dim 0，融合 all-gather 入、输出 feature-sharded | `hf_sharding.py:60 _hf_colwise_config`：weight/bias `S(0)`、out `S(-1)` | **等价** |
+| rowwise | `RowParallelLinear`：weight 切 dim 1，融合 reduce-scatter 出（回到序列分片） | `hf_sharding.py:71 _hf_rowwise_config`：weight `S(1)`、bias `R`、out_src `P`、out_dst → SP placement | **等价**（上游 `P`→SP 的重分布正是 llmtuner 融合 RS 的位置） |
+| 注意力边界 | `GatherSequenceFirst` + `ColwiseLinearNoGather`：父模块持有 gather，q/k/v 退化为 plain feature-sharded GEMM | `decoder_sharding.py:218 set_gqa_attention_sharding` + `_attach_flex_kernel`（SP 输入在注意力内部 gather 回 Replicate） | **等价** |
+| 序列并行语义 | TP 即 SP：batch 先按 CP、再按 TP 切；`parallelism.enable_sequence_parallel=false` 直接 config-raise | `sp_enabled = tp_enabled and enable_sequence_parallel`（`parallel_dims.py:550`） | **有意分歧**：llmtuner 没有"激活全复制"的退化路径 |
+| 序列切分顺序 | 先 CP（`models/hf_wrapper.py:591`）后 TP（`:623`），TP 切在 CP 分片内 | `hf_sharding.py:52 _hf_sequence_parallel_placement()` = `PartitionSpec(DP, (CP, TP), None)` | **等价**：CP 外、TP 内的联合切分 |
+| norm 权重 | q/k norm 保持复制（HF 4.57 起 plan 已不声明它们），梯度由 `Trainer._allreduce_replicated_tp_grads`（`trainer/trainer.py:470`）汇总 | `decoder_sharding.py:177 norm_config`：SP 时权重 `R`，"BWD AR 交给 FSDP" | **等价**（同 D14：上游归 FSDP、llmtuner 归 trainer，数值一致） |
+| token 计数 / loss mesh | `trainer/batch.py:221` 计 `labels.numel() // (cp*tp)`；loss mesh 含 tp（`parallel/parallel_dims.py:220`） | loss mesh 只含 dp×cp（`parallel_dims.py:260`） | **耦合差异**：上游把 tp 的归约放进 vocab-parallel CE，llmtuner 的 head 是复制的、必须跨 tp 求和。两侧各自自洽，随 lm_head 缺口一同处理 |
+| lm_head 与 loss | HF 的 `colwise_gather_output` 解析为 None → head 保持复制（全 vocab）+ 普通 CE | head `S(0)`/`S(-1)` vocab 分片 + `components/loss.py:43` 检测 tp>1 走 vocab-parallel CE | **D 类缺口（已登记两步走）**，见上"D —— 真正缺失"表 |
+| 注意力头整除 | 本轮之前只有 ulysses CP 路径检查 `% (tp*cp)` | `config/validation.py:150 head_shard_degree`：解析期即校验 `heads % (tp*cp)` | **本轮修复**：新增 `parallel/head_sharding.py`；`apply_tp` 查 `% tp`、ulysses CP 查 `% (tp*cp)`，合起来即上游那一次检查 |
+| 未实现的 HF 规格 | `colwise_rep` / `rowwise_rep` / `local_*` / `gather` / `replicate` / `sequence_parallel` loud-raise | 这些是 DTensor 时代的 replicated-activation 布局，上游由 SPMD 声明承担 | **有意拒绝**：llmtuner 的 GEMM 是 SP 对偶 collective，没有全复制激活路径；本轮把报错改成指名 + 说明理由 |
+
+**验证边界**：TP/SP 的数值等价需要多卡与 torch≥2.12（symm-mem、`spmd_types`、
+`torch.distributed.pipelining`），本机（torch 2.2.2、CPU）不可达，可执行的只有声明层/
+装配期单测与 2-rank gloo 等价性（design §8 第 10 项）。因此上表的"等价"是**代码级核对**
+结论；多卡上的数值等价仍是待办，不能据本表声称已验证。
 
 ## 版本与漂移
 
@@ -460,6 +484,36 @@ llmtuner 侧是 `datasets/multimodal/mm_image.py`），本表的 llmtuner 列是
   （`tests/unit_tests/cpu/parallel/test_pipeline.py:413`），本机跳过、torch≥2.12 环境执行。
   文档 `文件:行号` 引用经机械校验（文件存在 + 行号在范围内）全部命中，脚本见
   `llmtuner_torchtitan_alignment_workflow.md` §7.1。
+- 2026-09-27 三次增量（TP/SP 对齐走查）：逐项判定见上「TP/SP 对齐结论」。本轮落地：
+  1. **注意力头整除守卫**（对齐上游 `config/validation.py:150 head_shard_degree`）：新增
+     `llmtuner/parallel/head_sharding.py`；`apply_tp` 校验 `heads % tp`，ulysses CP 校验
+     `heads % (tp*cp)`（原来的内联检查改为调用同一函数，拒绝语义与消息要点不变）。
+     此前纯 TP（cp=1）没有任何守卫：`shard_weight` 只看特征维，而 8 个 KV 头 × head_dim 128
+     = 1024 特征恰好能被 `tp=16` 整除，错误要等 HF 的 head reshape 才暴露。测试：
+     `tests/unit_tests/cpu/parallel/test_head_sharding.py`（7 例，**无**环境门禁，本机可跑）、
+     `test_tp.py` 新增 2 例（守卫在触碰 mesh 之前触发；整除时不被误伤）、
+     `test_cp.py` 原有 3 例继续覆盖 `tp*cp` 路径。
+  2. **plan 读取统一**：新增 `tp.py::model_tp_plan`（`tp_plan` 属性优先、回退 `_tp_plan`），
+     `resolve_plan` 与 `apply_tp` 的 MoE 规格探测共用它。`HFTransformerModel.tp_plan` 在内层
+     `_tp_plan` 为空时回退到内层 `tp_plan` 属性——HF 只用属性暴露 plan 的模型不再被读成
+     "无 plan"（那样 `apply_tp` 会静默一个投影都不切）。测试：`test_hf_wrapper.py` 新增 1 例
+     （属性回退 + 属性优先的取舍各钉一次）。
+  3. **HF `*_rep` 类规格的报错改写**：`colwise_rep` / `rowwise_rep` / `local_*` / `gather` /
+     `replicate` / `sequence_parallel` 仍然 loud-raise（llmtuner 没有 replicated-activation
+     TP 路径，静默改成 `colwise` 会让相邻算子拿到它不预期的布局），但报错现在指名规格、列出
+     可接受词汇并给出理由。**影响面**：Apertus / GLM-4V / Phi-4-multimodal / Llama-4 /
+     FlexOlmo 的 HF `base_model_tp_plan` 带这些规格，这些家族要么改写 plan、要么不开 TP。
+     测试：`test_tp.py` 6 例 parametrize + 1 例 typo 仍拒绝。
+  4. **文档修订**：三处"上游 `distributed/tensor_parallel.py` 已删除、无后继"改为指向真正的
+     后继（`protocols/sharding.py` + `models/common/decoder_sharding.py` +
+     `experiments/transformers_modeling_backend/hf_sharding.py`），并新增本文「TP/SP 对齐结论」。
+  同轮顺带修掉一个会误报的用例：`tests/unit_tests/cpu/parallel/test_tp.py` 的 Qwen3 用例断言
+  transformers 4.57 已不再声明的 `replicated_with_grad_allreduce`（在 torch≥2.12 环境会失败），
+  改为把该规格注入真实 plan 来钉住分支，恢复版本无关性。
+  本轮验证：`test_head_sharding.py` 7 passed（本机）；`test_tp.py` / `test_cp.py` /
+  `test_hf_wrapper.py` 在本机被 `spmd_types` 门禁跳过，改以注入最小 torch/spmd 垫片后脱门禁运行，
+  三处分别为 20 passed / 3 passed（其余因 fake PG 与 DeviceMesh 的 2.2 差异 errored）/
+  1 passed，新增用例全绿。
 - 检查后续漂移：`git -C <torchtitan> log f35966713..HEAD -- torchtitan/`。
 - 2026-09-23 映射修订：上游 `distributed/linear.py` 已删除、内容迁入
   `models/common/dist_gemm.py`（改名 `AsyncAllGatherLinear`/`AsyncLinearReduceScatter`，
@@ -467,7 +521,15 @@ llmtuner 侧是 `datasets/multimodal/mm_image.py`），本表的 llmtuner 列是
   async_linear.py 同时对应 llmtuner 的 `parallel/tensor_parallel/linear.py`
   （autograd 原语）与 `models/common/async_linear.py`（模块层，llmtuner 2026-09-26
   同步改名），一对二；
-  `distributed/tensor_parallel.py` 已随 DTensor 后端整体删除、无后继。
+  `distributed/tensor_parallel.py` 已随 DTensor 后端整体删除（`7e7f271e0`）；继任者
+  不是另一个同名文件，而是把 TP 变成声明的三处：`protocols/sharding.py`
+  （`ShardingConfig`、`in/out_src/dst_shardings`、`local_spmd`）、
+  `models/common/decoder_sharding.py`（core 模型的 `norm_config` /
+  `token_id_placement` / `set_gqa_attention_sharding`）与
+  `experiments/transformers_modeling_backend/hf_sharding.py`（HF 模型的
+  `set_hf_sharding_configs` 及其 `_hf_colwise_config` / `_hf_rowwise_config` /
+  `_hf_sequence_parallel_placement`）；算子侧是 `models/common/async_linear.py`。
+  逐项对应见本文「TP/SP 对齐结论」。
 - 早前基线：llmtuner `528dc9d`，TorchTitan `c6e416bbd`。
 - 表中的 ratio 除 A2 中明确标为 2026-09-21 复核的十行外，来自早期结构快照
   （llmtuner `f5be809` 附近），只用于解释来源，**不是当前工作树的实时相似度**。源码

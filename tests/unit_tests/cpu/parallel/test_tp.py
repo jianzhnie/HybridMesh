@@ -159,16 +159,19 @@ def test_a_wrapper_tp_plan_matches_the_modules_it_exposes() -> None:
 def test_qwen3_plan_resolves_rather_than_raising_on_its_qk_norms() -> None:
     """The plan an llmtuner-supported family actually ships must resolve.
 
-    Qwen3 -- the architecture the repo's own example trains -- marks
+    Qwen3 -- the architecture the repo's own example trains -- once marked
     ``q_norm`` / ``k_norm`` with HF's ``replicated_with_grad_allreduce``, a spec
-    ``resolve_plan`` had no branch for. Every Qwen3 TP run therefore died in
-    ``apply_tp`` before touching a weight, and no test caught it because the
-    only plan under test was a hand-written ``{colwise, rowwise}`` map.
+    ``resolve_plan`` had no branch for; every Qwen3 TP run died in ``apply_tp``
+    before touching a weight, and no test caught it because the only plan under
+    test was a hand-written ``{colwise, rowwise}`` map.
 
-    The two branches mean different things and both matter here: a norm entry
-    resolves to ``None`` (left whole on every rank, its gradient summed by
-    ``Trainer._allreduce_replicated_tp_grads``), while the projections still
-    resolve to real realizers.
+    Transformers 4.57 no longer ships that spec for Qwen3 (its
+    ``base_model_tp_plan`` is projections only), so the branch is pinned by
+    injecting the entry into the real plan rather than by asserting on whatever
+    the installed version happens to declare. The branch's meaning is what the
+    test is for: a norm entry resolves to ``None`` (left whole on every rank,
+    its gradient summed by ``Trainer._allreduce_replicated_tp_grads``), while
+    the projections still resolve to real realizers.
     """
     from llmtuner.models.hf_factory import build_model_config
     from llmtuner.models.hf_wrapper import HFTransformerModel
@@ -187,14 +190,17 @@ def test_qwen3_plan_resolves_rather_than_raising_on_its_qk_norms() -> None:
     )
     model = HFTransformerModel(config)
 
-    # The plan is the real one, so the entry that used to raise is present.
-    assert "replicated_with_grad_allreduce" in model.tp_plan.values()
+    # The real plan must resolve, whatever the installed transformers declares.
+    plan = resolve_plan(model, None)
 
-    plan = resolve_plan(model, None)  # must not raise
-
-    norms = [p for p in plan if p.endswith(("q_norm", "k_norm"))]
-    assert norms, "q_norm/k_norm are not in the plan -- this test is vacuous"
-    assert all(plan[p] is None for p in norms), "a norm must not be sharded"
+    # And the branch that used to raise, on the same model's real plan.
+    injected = dict(model.tp_plan)
+    injected["model.layers.*.self_attn.q_norm"] = "replicated_with_grad_allreduce"
+    injected["model.layers.*.self_attn.k_norm"] = "replicated_with_grad_allreduce"
+    resolved = resolve_plan(model, injected)
+    norms = [p for p in resolved if p.endswith(("q_norm", "k_norm"))]
+    assert len(norms) == 2, "the injected norm entries are not in the plan"
+    assert all(resolved[p] is None for p in norms), "a norm must not be sharded"
 
     matched = [
         path
@@ -245,3 +251,85 @@ def test_apply_tp_raises_when_the_plan_matches_no_module() -> None:
     cfg = ParallelConfig(tensor_parallel_size=2)
     with pytest.raises(ValueError, match="matched no nn.Linear"):
         apply_tp(Model(), mesh=object(), cfg=cfg)
+
+
+# -- head-count divisibility ---------------------------------------------------
+#
+# The check itself is exercised in ``test_head_sharding.py`` (ungated); these two
+# pin that ``apply_tp`` reaches it, and that it fires before the mesh so a bad
+# head count is a startup error rather than a shape error inside attention.
+
+
+class _HeadStub(nn.Module):
+    """Just enough of HFTransformerModel for apply_tp's validation path."""
+
+    def __init__(self, num_attention_heads: int, num_key_value_heads: int) -> None:
+        super().__init__()
+        from types import SimpleNamespace
+
+        self.model = SimpleNamespace(
+            config=SimpleNamespace(
+                num_attention_heads=num_attention_heads,
+                num_key_value_heads=num_key_value_heads,
+            )
+        )
+
+
+def test_apply_tp_refuses_heads_that_do_not_divide_tp() -> None:
+    """8 KV heads at head_dim=128 is 1024 features, which tp=16 divides -- so
+    nothing downstream rejects it, and HF's head reshape would be the first
+    thing to notice. Upstream refuses this at config parse; llmtuner refuses it
+    here, before the mesh is touched (the sentinel proves the ordering)."""
+    model = _HeadStub(num_attention_heads=8, num_key_value_heads=8)
+    cfg = ParallelConfig(tensor_parallel_size=16)
+    with pytest.raises(ValueError, match=r"num_attention_heads \(8\).*tp \(16\)"):
+        apply_tp(model, mesh=object(), cfg=cfg)
+
+
+def test_a_divisible_head_count_gets_past_the_guard() -> None:
+    """Not a blanket refusal: 8 heads over tp=8 reaches the next gate, which is
+    the plan check -- the stub declares no plan, so that is what raises."""
+    model = _HeadStub(num_attention_heads=8, num_key_value_heads=8)
+    cfg = ParallelConfig(tensor_parallel_size=8)
+    with pytest.raises(ValueError, match="no TP plan"):
+        apply_tp(model, mesh=object(), cfg=cfg)
+
+
+# -- HF plan styles this engine does not realize -------------------------------
+
+
+@pytest.mark.parametrize(
+    "spec",
+    [
+        "colwise_rep",
+        "rowwise_rep",
+        "local_colwise",
+        "local_rowwise",
+        "gather",
+        "replicate",
+    ],
+)
+def test_replicated_activation_styles_are_refused_not_reinterpreted(spec: str) -> None:
+    """``colwise_rep`` means "shard the weight but keep the activation full on
+    every rank" -- the replicated-activation formulation this engine does not
+    implement. Realizing it as plain ``colwise`` would hand the next op a
+    feature-sharded activation it does not expect (and, the other way round, a
+    left-whole attention module would attend a sequence shard without the
+    boundary gather). So the plan is refused by name, with the accepted
+    vocabulary and the reason in the message.
+
+    The families that ship these styles (Apertus, GLM-4V, Phi-4-multimodal,
+    Llama-4, FlexOlmo) therefore need their plan rewritten or TP left off.
+    """
+    plan = {"layers.*.self_attn.q_proj": spec}
+    with pytest.raises(ValueError, match=spec) as err:
+        resolve_plan(nn.Linear(4, 4), plan)
+    message = str(err.value)
+    assert "colwise" in message and "rowwise" in message
+    assert "replicated-activation" in message
+
+
+def test_an_unknown_plan_spec_still_raises_with_the_same_advice() -> None:
+    """A typo must not be mistaken for a style this engine can honor."""
+    with pytest.raises(ValueError, match="not_a_style"):
+        resolve_plan(nn.Linear(4, 4), {"layers.*.q_proj": "not_a_style"})

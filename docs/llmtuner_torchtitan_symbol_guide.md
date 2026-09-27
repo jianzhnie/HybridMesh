@@ -439,12 +439,13 @@ helper 在前文涉及关键算法时单列。成组条目（`config/`、`traine
 | `parallel/fully_shard/fsdp.py` | FSDP engine、mesh 与 placement | A2，`distributed/fsdp.py` |
 | `parallel/fully_shard/apply.py` | `apply_fsdp` HF driver | B，各模型 parallelize |
 | `parallel/parallel_dims.py`（`build_parallel_dims` / `build_mesh` 2026-09-25 自 `accelerator/mesh.py` 并入） | `ParallelDims` 与 mesh accessors、dims/mesh/distributed init | A2，`distributed/parallel_dims.py`；mesh 构建段上游无单一对应物 |
+| `parallel/head_sharding.py`（2026-09-27） | attention 头数整除守卫：`apply_tp` 的 `% tp` 与 ulysses CP 的 `% (tp*cp)` 共用一个实现 | B，`config/validation.py::validate_context_parallel` 的 `head_shard_degree`（上游在解析期校验，llmtuner 在装配期，因为头数只存在于模型 config 里） |
 | `parallel/parallelize.py`（2026-09-26 文件名对齐上游，原 parallelize_hf.py） | 五种并行的总装配 | B，transformers backend parallelize |
 | `parallel/stages.py` | `STAGES` / `STAGE_ORDER` / `PP_STAGE_ORDER`：装配顺序契约的单一来源 | C，上游无对应物 |
 | `parallel/pipeline_parallel/pipeline.py` | FQN split 与 stage 构造 | A2，transformers backend pipeline |
 | `parallel/pipeline_parallel/apply.py` | metadata、apply、schedule build | B，`distributed/pipeline_parallel.py` |
 | `parallel/tensor_parallel/linear.py` | fused/fallback collective GEMM | A2，`models/common/async_linear.py`（原 `distributed/linear.py`，上游经 dist_gemm.py 搬迁改名） |
-| `parallel/tensor_parallel/tp.py` + `apply.py` | HF plan realizer 与 `apply_tp` 入口 | B，各模型 TP plan（上游 `distributed/tensor_parallel.py` 已删除，无后继） |
+| `parallel/tensor_parallel/tp.py` + `apply.py` | HF plan realizer 与 `apply_tp` 入口 | B，各模型 TP plan（上游 `distributed/tensor_parallel.py` 于 `7e7f271e0` 删除，后继为 `protocols/sharding.py` + `hf_sharding.py` / `decoder_sharding.py` 的声明面） |
 | `config/`（`model/parallel/optimizer/checkpoint/data/training/root.py`） | 全部配置 dataclass，逐组 `__post_init__` 校验 | B，`config/configs.py` + 嵌套 Config |
 | `trainer/train.py` | parse/main | B，根 `train.py` |
 | `trainer/trainer.py` + `builder.py`（装配段）/ `validate.py` / `pp_steps.py` / `batch.py` / `seed.py` | 完整训练生命周期 | B，根 `trainer.py` + `training_engine.py` |
