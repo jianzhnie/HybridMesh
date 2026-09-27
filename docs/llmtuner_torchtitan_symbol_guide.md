@@ -214,7 +214,7 @@ step 1 恢复 optimizer、scheduler、dataloader 和 train state 后完成并保
 | `cross_entropy_loss`, `LossParallelCrossEntropy` | `components/loss.py` | 以 logits shape 选择 vocab-parallel；非法 label async 拒绝，**通过** |
 | `vocab_shard_bounds`, `next_token_targets` | 上游公式散在 loss/训练器 | llmtuner 提取成共享 helper，**通过（适配）** |
 | `chunked_lm_head_cross_entropy` | 上游 chunked CE | 自行 backward 以控制 logits 峰值，**通过**。允许不整除的短尾 chunk（sum 归约下数值等价）。性能差异登记：不合并 lm_head 的 FSDP reshard/grad-sync（上游在 chunk 循环期间禁用），chunked×FSDP 下每 chunk 多一次 all-gather/reduce-scatter，数值等价 |
-| `compute_logprobs`, `mse_loss` | 上游对应 loss | 直接自由函数，无 BaseLoss。2026-09-23 起分片路径的 `return_entropy` 真正生效：entropy 经 `_vocab_parallel_entropy` 免 gather 计算（上游 a3d59d316 同源）；batch-invariant 模式先经 `_GatherVocabShards` 全量 gather（后向为切片），**通过**。严格性差异登记：`tp_group` 已给但 `global_vocab_size=None` 时静默走全词表路径（上游 raise），当前无调用者触发 |
+| `compute_logprobs`, `mse_loss` | 上游对应 loss | 直接自由函数，无 BaseLoss。2026-09-23 起分片路径的 `return_entropy` 真正生效：entropy 经 `_vocab_parallel_entropy` 免 gather 计算（上游 a3d59d316 同源），**通过**。严格性差异登记：`tp_group` 已给但 `global_vocab_size=None` 时静默走全词表路径（上游 raise），当前无调用者触发 |
 | `OptimizersContainer` | `components/optimizer/optimizer.py` | 删除 OptimizerWrapper；多 PP part 容器直接实现 Optimizer/Stateful surface，**通过（适配）** |
 | `init_optim_state` | `components/optimizer/utils.py` | 已支持部分参数已有 Adam state，并保持首次真实 step=1，**通过** |
 | flat state dict helpers | 同文件 | FQN flat format，支持 nested state，**通过** |
@@ -253,7 +253,6 @@ step 1 恢复 optimizer、scheduler、dataloader 和 train state 后完成并保
 | `accelerator.device.*` | 无可靠同源 | C 类，统一 NPU/CUDA/MLU/MUSA/CPU 设备信息与 backend 选择，含 mmengine 风格厂商谓词 |
 | `accelerator.monitoring.*` | 部分意图见 `tools/utils.py` | C 类，包含 peak FLOPS（含 MI350X）和 memory snapshot |
 | `utils.gc.GarbageCollection` | `tools/utils.py` GC helper | 去 structured logger，**通过（适配）** |
-| `utils.batch_invariant.*` | 上游 trainer/config 内的开关 | C 类提取，线程内全局状态；消费契约与上游一致（`hf_wrapper.py` 的 mask 构造读取同一开关），**通过** |
 | `utils.logger_utils.*` | 无单一对应 | C 类日志格式与 rank helper；2026-09-24 起全仓模块 logger 统一经 `get_logger`（发射时 rank 过滤），文件输出参数随零调用删除 |
 | `utils.checkpoint_keys` | 无文件对应 | C 类，打断 config→checkpointer 导入环 |
 
@@ -449,7 +448,6 @@ helper 在前文涉及关键算法时单列。成组条目（`config/`、`traine
 | `config/`（`model/parallel/optimizer/checkpoint/data/training/root.py`） | 全部配置 dataclass，逐组 `__post_init__` 校验 | B，`config/configs.py` + 嵌套 Config |
 | `trainer/train.py` | parse/main | B，根 `train.py` |
 | `trainer/trainer.py` + `builder.py`（装配段）/ `validate.py` / `pp_steps.py` / `batch.py` / `seed.py` | 完整训练生命周期 | B，根 `trainer.py` + `training_engine.py` |
-| `utils/batch_invariant.py` | batch-invariant getter/setter | C，上游开关散在 trainer/config |
 | `components/checkpointer/checkpoint_keys.py` | checkpoint state key 常量 | C |
 | `accelerator/device.py` | 设备发现、backend 选择、厂商谓词、峰值显存查询 | C |
 | `components/checkpointer/filesystem.py` | path/storage helpers | A1，`tools/filesystem.py` |

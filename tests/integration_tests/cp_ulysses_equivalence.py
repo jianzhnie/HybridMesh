@@ -65,7 +65,6 @@ from llmtuner.trainer import (
     ParallelConfig,
     TrainingConfig,
 )
-from llmtuner.utils.batch_invariant import is_in_batch_invariant_mode
 
 SEQ = 256  # torch's CP BlockMask path requires Q_LEN % (cp * 128) == 0
 VOCAB = 128
@@ -370,7 +369,7 @@ def _check_ulysses_under_a_load_balancer(mesh, failures: list[str]) -> dict[str,
         SEQ,
         device=torch.device("cpu"),
         BLOCK_SIZE=128,
-        separate_full_blocks=not is_in_batch_invariant_mode(),
+        separate_full_blocks=True,
     )
     sharded_mask = shard_attention_mask_for_cp(full_mask, mesh["cp"], "headtail")
 

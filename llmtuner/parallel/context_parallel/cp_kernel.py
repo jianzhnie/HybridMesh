@@ -44,7 +44,6 @@ import torch.nn as nn
 from torch.distributed.device_mesh import DeviceMesh
 
 from llmtuner.models.common.masks import create_attention_mask, get_causal_mask_mod
-from llmtuner.utils.batch_invariant import is_in_batch_invariant_mode
 
 __all__ = ["CPFlexKernel"]
 
@@ -235,10 +234,9 @@ class CPFlexKernel(nn.Module):
             self._flex_cp_allgather = flex_cp_allgather
             self._cp_pg_name = c10d._get_process_group_name(cp_mesh.get_group())
         # Ulysses rebuilds the full-length causal mask per forward (see the
-        # module docstring); cache it per (length, device, batch-invariant
-        # mode). The cache lives on the kernel instance -- one per attention
-        # layer -- so the rebuild happens once per length per layer, not once
-        # per forward.
+        # module docstring); cache it per (length, device). The cache lives on
+        # the kernel instance -- one per attention layer -- so the rebuild
+        # happens once per length per layer, not once per forward.
         self._full_masks: dict = {}
 
     def forward(self, query, key, value, *, module, block_mask=None, **kwargs):
@@ -296,14 +294,13 @@ class CPFlexKernel(nn.Module):
         return out.transpose(1, 2)  # HF's interface contract is (b, s/cp, h, d)
 
     def _full_length_causal_mask(self, q_BHSD: torch.Tensor):
-        """The full-sequence causal BlockMask, built once per length, device,
-        and batch-invariant mode.
+        """The full-sequence causal BlockMask, built once per length and device.
 
         Under ulysses, q/k/v arrive at flex with the full sequence, so the mask
         is the unsharded causal one -- the same mask the wrapper builds
-        internally before Q-sharding it for kv_allgather. ``separate_full_blocks``
-        tracks the wrapper's batch-invariant-mode choice, so the ulysses
-        decomposition matches every other path's numerics.
+        internally before Q-sharding it for kv_allgather, with the same
+        ``separate_full_blocks`` handling, so the ulysses decomposition matches
+        every other path's numerics.
 
         Built from the length alone, which is why this only holds for a
         contiguous split: the causal mask depends on the *order* of the tokens,
@@ -313,7 +310,7 @@ class CPFlexKernel(nn.Module):
         ``apply_cp`` refuses ulysses with a load balancer for that reason.
         """
         seq_len = q_BHSD.shape[_SEQ_DIM]
-        key = (seq_len, q_BHSD.device, is_in_batch_invariant_mode())
+        key = (seq_len, q_BHSD.device)
         mask = self._full_masks.get(key)
         if mask is None:
             # The wrapper's own mask builder, with the wrapper's exact causal
@@ -327,7 +324,7 @@ class CPFlexKernel(nn.Module):
                 seq_len,
                 device=q_BHSD.device,
                 BLOCK_SIZE=128,
-                separate_full_blocks=not is_in_batch_invariant_mode(),
+                separate_full_blocks=True,
             )
             self._full_masks[key] = mask
         return mask

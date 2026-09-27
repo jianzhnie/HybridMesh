@@ -22,8 +22,6 @@ from tests.caps import require_env
 require_env('spmd_types')
 
 
-import inspect
-
 import pytest
 import torch
 
@@ -200,61 +198,3 @@ def test_ulysses_packed_is_accepted_and_the_strategy_is_latched(tp_cp_mesh) -> N
         ParallelConfig(tensor_parallel_size=2, context_parallel_size=2),
     )
     assert model.cp_strategy == "kv_allgather"
-
-
-# -- the ulysses full-length mask ----------------------------------------------
-
-
-def test_full_length_mask_tracks_batch_invariant_mode(monkeypatch) -> None:
-    """The kernel's rebuilt mask must take the wrapper's separate_full_blocks
-    choice, or ulysses decomposes the mask differently from every other path.
-
-    Spied at the ``create_block_mask`` call site; a size-1 fake CP group is
-    enough because mask building runs before any collective.
-    """
-    import torch.distributed as dist
-    from torch.distributed.device_mesh import init_device_mesh
-    from torch.testing._internal.distributed.fake_pg import FakeStore
-
-    from llmtuner.parallel.context_parallel.cp_kernel import CPFlexKernel
-    from llmtuner.utils.batch_invariant import set_batch_invariant_mode
-
-    store = FakeStore()
-    dist.init_process_group("fake", store=store, rank=0, world_size=1)
-    try:
-        mesh = init_device_mesh("cpu", (1,), mesh_dim_names=("cp",))
-        kernel = CPFlexKernel(cp_mesh=mesh["cp"], strategy="ulysses")
-
-        import torch.nn.attention.flex_attention as flex
-
-        calls = []
-        real_create_block_mask = flex.create_block_mask
-
-        def _spy(*args, **kwargs):
-            calls.append(kwargs)
-            return real_create_block_mask(*args, **kwargs)
-
-        monkeypatch.setattr(flex, "create_block_mask", _spy)
-
-        q = torch.randn(1, 1, 256, 8, dtype=torch.float64)
-        set_batch_invariant_mode(False)
-        try:
-            kernel._full_length_causal_mask(q)
-            set_batch_invariant_mode(True)
-            kernel._full_length_causal_mask(q)
-        finally:
-            set_batch_invariant_mode(False)
-
-        # Two builds: mode remains part of the cache key on every supported
-        # torch. Newer torch releases expose ``separate_full_blocks`` and must
-        # receive the wrapper's matching choice; torch 2.10 removed the knob,
-        # so the compatibility path cannot pass it.
-        assert len(calls) == 2
-        if "separate_full_blocks" in inspect.signature(
-            real_create_block_mask
-        ).parameters:
-            assert [c["separate_full_blocks"] for c in calls] == [True, False]
-        else:
-            assert all("separate_full_blocks" not in c for c in calls)
-    finally:
-        dist.destroy_process_group()

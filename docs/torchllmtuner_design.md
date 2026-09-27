@@ -207,7 +207,7 @@ llmtuner/
                                 与 filesystem) / metrics / profiler / optimizer
   datasets/    18 模块          Grain 数据图 + random_data + types.py(Batch)
                                 + {text(含 renderer),multimodal}
-  utils/        4 模块          logger_utils / gc / batch_invariant
+  utils/        3 模块          logger_utils / gc
                                 （filesystem 与 checkpoint_keys 归
                                 components/checkpointer/；seed 归 trainer/）
 

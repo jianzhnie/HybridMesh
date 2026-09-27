@@ -103,7 +103,7 @@ CLI 用 `HfArgumentParser` 把九个配置组摊平成扁平旗标（`--tensor_p
 | `components/metrics.py` / `components/profiler.py` / `components/tokenizer.py` | 指标聚合与上报（stdout / TensorBoard / WandB）、profiler 与显存快照、tokenizer                                                                                                          |
 | `components/optimizer/`                                                        | 优化器容器（正则分组、per-group lr/wd）、WSD 学习率调度、EMA、FQN 键状态序列化                                                                                                          |
 | `datasets/`                                                                    | Grain 数据层：`build_dataloader` 是唯一装配入口，其余为 dataset / packing / sources / collators / loader；`text/` 渲染 chat 模板，`multimodal/` 惰性依赖 torchvision                    |
-| `utils/`                                                                       | logger、训练步边界 GC、batch-invariant 开关                                                                                                                                             |
+| `utils/`                                                                       | logger、训练步边界 GC                                                                                                                                                                   |
 
 ## 并行维度支持情况
 
@@ -189,8 +189,6 @@ PYTHONPATH=. torchrun --nproc_per_node=2 tests/integration_tests/cp_wiring_equiv
   见 §8 第 11 条。
 - **vocab 分片的 `lm_head` + 端到端 vocab-parallel loss 未接线**：`components/loss.py`
   的数学与 CPU 等价性测试就位，缺的是模型/训练器侧的两步接线（登记为 D 类）。
-- **`utils/batch_invariant.py` 的开关可设置但尚未安装对应 math-mode kernel**（模块内
-  自述的 TODO）。
 - 本机（Intel macOS / torch 2.2.2）只能验证 `import llmtuner` 与 CPU 单测；多卡、
   数值等价性与端到端 smoke 都需要 torch≥2.12 + 多卡或目标设备。
 

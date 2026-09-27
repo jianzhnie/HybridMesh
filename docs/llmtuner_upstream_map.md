@@ -139,7 +139,6 @@ A2 分类（见上表），mesh 构建这一段记在该行的"改写点"里，�
 | `accelerator/monitoring.py` | 与 `tools/utils.py` 0.107，独立实现（含 `get_peak_flops`）；2026-09-24 从 `utils/` 迁入 |
 | `components/checkpointer/checkpoint_keys.py` | 上游无 |
 | `accelerator/device.py` | 上游无（0.382 是噪音，命中实验目录）；2026-09-24 从 `utils/` 迁入 `accelerator/` |
-| `utils/batch_invariant.py` | 上游无；上游把 batch-invariant 开关放在 `trainer.py`/`config/configs.py` 里，没有独立模块 |
 | `models/common/activation.py` | 与上游同名但不同源；公式由 llmtuner 自持，不能按 A 类覆盖 |
 | `models/common/embedding.py` | 与上游同名但不同源；包含 llmtuner 的 vocab-shard 契约 |
 | `datasets/random_data.py` | 合成语料，上游无 |
@@ -514,6 +513,21 @@ llmtuner 侧是 `datasets/multimodal/mm_image.py`），本表的 llmtuner 列是
   `test_hf_wrapper.py` 在本机被 `spmd_types` 门禁跳过，改以注入最小 torch/spmd 垫片后脱门禁运行，
   三处分别为 20 passed / 3 passed（其余因 fake PG 与 DeviceMesh 的 2.2 差异 errored）/
   1 passed，新增用例全绿。
+- 2026-09-27 四次增量（删除 batch-invariant 特性面）：删除 `llmtuner/utils/batch_invariant.py`
+  及全部消费点。依据是上游语义：torchtitan 的开关由 `debug.batch_invariant` 驱动
+  `distributed/utils.py::set_batch_invariance`（注册 ATen override + 设 NCCL 环境），但
+  `trainer.py` 对 SFT 直接 `raise ValueError("Batch-invariant mode is not needed in
+  supervised learning.")`——该特性只服务 `rl/`。llmtuner 是 SFT trainer，且
+  `set_batch_invariant_mode` 全仓无生产调用者，原模块自述"开关可设但未安装 kernel"的
+  TODO 即其唯一存在理由。删除面：`batch_invariant.py`（整文件）；`hf_wrapper.py` /
+  `cp_kernel.py` 的 `separate_full_blocks=not is_in_batch_invariant_mode()` 改为常量
+  `True`（即此前的默认值；torch 2.10 无该旋钮时 `models/common/masks.py` 仍会 pop 掉）；
+  `components/loss.py` 的 `_GatherVocabShards` / `_gather_vocab_shards` 与
+  `compute_logprobs` 的 gather 分支（vocab-parallel 的 `reduction="none"` 路径保留）；
+  `test_cp.py` 的 `test_full_length_mask_tracks_batch_invariant_mode`；
+  `vocab_parallel_loss_equivalence.py` 的 gather 值/梯度等价块；
+  `cp_ulysses_equivalence.py` 的同名调用点；以及本文、符号指南、设计文档与
+  `llmtuner/README.md` 的登记行。
 - 检查后续漂移：`git -C <torchtitan> log f35966713..HEAD -- torchtitan/`。
 - 2026-09-23 映射修订：上游 `distributed/linear.py` 已删除、内容迁入
   `models/common/dist_gemm.py`（改名 `AsyncAllGatherLinear`/`AsyncLinearReduceScatter`，

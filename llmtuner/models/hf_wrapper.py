@@ -52,7 +52,6 @@ from ..parallel.context_parallel import (
     shard_padding_mask_for_tp,
 )
 from ..parallel.parallel_dims import ParallelDims
-from ..utils.batch_invariant import is_in_batch_invariant_mode
 from ..utils.logger_utils import get_logger
 from .common.cast_linear import TORCH_DTYPE_MAP, to_cast_linear
 from .common.masks import (
@@ -654,7 +653,7 @@ class HFTransformerModel(nn.Module):
             num_tokens,
             device=positions.device,
             BLOCK_SIZE=128,
-            separate_full_blocks=not is_in_batch_invariant_mode(),
+            separate_full_blocks=True,
         )
 
     def _get_cp_attention_masks(self, positions: torch.Tensor):
