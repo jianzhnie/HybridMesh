@@ -442,18 +442,21 @@ def compute_logprobs(
 
     Returns ``logprobs``, or ``(logprobs, entropy)`` when ``return_entropy``.
     """
-    if tp_group is not None and global_vocab_size is not None:
-        if logits.shape[-1] != global_vocab_size:
-            # reduction="none" is the vocab-parallel path's per-token form:
-            # it returns -NLL directly, so no vocab all-gather is needed.
-            logprobs = -LossParallelCrossEntropy.apply(
-                logits, labels, tp_group, global_vocab_size, "none"
-            )
-            if not return_entropy:
-                return logprobs
-            with torch.no_grad():
-                entropy = _vocab_parallel_entropy(logits, tp_group)
-            return logprobs, entropy
+    if (
+        tp_group is not None
+        and global_vocab_size is not None
+        and logits.shape[-1] != global_vocab_size
+    ):
+        # reduction="none" is the vocab-parallel path's per-token form: it
+        # returns -NLL directly, so no vocab all-gather is needed.
+        logprobs = -LossParallelCrossEntropy.apply(
+            logits, labels, tp_group, global_vocab_size, "none"
+        )
+        if not return_entropy:
+            return logprobs
+        with torch.no_grad():
+            entropy = _vocab_parallel_entropy(logits, tp_group)
+        return logprobs, entropy
 
     # One bf16 -> fp32 upcast, shared by the logprobs and (if asked) the entropy.
     logits = logits.float()
