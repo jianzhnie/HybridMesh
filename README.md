@@ -64,7 +64,7 @@ torchrun --nproc_per_node=2 -m llmtuner --data_parallel_shard_size 2
 结构审计见 `docs/llmtuner_structure.md`；设计见 `docs/torchllmtuner_design.md`
 （`docs/FRAMEWORK_DESIGN.md` 是**立项前的评估稿，已归档**，其中的 `hftrain/`
 目录骨架未落地，读之前先看它的抬头）。
-优化器 checkpoint 的磁盘格式在 `0fd6cbe` 变更过（改为扁平 FQN keying），
+优化器 checkpoint 的磁盘格式在 `32410ac` 变更过（改为扁平 FQN keying），
 旧 checkpoint 不再能加载，见 `docs/optimizer_checkpoint_format.md`。
 
 NPU 上可用 [`examples/train_qwen3_8b_npu.sh`](examples/train_qwen3_8b_npu.sh) 运行本地

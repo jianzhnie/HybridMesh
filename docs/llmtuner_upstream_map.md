@@ -391,11 +391,11 @@ llmtuner 侧是 `datasets/multimodal/mm_image.py`），本表的 llmtuner 列是
 
 ## 版本与漂移
 
-- 本文最近一次人工审计工作树：llmtuner `5749d19`（+本轮改动），TorchTitan `b64103072`；
+- 本文最近一次人工审计工作树：llmtuner `11002c1`（+本轮改动），TorchTitan `b64103072`；
   详细验证记录见
   `llmtuner_torchtitan_alignment_audit_2026-09-23.md`（不在当前工作区）。
 - 2026-09-26 增量审计：基线推进至 TorchTitan `9e159aed7`（审计时上游 HEAD 附近），
-  llmtuner 工作树 HEAD `1a955d7`（+本轮文档改动）。`b64103072..9e159aed7` 间三个
+  llmtuner 工作树 HEAD `8c0ac4c`（+本轮文档改动）。`b64103072..9e159aed7` 间三个
   提交的处理结论：
 
   | 提交 | 结论 |
@@ -403,10 +403,10 @@ llmtuner 侧是 `datasets/multimodal/mm_image.py`），本表的 llmtuner 列是
   | `9e159aed7` TP projection 后端重构（#4704） | **语义已对齐，无代码动作**。通信角色不变量在 llmtuner 已成立：column 拥有 input collective（`ColumnParallelLinear` 融合 all-gather）、row 拥有 output collective（`RowParallelLinear` 融合 reduce-scatter）；共享输入多投影在父模块一次性 gather（`GatherSequenceFirst` + `ColwiseLinearNoGather`，同上游"父模块持有、子投影为 plain Linear"语义）。`_linear()` seam 服务 LoRA/量化（llmtuner 裁剪面，不移植）；`PartialBiasRowwiseLinear` 上游删除并并入 `RowParallelLinear`，llmtuner 同名类的 bias I→P 语义本就一致，保留（仅测试使用）。AsyncTensorParallelTransform 重写是上游 Module-registry 面的模块替换实现，llmtuner async TP 走 inductor `_micro_pipeline_tp` + symm-mem，机制不受影响；"转换后（LoRA/量化）投影不支持 async TP"的约束在 llmtuner 无对应面（两者均裁剪），不登记守卫。上游 `dist_gemm.py` 改名 `async_linear.py`，本文映射随之更新。 |
   | `847f98a6f` RegionAC AllToAll remat regions（#4837） | **随 RegionAC/DeepEP 缺口锁定，解锁条件不变**（torch_remat + CUDA deep_ep 核）。TokenDispatcher 变 Module 是 remat region 机制的载体，llmtuner 无消费方。可独立移植的语义——dispatch/combine 恒 SAVE——经核对**已在 llmtuner 成立**：selective AC 的 save set 含 `_c10d_functional.all_to_all_single`（`activation_checkpoint.py` 的 `comm_ops`），即 llmtuner AllToAllTokenDispatcher 用的原语，无需动作。 |
   | `090c0c931` graph_trainer none AC MemoryPolicy（#4476） | **实验目录，不适用**。`experiments/graph_trainer/` 无 llmtuner 对应面；等义语义 llmtuner 已有（`activation_checkpoint_mode='none'`）。 |
-  上一轮审计（llmtuner `8a2f269` × TorchTitan `c6e416bbd`）引用的
+  上一轮审计（llmtuner `528dc9d` × TorchTitan `c6e416bbd`）引用的
   `llmtuner_torchtitan_alignment_audit_2026-09-21.md` 不在当前工作区。
 - 2026-09-27 增量审计：基线推进至 TorchTitan `c8a3e7666`（审计时 HEAD），llmtuner 工作树
-  `58f1e6f`（本轮改动落为 `7393c9a`）。`9e159aed7..c8a3e7666` 共 20 个提交、118 个文件，与本仓相关
+  `b6bbb33`（本轮改动落为 `142bb6d`）。`9e159aed7..c8a3e7666` 共 20 个提交、118 个文件，与本仓相关
   的只有 6 处（其余集中在 `rl/`、`quantization/`、`experiments/graph_trainer/`、
   `overrides/fused_mla.py`、`distributed/flex_shard/`、`config/transform/`，属范围外）。
   逐项结论：
@@ -436,11 +436,11 @@ llmtuner 侧是 `datasets/multimodal/mm_image.py`），本表的 llmtuner 列是
   要复跑 ②（vocab-sharded head）与 ③（PP）的等价性，需要 torch≥2.12 + 多卡；
   ② 的 first half（loss 调用点 vocab-aware）不需要多卡，但需要 trainer 可导入，
   即同样受这批 API 阻断。
-  同轮另修一处 llmtuner 内部缺陷：`a168128` 把 `parallel/parallelize_hf.py` 改名为
+  同轮另修一处 llmtuner 内部缺陷：`62df262` 把 `parallel/parallelize_hf.py` 改名为
   `parallel/parallelize.py` 时漏改两个 test 侧 import
   （`tests/unit_tests/cpu/parallel/test_activation_checkpoint.py`、
   `tests/integration_tests/ep_fsdp_equivalence.py`）。该缺陷此前一直被环境门禁跳过掩盖，
-  在 torch≥2.12 的环境里会是 `ModuleNotFoundError`；已于 `7393c9a` 修复。
+  在 torch≥2.12 的环境里会是 `ModuleNotFoundError`；已于 `142bb6d` 修复。
 - 检查后续漂移：`git -C <torchtitan> log c8a3e7666..HEAD -- torchtitan/`。
 - 2026-09-23 映射修订：上游 `distributed/linear.py` 已删除、内容迁入
   `models/common/dist_gemm.py`（改名 `AsyncAllGatherLinear`/`AsyncLinearReduceScatter`，
@@ -449,9 +449,9 @@ llmtuner 侧是 `datasets/multimodal/mm_image.py`），本表的 llmtuner 列是
   （autograd 原语）与 `models/common/async_linear.py`（模块层，llmtuner 2026-09-26
   同步改名），一对二；
   `distributed/tensor_parallel.py` 已随 DTensor 后端整体删除、无后继。
-- 早前基线：llmtuner `8a2f269`，TorchTitan `c6e416bbd`。
+- 早前基线：llmtuner `528dc9d`，TorchTitan `c6e416bbd`。
 - 表中的 ratio 除 A2 中明确标为 2026-09-21 复核的十行外，来自早期结构快照
-  （llmtuner `58eb279` 附近），只用于解释来源，**不是当前工作树的实时相似度**。源码
+  （llmtuner `f5be809` 附近），只用于解释来源，**不是当前工作树的实时相似度**。源码
   变化后应运行下方脚本重算，不能据旧 ratio 判定漂移。
 - 2026-09-22 设备验证补充：Qwen3-8B 已按 TorchTitan 的 meta 构建 → FSDP → `to_empty`
   → checkpoint load 顺序完成 8 卡 HCCL、4096 序列的真实训练，并完成完整 DCP

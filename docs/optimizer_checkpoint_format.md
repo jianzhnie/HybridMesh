@@ -1,6 +1,6 @@
 # Optimizer checkpoint 格式迁移
 
-本文记录 `OptimizersContainer` 改动（commit `0fd6cbe`）中唯一的破坏性变更：
+本文记录 `OptimizersContainer` 改动（commit `32410ac`）中唯一的破坏性变更：
 **磁盘上的 optimizer state 采用了新布局。**
 
 ## 原因
@@ -26,7 +26,7 @@ re-keying 到 FQN 的方式绕过，但只在显式要求时（`fqn_keying=True`
 
 ## 影响
 
-**`0fd6cbe` 之前写出的 checkpoint 无法载入其后的构建。** 没有也不计划提供转换脚本：
+**`32410ac` 之前写出的 checkpoint 无法载入其后的构建。** 没有也不计划提供转换脚本：
 映射只能从*旧* checkpoint 自己的 metadata 恢复，而这是一个 pre-1.0 研究框架。
 
 从旧 checkpoint 恢复的运行会响亮失败（DCP 匹配不到不存在的键），而不是带着冷启动
