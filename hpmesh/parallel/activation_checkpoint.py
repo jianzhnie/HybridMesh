@@ -30,9 +30,12 @@ Three of its four policies are ported:
   dump folder.
 
 Both wrapping modes use the same wrapper factory as upstream
-(``torch.distributed.algorithms._checkpoint.checkpoint_wrapper``), with the
-same non-default knob, ``early_stop=False``, so a checkpointed region inside
-the layer cannot end the recompute early. ``"full"`` additionally keeps
+(``torch.distributed.algorithms._checkpoint.checkpoint_wrapper``) and the same
+``early_stop`` setting as upstream, which since upstream #4836 is the torch
+default ``True``: the recompute stops as soon as every needed tensor is
+produced instead of replaying the rest of the region. The old ``False`` was a
+workaround for an upstream llama4 memory leak that no longer applies, and
+carried a 1-4% step-time cost. ``"full"`` additionally keeps
 ``preserve_rng_state=True`` by default, so the recompute sees the RNG state
 the original forward saw and the run stays bitwise-equal to the
 uncheckpointed one.
@@ -261,7 +264,7 @@ def _wrap_selective(
         context_fn=lambda: create_selective_checkpoint_contexts(policy),
         preserve_rng_state=cfg.preserve_rng_state,
         determinism_check=cfg.determinism_check,
-        early_stop=False,
+        early_stop=True,
         debug=cfg.debug,
     )
 
@@ -375,7 +378,7 @@ def apply_ac(
             wrapped = ptd_checkpoint_wrapper(
                 transformer_block,
                 preserve_rng_state=preserve_rng_state,
-                early_stop=False,
+                early_stop=True,
             )
         layers.register_module(layer_id, wrapped)
 

@@ -441,8 +441,13 @@ tp>1×ep>1×cp>1 在 config 校验 loud-raise（未验证）；shared-expert 块
 tp 在两条路径都 loud-raise（ep=1 的边界 collective 未组合验证，tp×ep 的 swap 处
 同样拒绝）；plan 声明 MoE 规格但找不到 HF MoE 块（ep=1）loud-raise（防静默复
 制）；GPT-OSS 等布局沿用 swap 探针的 NotImplementedError。边界 collective 的真多
-卡前后向等价性**环境未覆盖**（本机 torch 2.2.2 无分布式执行栈），待 torch≥2.12
-多卡复跑。不要把未覆盖项写成已验证能力。
+卡前后向等价性**环境未覆盖**（2026-09-27 复核：本机 torch 2.2.2 的 CPU gloo 可用，
+`torchrun --nproc_per_node=2` 能起来，但该 torch 缺一整组新 API：`spmd_types==0.2.5`
+装得上却 import 失败（缺 `torch.distributed._local_tensor`）、`torch.distributed.tensor`
+无公开 `DTensor`、无 `torch.distributed._composable.fsdp`、无 `torch.nn.attention`
+（flex_attention）、无 `torch.distributed.pipelining`、无 CUDA，因此模型层与并行层整体
+不可导入，25 个 integration 脚本 2 passed / 23 failed 且失败全部来自这批缺失）。
+待 torch≥2.12 多卡复跑。不要把未覆盖项写成已验证能力。
 
 ### 5.4 CP / EP（context_parallel/ + expert_parallel/）
 
@@ -546,7 +551,11 @@ loss (sum 归约, loss mesh) -> backward -> clip_grad_norm_ (跨 PP 归约) -> A
 优先——stub 跑法预插的 fake 算"有"），缺失即模块级 skip，理由统一
 `[env] missing: <名字>`，`pytest -rs` 即环境覆盖报告。裸跑
 `python -m pytest tests/unit_tests -q` 在任何环境给出正确的
-passed/skipped，不再有仓外清单。
+passed/skipped，不再有仓外清单。**本机例外**：macOS 上 pytest 的
+`_readline_workaround` 会在 import `readline` 时 segfault（与 torch 无关，空测试
+文件同样崩），加 `-p no:capture` 跳过 capture 插件即可正常跑，例如
+`python -m pytest -p no:capture tests/unit_tests -q`。跳过 capture 后依赖
+`capsys` 的断言会失去捕获能力，本仓测试不使用该 fixture。
 
 G4 的兜底是 `integration_tests/` 里那套"分片 == 全量"的等价性测试。它们按拓扑用 2 或
 4 个 gloo rank 启动，自建 mesh、不依赖 trainer 装配（`pp_equivalence.py` 除外，它驱动
@@ -620,6 +629,18 @@ vocab-parallel embedding 的全局 `padding_idx` 越界/梯度抑制（上游 #4
     的 2-rank gloo 等价性均通过；PP 1F1B 在修复 schedule API 兼容后可以运行，但
     step 2 起与非 PP 参考轨迹偏离（4 step 最大约 `8.5e-3`），因此 PP 当前状态是
     **未通过**，不得以"闭环"或"完全对齐"描述，需继续定位跨 stage backward/update。
+11. **有意保留的差异（2026-09-27 定性）：routed experts 的纯 TP。** 上游在 #4794
+    （`610bb6f6b`，2026-09-20，**早于本仓审计基线 `9e159aed7`**）明确
+    "Deprecate pure TP on routed experts"，并在 HF MoE 路径的 `build_and_swap_native_moe`
+    里硬性拒绝 `expert_parallel_degree < tensor_parallel_degree`。hpmesh **没有**这条
+    守卫，且方向相反：`tp > 1, ep = 1` 时由 `shard_experts_for_tp` +
+    `TPMoeSequenceBoundary` 把专家权重沿 F 维切分（即上游所说的 pure TP on routed
+    experts），`tp > ep >= 2` 也一并放行。这是 hpmesh 2026-09-25 起有意扩展的能力，
+    不是遗漏：上游弃用它是因为其声明式放置下这条路要复制 token 计算，hpmesh 的结构化
+    实现（F 维原地切分 + 块边界 AG/RS 对偶）不复制 token。**因此不照搬该守卫**——
+    照搬会删掉本仓已实现并有单测的能力；两边不构成同一实现的两个版本，不能按
+    "上游有守卫、本地没有"判为缺口。已登记的组合边界仍然有效：`tp×ep×cp`、shared-expert
+    块 × tp 都是 loud-raise。
 
 多卡设备验证清单（按环境选择 gloo/nccl/hccl，并确保 PyTorch API 版本匹配）：
 

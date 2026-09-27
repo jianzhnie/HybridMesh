@@ -37,7 +37,6 @@ require_env(
 
 import pytest
 import torch
-from hpmesh.parallel.parallelize_hf import parallelize_hf_transformers
 from torch.distributed.algorithms._checkpoint.checkpoint_wrapper import (
     CheckpointWrapper,
 )
@@ -58,6 +57,7 @@ from hpmesh.parallel.activation_checkpoint import (
     mm_recompute_shapes,
     selective_policy,
 )
+from hpmesh.parallel.parallelize import parallelize_hf_transformers
 
 _VOCAB = 32
 _HIDDEN = 16

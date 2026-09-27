@@ -32,6 +32,10 @@ TorchTitan `Module` 和声明式 `_sharding_config` 后产生的形状变化，�
 验证上游基线为 2026-09-22 的 TorchTitan `c6e416bbd`；2026-09-23 已审计至
 `b64103072`（记录见
 `hpmesh_torchtitan_alignment_audit_2026-09-23.md`（不在当前工作区））。
+2026-09-27 增量审计至 TorchTitan `c8a3e7666`（`9e159aed7..c8a3e7666`，20 个提交）：
+与本仓相关的只有 activation checkpoint 的 `early_stop` 同步（A 类，已改）与一组
+`GroupedLinear` 表示重构（B 类，表示等价、无需动作）；逐项结论见
+[`hpmesh_upstream_map.md`](./hpmesh_upstream_map.md) 的版本与漂移章节。
 最新 `vllm-ascend-env` 容器已实际完成 8 卡 HCCL Qwen3-8B、4096 序列、真实 HF 权重和
 真实 SFT 数据的 FSDP2+Full AC 训练，并完成完整 DCP checkpoint 的 save→resume：从
 step 1 恢复 optimizer、scheduler、dataloader 和 train state 后完成并保存 step 2。
@@ -179,7 +183,7 @@ step 1 恢复 optimizer、scheduler、dataloader 和 train state 后完成并保
 | `split_model_into_stages` | 同文件 stage split | 删除模块用 `Identity`，每 stage 保留 rotary，兼容 Torch 2.10 `PipelineStage`，**通过（适配）** |
 | `apply_pp`, `build_pipeline_schedule` | `distributed/pipeline_parallel.py` | hpmesh 直接消费 HF 五部件契约，**通过（适配）** |
 | `apply_pp(first_stage_module_fqns=...)`, `prepend_first_stage_modules` | 同文件 `pipeline_with_first_stage_modules` | 额外顶层模块并入 stage 0：仅作用自动切分，存在的 FQN 按序前插，已占有/重复 FQN raise、缺失跳过，显式 `module_fqns_per_model_part` 给定时忽略并告警（同上游委托语义）；`split_model_into_stages` 配套把 wrapper `named_children()` 不呈现的额外顶层模块在非属主 stage 置 `Identity`（上游 "pruned on other stages" 语义），装五部件的容器经"包含已呈现部件"判定跳过。stage FQN 稳定、默认 None 逐位不变，**通过（适配）** |
-| `apply_ac`, selective helpers, `_apply_memory_budget` | `distributed/activation_checkpoint.py` | FullAC/SelectiveAC 已移植，**通过**；MemoryBudgetAC 已移植为 `mode='memory_budget'` + `MemoryBudgetACConfig`（设 `torch._functorch.config.activation_memory_budget`，需 compile，torch 无 knob 时 loud-raise），见 §9.1；RegionAC 未移植（配置即 `NotImplementedError`）。FullAC 的 `determinism_check`/`debug` 旋钮未暴露（固定默认值），登记于此 |
+| `apply_ac`, selective helpers, `_apply_memory_budget` | `distributed/activation_checkpoint.py` | FullAC/SelectiveAC 已移植，**通过**；两处 `early_stop` 已于 2026-09-27 跟随上游 #4836 同步为 `True`（此前为上游 #1580 的 `False` workaround）。MemoryBudgetAC 已移植为 `mode='memory_budget'` + `MemoryBudgetACConfig`（设 `torch._functorch.config.activation_memory_budget`，需 compile，torch 无 knob 时 loud-raise），见 §9.1；RegionAC 未移植（配置即 `NotImplementedError`）。FullAC 的 `determinism_check`/`debug` 旋钮未暴露（固定默认值），登记于此 |
 | `apply_compile`, `_maybe_enable_async_tp`, `maybe_regional_inductor_backend`, `maybe_regional_inductor` | `distributed/compile.py` 同名函数 | 四件全移植为 `parallel/compile.py` + `CompileConfig`（`training.compile_config`，默认全关 = 旧整体 compile 逐位不变）：逐 block compile 用 `Module.compile` 就地（`per_block=True`）；async TP 设 `_micro_pipeline_tp` + symm-mem 注册（按 group 名去重），配置期拒无 compile/tp=1，装配期对无 mesh/旧 torch loud-raise；regional_inductor 仅 `aot_eager`×flex 触发（wrapper `uses_flex_attention` 判定，annotation 在 `flex_attention_hf`，inductor_configs 传空），flex×其他 backend `ValueError`、torch 无该模块 `NotImplementedError`；`capture_scalar_outputs` 按上游条件（`_iter_moe_layers` 非空）设置，dense 不动。上游的 `skip_fwd_side_effects_in_bwd_under_checkpoint` 与 FakeTensorMode monkeypatch 未移植（登记于 upstream map），**通过（适配）** |
 
 ## 6. 数据系统

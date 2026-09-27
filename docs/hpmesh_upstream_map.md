@@ -174,6 +174,7 @@ C 类上会把项目**故意删掉**的抽象又拽回来。
 | `models/common/token_dispatcher.py` 的 DeepEP/HybridEP 两个 dispatcher | 登记缺口（2026-09-25，§9.1 第 13 项）：CUDA-only（`deep_ep`/`hybridep` 内核 + GB200/NVLink72 假设）且 dispatch/combine 经上游 `distributed/deepep/` wrappers（1155 行）驱动，可选导入无法忠实表达契约，故不 vendor；`ParallelConfig.ep_token_dispatcher="deepep"/"hybridep"` 配置期 NotImplementedError（含解锁条件），swap 入口防御性同语义。解锁条件：vendor 上游 wrappers + pyproject 加 CUDA-only optional extra + CUDA 目标设备复跑数值。`AllToAllTokenDispatcher` 满足同一 dispatch/combine 契约 |
 | `models/common/token_dispatcher.py` 的 `TorchAOTokenDispatcher` | **已适配为可选导入适配层**（2026-09-25，§9.1 第 13 项）：torchao 不进 pyproject、不复制上游 Config 嵌套。`TorchAOTokenDispatcher(num_experts, top_k, pad_multiple)` 继承 `AllToAllTokenDispatcher`，仅 `_permute`/`_unpermute` 改委托 torchao `permute_and_pad`（expert-major 重排 + 每组 pad 到 `pad_multiple`，EP=1 本地 padded permute 路径一并移植），构造期 lazy import，未装 torchao loud-raise ImportError（带 `pip install torchao` 指引）；`ParallelConfig.ep_token_dispatcher="torchao"` + `ep_torchao_pad_multiple`（默认 16=FP8）接线 `apply_ep` → swap，默认 `alltoall` 逐位不变。数值**环境未覆盖**（本机无 torchao/CUDA，单测以 sys.modules fake 覆盖 sentinel-row padding 契约与 EP=1 combine 等价性）；解锁条件：CUDA 目标设备装 torchao 复跑 |
 | DSA（DeepSeek sparse attention）的稠密 additive mask 路径 | 上游 `model.py` 的 `_build_dense_attention_mask` + indexer 支持；**2026-09-24 起 hpmesh wrapper 构造期对 `index_topk` fail-fast**（静默走 flex BlockMask 的错误语义已消除），稠密 mask 执行路径本身仍未移植，无消费者 |
+| vocab-sharded `lm_head` + 端到端 vocab-parallel loss | **登记为 D 类，2026-09-27 写提案，未实现**。上游 HF 路径无条件把 `lm_head` 的 weight/bias 沿 vocab 维 `S(0)` 切、输入从 sequence-parallel gather 回全长、输出 `S(-1)`（vocab 分片），由 core `cross_entropy_loss` 检测到 vocab 分片后走 vocab-parallel CE（`hf_sharding.py` 的 `lm_head` 段）。hpmesh 目前把 HF plan 的 `colwise_gather_output` 解析为 None、`lm_head` 保持复制（`tensor_parallel/tp.py` 的 `resolve_plan`），所以 `components/loss.py` 里那套 vocab-parallel 数学**没有可达路径**（`compute_logprobs` 自己写了这条 reachability note）。**依赖与契约**：`components/loss.py` 的数学与覆盖已就位（含 V=8/7/5 的 uneven shard、IGNORE_INDEX、`reduction="none"` 用例，见 `integration_tests/vocab_parallel_loss_equivalence.py`，本机可跑且通过），缺的是模型/训练器侧接线。**分两步，顺序不可颠倒**：(1) 先把四处 loss 调用点改成 vocab-aware——`Trainer._loss_sum`（trainer.py）、`chunked_lm_head_cross_entropy`（loss.py，现在用裸 `F.cross_entropy`，与分片 head 不兼容）、PP 的 `_scalar_loss_fn`、`Validator` 经 `_loss_sum` 的复核路径——统一传 `tp_group` + `global_vocab_size`；因为 `cross_entropy_loss` 是**按形状**选择路径，head 仍复制时这一步是严格 no-op（shape == global_vocab_size 走 plain 分支），可独立验收；(2) 再把 `colwise_gather_output` 映射到 vocab-shard realizer 并配等价性测试。**失败模式**：只做 (2) 不做 (1) 会让 `F.cross_entropy` 在本地 V/tp 上静默算出错误的 loss（不报错、loss 有限），因此 (2) 落地时必须同时加守卫——head 分片而 loss 未被告知 vocab 分片时 loud-raise，而不是静默退化。**验证计划**：(1) 用现有 CPU 套件 + 现有 gloo vocab 测试确认 no-op；(2) 需要 torch≥2.12 + 多卡的 TP 等价性（分片 head 的 logits/loss/梯度 == 单卡全长参照），本机环境不可达。 |
 
 **已从 D 移除（部分）**（2026-09-25）：`models/common/moe_sharding.py`——上游该文件是
 声明层：`ShardingConfig` 声明 router 参数 TP Replicate、routed 专家权重仅在 EP 开时
@@ -394,7 +395,42 @@ hpmesh 侧是 `datasets/multimodal/mm_image.py`），本表的 hpmesh 列是唯�
   | `090c0c931` graph_trainer none AC MemoryPolicy（#4476） | **实验目录，不适用**。`experiments/graph_trainer/` 无 hpmesh 对应面；等义语义 hpmesh 已有（`activation_checkpoint_mode='none'`）。 |
   上一轮审计（hpmesh `8a2f269` × TorchTitan `c6e416bbd`）引用的
   `hpmesh_torchtitan_alignment_audit_2026-09-21.md` 不在当前工作区。
-- 检查后续漂移：`git -C <torchtitan> log 9e159aed7..HEAD -- torchtitan/`。
+- 2026-09-27 增量审计：基线推进至 TorchTitan `c8a3e7666`（审计时 HEAD），hpmesh 工作树
+  `58f1e6f`（+本轮改动）。`9e159aed7..c8a3e7666` 共 20 个提交、118 个文件，与本仓相关
+  的只有 6 处（其余集中在 `rl/`、`quantization/`、`experiments/graph_trainer/`、
+  `overrides/fused_mla.py`、`distributed/flex_shard/`、`config/transform/`，属范围外）。
+  逐项结论：
+
+  | 上游文件/符号 | 上游意图 | 分类 | hpmesh 处理 |
+  |---|---|---|---|
+  | `distributed/activation_checkpoint.py::FullAC` / `SelectiveAC` 的 `early_stop` `False`→`True`（#4836） | 性能：recompute 产出全部所需张量后即停，不再重放区域剩余算子，省 1-4% step time。上游 8×H100 实测数值不变（多数 exact，最大 loss 差 2.8e-6）、峰值 reserved 内存漂移 0；旧的 `False` 是上游 #1580 的 llama4 内存泄漏 workaround，已失效 | **A** | **已同步**：`parallel/activation_checkpoint.py` 两处改为 `early_stop=True`，并把 docstring 里"非默认旋钮"的理由改写为上游 #4836 的结论 |
+  | `models/common/linear.py` 新增 `GroupedLinear`（`num_linears` 投影轴，w13 存 `[E,2,F,D]`）、`models/common/moe.py` 用它重写 `GroupedExperts`、`models/common/moe_sharding.py` 把单一 `inner_experts` 配置拆成 `w13`/`w2` 两份、`distributed/fsdp.py` 专家放置改为 `_linear_param_shard_placements(include_unstacked_grouped=True)`（即 `Shard(weight.ndim-2)`） | 新能力面：把融合的 w13 投影做成带 projection 轴的 `GroupedLinear`（载体是 blockwise 量化与 LoRA），FSDP 相应沿矩阵行而非默认 dim 0 切 | **B** | **无需动作（表示等价）**：hpmesh 的专家是 packed 3-D（`gate_up_proj (E,2F,D)`、`down_proj (E,D,F)`），`Shard(ndim-2)` 与 hpmesh 的 `Shard(1)` 切的是同一段——`[E,2F,D]` 的第 i 个 chunk 与 `[E,2,F,D]` 沿 F 的第 i 个 chunk 重合，`down_proj` 两侧同为 `Shard(1)`；dense 侧 hpmesh 的 fused QKV 是 2-D `[r*H,D]`，默认 `Shard(0)` 即切输出维，正确。`num_linears` 轴服务量化/LoRA，两者都在 hpmesh 裁剪面内 |
+  | `models/common/token_dispatcher.py`、`distributed/deepep/deepep.py` | 注释改名 `GroupedExperts`→`RoutedExperts` | C | 无动作（纯注释，无语义） |
+  | `experiments/transformers_modeling_backend/moe_replacement.py`、`state_dict_adapter.py` | Module-registry / state-dict adapter 面的 MoE 构建适配 | C | hpmesh 无该面（swap 直拷 HF 权重），不移植 |
+  | `models/common/multimodal.py`、`distributed/flex_shard/`、`quantization/`、`rl/`、`experiments/graph_trainer/`、`overrides/fused_mla.py`、`config/transform/*` | 范围外 | C | 不适用 |
+
+  本轮环境与验证（与 design doc §7 同轮记录）：Python 3.11.13 / torch 2.2.2 / CPU gloo。
+  该 torch 缺的是**一组**新 API，不是单个包：`spmd_types==0.2.5` 装了但 import 失败
+  （缺 `torch.distributed._local_tensor`）、`torch.distributed.tensor` 无公开
+  `DTensor`、无 `torch.distributed._composable.fsdp`、无 `torch.nn.attention`
+  （flex_attention）、无 `torch.distributed.pipelining`、无 `torch.OutOfMemoryError`、
+  无 CUDA。实测：25 个 integration 脚本 **2 passed / 23 failed**，23 个失败全部是上述
+  API 缺失（10 × `DTensor` ImportError、7 × `torch.nn.attention`、4 ×
+  `spmd_types`、2 × `_composable.fsdp`），没有一个失败来自本仓逻辑
+  ——唯一通过的两个是 `reduce_equivalence`（只依赖 gloo）与
+  `vocab_parallel_loss_equivalence`（只依赖 `components/loss.py`）。
+  CPU 单测 143 passed / 9 failed / 59 skipped，9 个 failed 全是
+  `torch.OutOfMemoryError` 与 `torch.distributed.pipelining` 缺失。因此本轮
+  **没有**复跑任何等价性测试，可运行的只有静态门禁与不依赖上述面的 CPU 单测。
+  要复跑 ②（vocab-sharded head）与 ③（PP）的等价性，需要 torch≥2.12 + 多卡；
+  ② 的 first half（loss 调用点 vocab-aware）不需要多卡，但需要 trainer 可导入，
+  即同样受这批 API 阻断。
+  同轮另修一处 hpmesh 内部缺陷：`a168128` 把 `parallel/parallelize_hf.py` 改名为
+  `parallel/parallelize.py` 时漏改两个 test 侧 import
+  （`tests/unit_tests/cpu/parallel/test_activation_checkpoint.py`、
+  `tests/integration_tests/ep_fsdp_equivalence.py`）。该缺陷此前一直被环境门禁跳过掩盖，
+  在 torch≥2.12 的环境里会是 `ModuleNotFoundError`。
+- 检查后续漂移：`git -C <torchtitan> log c8a3e7666..HEAD -- torchtitan/`。
 - 2026-09-23 映射修订：上游 `distributed/linear.py` 已删除、内容迁入
   `models/common/dist_gemm.py`（改名 `AsyncAllGatherLinear`/`AsyncLinearReduceScatter`，
   数学不变；上游 9e159aed7 再把该文件改名 `async_linear.py`），此后上游
