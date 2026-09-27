@@ -38,27 +38,27 @@ import torch
 import torch.distributed as dist
 from torch.distributed.tensor import DTensor
 
-from hpmesh.accelerator.collectives import clip_grad_norm_
-from hpmesh.components.loss import IGNORE_INDEX, cross_entropy_loss
-from hpmesh.config import MetricsConfig
-from hpmesh.datasets.random_data import RandomTokenSource, batch_iterator
-from hpmesh.datasets.types import Batch
-from hpmesh.models.hf_factory import build_model_config_for
-from hpmesh.models.hf_wrapper import HFTransformerModel
-from hpmesh.parallel.parallel_dims import ParallelDims
-from hpmesh.parallel.tensor_parallel.tp import (
+from llmtuner.accelerator.collectives import clip_grad_norm_
+from llmtuner.components.loss import IGNORE_INDEX, cross_entropy_loss
+from llmtuner.config import MetricsConfig
+from llmtuner.datasets.random_data import RandomTokenSource, batch_iterator
+from llmtuner.datasets.types import Batch
+from llmtuner.models.hf_factory import build_model_config_for
+from llmtuner.models.hf_wrapper import HFTransformerModel
+from llmtuner.parallel.parallel_dims import ParallelDims
+from llmtuner.parallel.tensor_parallel.tp import (
     ColumnParallelLinear,
     ColwiseLinearNoGather,
     RowParallelLinear,
 )
-from hpmesh.trainer import (
-    HybridMeshConfig,
+from llmtuner.trainer import (
+    LLMTunerConfig,
     ModelConfig,
     OptimizerConfig,
     ParallelConfig,
     TrainingConfig,
 )
-from hpmesh.trainer.trainer import Trainer
+from llmtuner.trainer.trainer import Trainer
 
 STEPS = 4
 GLOBAL_BATCH = 8
@@ -75,8 +75,8 @@ DP_SHARD = 2
 TOL = 1e-4
 
 
-def _cfg() -> HybridMeshConfig:
-    return HybridMeshConfig(
+def _cfg() -> LLMTunerConfig:
+    return LLMTunerConfig(
         model=ModelConfig(
             # llama, not qwen3: qwen3's HF tp_plan carries
             # ``replicated_with_grad_allreduce`` norm entries that the minimal
@@ -105,7 +105,7 @@ def _cfg() -> HybridMeshConfig:
     )
 
 
-def _reference_trajectory(cfg: HybridMeshConfig) -> tuple[list[float], dict]:
+def _reference_trajectory(cfg: LLMTunerConfig) -> tuple[list[float], dict]:
     """The same training with no parallelism: one process, the whole batch.
 
     Mirrors the trainer's non-PP step arithmetic exactly. One subtlety: dp

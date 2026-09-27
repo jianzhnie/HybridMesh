@@ -1,10 +1,10 @@
 """The ambient SPMD context: what it makes answerable, and what it must not.
 
-``spmd_context`` is the single place hpmesh enters the ambient mesh state. Two
+``spmd_context`` is the single place llmtuner enters the ambient mesh state. Two
 of its properties are worth pinning on CPU, without a process group:
 
 * a single-process run (``parallel_dims is None``) must be a clean no-op, since
-  that is the path ``python -m hpmesh`` takes -- every lookup has to answer
+  that is the path ``python -m llmtuner`` takes -- every lookup has to answer
   "off" rather than raise;
 * the state must be *restored* on exit, so a nested region cannot leak a mesh to
   the code after it.
@@ -23,7 +23,7 @@ require_env('spmd_types')
 
 import pytest
 
-from hpmesh.accelerator.spmd_context import (
+from llmtuner.accelerator.spmd_context import (
     current_spmd_mesh,
     spmd_context,
     spmd_mesh_group,

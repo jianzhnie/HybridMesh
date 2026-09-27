@@ -22,9 +22,9 @@ below, and ``arch_overrides`` is ignored so it cannot disagree with the weights.
 
 from __future__ import annotations
 
-from hpmesh import Trainer
-from hpmesh.config import (
-    HybridMeshConfig,
+from llmtuner import Trainer
+from llmtuner.config import (
+    LLMTunerConfig,
     MetricsConfig,
     ModelConfig,
     OptimizerConfig,
@@ -33,9 +33,9 @@ from hpmesh.config import (
 )
 
 
-def deepseek_v3_config() -> HybridMeshConfig:
+def deepseek_v3_config() -> LLMTunerConfig:
     """A tiny offline DeepSeek-V3: 2 dense layers, then 2 routed MoE layers."""
-    return HybridMeshConfig(
+    return LLMTunerConfig(
         model=ModelConfig(
             model_name_or_path="deepseek_v3",
             # The dense-decoder widths. Everything MoE- or MLA-specific is below.

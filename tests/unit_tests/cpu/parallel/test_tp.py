@@ -20,8 +20,8 @@ import pytest
 import torch
 import torch.nn as nn
 
-from hpmesh.parallel.tensor_parallel import apply_tp
-from hpmesh.parallel.tensor_parallel.tp import (
+from llmtuner.parallel.tensor_parallel import apply_tp
+from llmtuner.parallel.tensor_parallel.tp import (
     ColumnParallelLinear,
     ColwiseLinearNoGather,
     RowParallelLinear,
@@ -31,7 +31,7 @@ from hpmesh.parallel.tensor_parallel.tp import (
     resolve_plan,
     rowwise,
 )
-from hpmesh.trainer import ParallelConfig
+from llmtuner.trainer import ParallelConfig
 
 
 def test_declaration_factories_pick_the_right_realizer() -> None:
@@ -124,8 +124,8 @@ def test_a_wrapper_tp_plan_matches_the_modules_it_exposes() -> None:
 
     Checked on the real wrapper so the path spelling is the real one.
     """
-    from hpmesh.models.hf_factory import build_model_config
-    from hpmesh.models.hf_wrapper import HFTransformerModel
+    from llmtuner.models.hf_factory import build_model_config
+    from llmtuner.models.hf_wrapper import HFTransformerModel
 
     config = build_model_config(
         "llama",
@@ -157,7 +157,7 @@ def test_a_wrapper_tp_plan_matches_the_modules_it_exposes() -> None:
 
 
 def test_qwen3_plan_resolves_rather_than_raising_on_its_qk_norms() -> None:
-    """The plan an hpmesh-supported family actually ships must resolve.
+    """The plan an llmtuner-supported family actually ships must resolve.
 
     Qwen3 -- the architecture the repo's own example trains -- marks
     ``q_norm`` / ``k_norm`` with HF's ``replicated_with_grad_allreduce``, a spec
@@ -170,8 +170,8 @@ def test_qwen3_plan_resolves_rather_than_raising_on_its_qk_norms() -> None:
     ``Trainer._allreduce_replicated_tp_grads``), while the projections still
     resolve to real realizers.
     """
-    from hpmesh.models.hf_factory import build_model_config
-    from hpmesh.models.hf_wrapper import HFTransformerModel
+    from llmtuner.models.hf_factory import build_model_config
+    from llmtuner.models.hf_wrapper import HFTransformerModel
 
     config = build_model_config(
         "qwen3",

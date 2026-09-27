@@ -24,15 +24,15 @@ import grain.python as grain
 import numpy as np
 import pytest
 
-from hpmesh.components.loss import IGNORE_INDEX
-from hpmesh.components.tokenizer import HuggingFaceTokenizer
-from hpmesh.config import (
+from llmtuner.components.loss import IGNORE_INDEX
+from llmtuner.components.tokenizer import HuggingFaceTokenizer
+from llmtuner.config import (
     DataloaderConfig,
-    HybridMeshConfig,
+    LLMTunerConfig,
     ModelConfig,
     TrainingConfig,
 )
-from hpmesh.datasets import (
+from llmtuner.datasets import (
     DatasetConcat,
     DatasetMix,
     GrainDataLoader,
@@ -44,8 +44,8 @@ from hpmesh.datasets import (
     build_dataset,
     build_first_fit_packing,
 )
-from hpmesh.datasets.random_data import RandomTokenDataLoader
-from hpmesh.datasets.text.text import ChatProcessor
+from llmtuner.datasets.random_data import RandomTokenDataLoader
+from llmtuner.datasets.text.text import ChatProcessor
 from tests.data_fixtures import (
     CHAT_TEMPLATE,
     NUM_ROWS,
@@ -897,7 +897,7 @@ def _loader_config(
     global_batch_size: int = 4,
     max_seq_len: int = 8,
     seed: int = 42,
-) -> HybridMeshConfig:
+) -> LLMTunerConfig:
     """The run config ``build_dataloader`` now reads its scalars off.
 
     ``build_dataloader`` takes the whole config and pulls the corpus settings
@@ -905,7 +905,7 @@ def _loader_config(
     wants to vary one of them varies the config rather than restating it as a
     keyword argument.
     """
-    return HybridMeshConfig(
+    return LLMTunerConfig(
         model=ModelConfig(vocab_size=128),
         training=TrainingConfig(
             global_batch_size=global_batch_size,
@@ -997,7 +997,7 @@ def test_packing_selector_chooses_the_recipe(
     the config would still build a working loader -- just the wrong one, with
     nothing in the batch to say so.
     """
-    import hpmesh.datasets.build as build_module
+    import llmtuner.datasets.build as build_module
 
     calls: list[str] = []
     for name in ("build_concat_then_split_packing", "build_first_fit_packing"):
@@ -1031,7 +1031,7 @@ def test_packing_selector_chooses_the_recipe(
 
 def test_num_packing_bins_reaches_first_fit(tmp_path, corpus, monkeypatch) -> None:
     """The bin count is forwarded, not left at the callee's default."""
-    import hpmesh.datasets.build as build_module
+    import llmtuner.datasets.build as build_module
 
     seen: dict = {}
     real = build_module.build_first_fit_packing

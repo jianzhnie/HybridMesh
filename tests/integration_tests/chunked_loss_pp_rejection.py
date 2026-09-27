@@ -17,17 +17,17 @@ from __future__ import annotations
 import torch
 import torch.distributed as dist
 
-from hpmesh.trainer import (
-    HybridMeshConfig,
+from llmtuner.trainer import (
+    LLMTunerConfig,
     ModelConfig,
     ParallelConfig,
     TrainingConfig,
 )
-from hpmesh.trainer.trainer import Trainer
+from llmtuner.trainer.trainer import Trainer
 
 
-def _cfg() -> HybridMeshConfig:
-    return HybridMeshConfig(
+def _cfg() -> LLMTunerConfig:
+    return LLMTunerConfig(
         model=ModelConfig(
             model_name_or_path="llama",
             vocab_size=128,

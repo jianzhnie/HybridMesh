@@ -30,11 +30,11 @@ import torch.distributed as dist
 from torch.distributed.device_mesh import init_device_mesh
 from transformers import AutoConfig
 
-from hpmesh.models.common.aux_loss import AuxLoss
-from hpmesh.models.common.moe import MoE
-from hpmesh.models.hf_wrapper import HFTransformerModel
-from hpmesh.parallel.expert_parallel import apply_ep, swap_hf_moe_blocks
-from hpmesh.trainer import ParallelConfig
+from llmtuner.models.common.aux_loss import AuxLoss
+from llmtuner.models.common.moe import MoE
+from llmtuner.models.hf_wrapper import HFTransformerModel
+from llmtuner.parallel.expert_parallel import apply_ep, swap_hf_moe_blocks
+from llmtuner.trainer import ParallelConfig
 
 NUM_EXPERTS = 8
 TOKENS = 40

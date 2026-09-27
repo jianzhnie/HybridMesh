@@ -24,7 +24,7 @@ checked here is the *exchange itself*:
   since a lossy inverse would corrupt the residual stream without failing the
   forward.
 
-The gather half stands alone from hpmesh's mesh plumbing on purpose, like
+The gather half stands alone from llmtuner's mesh plumbing on purpose, like
 ``ep_equivalence.py``: it builds its own mesh so it exercises the redistribution
 without depending on how the trainer assembles one.
 """
@@ -35,7 +35,7 @@ import torch
 import torch.distributed as dist
 from torch.distributed.device_mesh import init_device_mesh
 
-from hpmesh.parallel.context_parallel.cp_kernel import cp_all_to_all
+from llmtuner.parallel.context_parallel.cp_kernel import cp_all_to_all
 
 SEQ = 16
 NUM_HEADS = 4

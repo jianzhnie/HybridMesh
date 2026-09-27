@@ -1,4 +1,4 @@
-"""The EP swap: a swapped-in hpmesh MoE must reproduce the HF block it replaced.
+"""The EP swap: a swapped-in llmtuner MoE must reproduce the HF block it replaced.
 
 Single-process, CPU. ``tests/ep_wiring_equivalence.py`` covers the multi-rank
 all-to-all; what this suite pins is the swap itself: weight movement, router
@@ -6,9 +6,9 @@ parity (softmax scoring, optional top-k renormalization), the refusal paths,
 and the load-balance aux loss the swapped router carries.
 
 Comparisons run in float64 where the model allows it. They are not exact: both
-HF and hpmesh compute routing scores in fp32 (HF via ``softmax(dtype=float)``,
-hpmesh's ``RouterGateLinear`` by construction), but HF computes the gate GEMM in
-the model dtype while hpmesh computes it in fp32 -- so the scores agree only to
+HF and llmtuner compute routing scores in fp32 (HF via ``softmax(dtype=float)``,
+llmtuner's ``RouterGateLinear`` by construction), but HF computes the gate GEMM in
+the model dtype while llmtuner computes it in fp32 -- so the scores agree only to
 fp32 rounding. 1e-6 separates that noise floor (~5e-8) from a wiring error
 (O(1)).
 
@@ -19,7 +19,7 @@ auto-fallback to ``"eager"`` that normally saves a CPU run does not fire, becaus
 ``_grouped_mm_can_dispatch`` checks the device and the pointer alignment but
 never the dtype, so a float32/float64 model passes the gate at ``from_config``
 and then dies inside the first forward. Asking for ``"eager"`` explicitly gets
-HF's per-expert ``F.linear`` loop, which is the same arithmetic form hpmesh's
+HF's per-expert ``F.linear`` loop, which is the same arithmetic form llmtuner's
 ``GroupedExperts`` falls back to -- so the two sides are comparable op for op,
 which is what makes a bitwise assertion meaningful rather than merely close.
 """
@@ -35,11 +35,11 @@ import pytest
 import torch
 from transformers import AutoConfig
 
-from hpmesh.models.common.aux_loss import AuxLoss
-from hpmesh.models.common.moe import MoE, RoutedExperts
-from hpmesh.models.hf_wrapper import HFTransformerModel
-from hpmesh.parallel.expert_parallel import swap_hf_moe_blocks
-from hpmesh.parallel.expert_parallel.swap import restore_fp32_state_buffers
+from llmtuner.models.common.aux_loss import AuxLoss
+from llmtuner.models.common.moe import MoE, RoutedExperts
+from llmtuner.models.hf_wrapper import HFTransformerModel
+from llmtuner.parallel.expert_parallel import swap_hf_moe_blocks
+from llmtuner.parallel.expert_parallel.swap import restore_fp32_state_buffers
 
 TOL = 1e-6
 
@@ -374,7 +374,7 @@ def test_deepseek_v3_swap_matches_hf_output(overrides: dict) -> None:
     Not bitwise, and the reason is a *shape* difference rather than a wrong
     weight. transformers 5.x fuses an expert's gate and up projections into one
     ``(E, 2F, D)`` tensor and applies them in a single ``F.linear`` of output
-    width 2F, splitting afterwards; hpmesh keeps them apart and runs two GEMMs
+    width 2F, splitting afterwards; llmtuner keeps them apart and runs two GEMMs
     of width F. The operands are the same numbers -- ``GateUpProj[:, :F]`` is
     literally ``w1_EFD`` -- but fp32 accumulates over D in a different
     association, so the two agree only to rounding. In float64 the difference is
@@ -406,7 +406,7 @@ def test_deepseek_v3_swap_matches_hf_output(overrides: dict) -> None:
         )
 
 
-def test_deepseek_v3_router_settings_reach_the_hpmesh_router() -> None:
+def test_deepseek_v3_router_settings_reach_the_llmtuner_router() -> None:
     """The probed routing config, as the swapped router ends up holding it.
 
     Every one of these is read from a *different* place in the HF model (the
@@ -659,7 +659,7 @@ def test_mixtral_matches_hf_output() -> None:
     A tolerance rather than equality: same fused-versus-split GEMM difference as
     every other family (module docstring). ``2F == D`` here, so an argument from
     the shapes being degenerate does not apply -- the accumulation order still
-    differs, because HF splits *after* the 2F-wide GEMM and hpmesh never forms
+    differs, because HF splits *after* the 2F-wide GEMM and llmtuner never forms
     it.
     """
     cfg = AutoConfig.for_model(
@@ -770,7 +770,7 @@ def test_the_swap_keeps_the_token_count_buffer_in_fp32() -> None:
     ``tokens_per_expert_E`` is a token *count*, which bf16 cannot hold exactly
     past 256 -- 1001 becomes 1000 -- and ``expert_bias_E`` is an additive
     correction a bf16 round per step would erode. Neither has a gradient, so the
-    cast bought nothing. hpmesh is fp32-only today, which is exactly why this
+    cast bought nothing. llmtuner is fp32-only today, which is exactly why this
     needs a test: the bug is invisible until a bf16 path exists, and then it is
     silent.
 
@@ -803,7 +803,7 @@ def test_the_fp32_restore_covers_the_bias_buffer() -> None:
     narrow and worth isolating: yes to float buffers, no to a plain
     ``Module.to``.
     """
-    from hpmesh.models.common.grouped_experts import GroupedExperts
+    from llmtuner.models.common.grouped_experts import GroupedExperts
 
     grouped = GroupedExperts(dim=16, hidden_dim=32, num_experts=256)
     moe = MoE(

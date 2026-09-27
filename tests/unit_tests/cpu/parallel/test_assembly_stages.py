@@ -6,7 +6,7 @@ it is now the ``STAGES`` table, and this test is what keeps the table -- not
 the prose -- as the contract.
 """
 
-from hpmesh.parallel.stages import (
+from llmtuner.parallel.stages import (
     PP_STAGE_ORDER,
     STAGE_ORDER,
     STAGES,

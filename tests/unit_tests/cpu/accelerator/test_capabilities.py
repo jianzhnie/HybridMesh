@@ -2,9 +2,9 @@
 
 import pytest
 
-from hpmesh.accelerator import capabilities
-from hpmesh.accelerator.capabilities import CAPABILITIES, has, require
-from hpmesh.errors import EnvironmentUnsupportedError
+from llmtuner.accelerator import capabilities
+from llmtuner.accelerator.capabilities import CAPABILITIES, has, require
+from llmtuner.errors import EnvironmentUnsupportedError
 
 ALL_NAMES = [
     "dynamo_capture_scalar_outputs",

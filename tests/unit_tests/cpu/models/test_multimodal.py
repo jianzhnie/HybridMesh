@@ -22,7 +22,7 @@ require_env('spmd_types')
 import pytest
 import torch
 
-from hpmesh.models.common.multimodal import (
+from llmtuner.models.common.multimodal import (
     build_vision_bank_indices,
     gather_vision_embeds,
     get_vision_positions,

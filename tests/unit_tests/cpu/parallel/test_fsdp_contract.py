@@ -1,7 +1,7 @@
 """The FSDP contract: what the sharding layer reads off a model, and how.
 
 ``fsdp.py`` is written against torchtitan's ``Decoder`` shape -- a ``ModuleDict``
-of layers plus four named modules on the top-level object. hpmesh trains HF
+of layers plus four named modules on the top-level object. llmtuner trains HF
 models, whose layout differs on both counts. These tests pin the two places that
 reconcile them, since a break in either is invisible until either:
 
@@ -28,10 +28,10 @@ import torch
 import torch.nn as nn
 from torch.nn import ModuleDict, ModuleList
 
-from hpmesh.models.hf_factory import build_model_config
-from hpmesh.models.hf_wrapper import HFTransformerModel
-from hpmesh.parallel.fully_shard import apply
-from hpmesh.parallel.fully_shard.fsdp import iter_transformer_layers
+from llmtuner.models.hf_factory import build_model_config
+from llmtuner.models.hf_wrapper import HFTransformerModel
+from llmtuner.parallel.fully_shard import apply
+from llmtuner.parallel.fully_shard.fsdp import iter_transformer_layers
 
 _VOCAB = 32
 _HIDDEN = 8

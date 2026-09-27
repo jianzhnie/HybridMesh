@@ -9,7 +9,7 @@ Where ``cp_ulysses_equivalence.py`` pins the single-document ulysses wiring,
 this pins the varlen/packed combination that used to be refused at attach
 time. The premise: ulysses all-to-all's every rank's token shard into a head
 shard BEFORE attention, so each rank attends the full, unpermuted token stream
-with ``heads / cp`` heads -- and the packed document structure (hpmesh's
+with ``heads / cp`` heads -- and the packed document structure (llmtuner's
 varlen metadata, baked into the BlockMask from the full positions) therefore
 applies to the kernel FULL-LENGTH and unsharded, exactly as upstream's ulysses
 ``cp_shard`` lifts ``attention_masks`` out of the sharded inputs.
@@ -44,12 +44,12 @@ import torch.distributed as dist
 import torch.nn.functional as F
 from torch.distributed.device_mesh import init_device_mesh
 
-from hpmesh.models.hf_factory import build_model_config_for
-from hpmesh.models.hf_wrapper import HFTransformerModel
-from hpmesh.parallel.context_parallel import apply_cp
-from hpmesh.parallel.context_parallel.cp_kernel import HeadToSeq, SeqToHead
-from hpmesh.trainer import (
-    HybridMeshConfig,
+from llmtuner.models.hf_factory import build_model_config_for
+from llmtuner.models.hf_wrapper import HFTransformerModel
+from llmtuner.parallel.context_parallel import apply_cp
+from llmtuner.parallel.context_parallel.cp_kernel import HeadToSeq, SeqToHead
+from llmtuner.trainer import (
+    LLMTunerConfig,
     ModelConfig,
     ParallelConfig,
     TrainingConfig,
@@ -63,8 +63,8 @@ TOL = 1e-9  # float64: wiring differences are O(1), arithmetic noise is O(1e-13)
 NONVACUITY = 1e-3
 
 
-def _cfg() -> HybridMeshConfig:
-    return HybridMeshConfig(
+def _cfg() -> LLMTunerConfig:
+    return LLMTunerConfig(
         model=ModelConfig(
             model_name_or_path="qwen3",
             vocab_size=VOCAB,
@@ -83,7 +83,7 @@ def _cfg() -> HybridMeshConfig:
     )
 
 
-def _build_model(cfg: HybridMeshConfig, *, flex: bool, seed: int = 0):
+def _build_model(cfg: LLMTunerConfig, *, flex: bool, seed: int = 0):
     torch.manual_seed(seed)
     model = HFTransformerModel(build_model_config_for(cfg)).to(torch.float64)
     # The packed mask is a document mask; declare the corpus shape the way
@@ -155,7 +155,7 @@ def _run_ulysses_packed(mesh, failures: list[str]) -> dict[str, float]:
 
     ids, labels, positions = _packed_data()
     with mock.patch(
-        "hpmesh.models.hf_wrapper.create_attention_mask",
+        "llmtuner.models.hf_wrapper.create_attention_mask",
         _uncompiled_create_attention_mask,
     ):
         inputs, out_labels, extra = model.preprocess_inputs(

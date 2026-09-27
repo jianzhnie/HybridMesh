@@ -16,14 +16,14 @@ import grain.python as grain
 import pytest
 from tokenizers import Tokenizer, models, pre_tokenizers
 
-from hpmesh.components.tokenizer import HuggingFaceTokenizer
-from hpmesh.datasets import (
+from llmtuner.components.tokenizer import HuggingFaceTokenizer
+from llmtuner.datasets import (
     DatasetBuildContext,
     DatasetIterationPolicy,
     IndexedJsonlSource,
     SingleDataset,
 )
-from hpmesh.datasets.text.text import TextProcessor
+from llmtuner.datasets.text.text import TextProcessor
 
 # A whitespace WordLevel vocabulary: small enough to reason about by hand, and
 # whitespace-based rather than BPE so a document's tokens are predictable.

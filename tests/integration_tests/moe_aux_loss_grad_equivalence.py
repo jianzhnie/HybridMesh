@@ -28,10 +28,10 @@ import torch
 import torch.distributed as dist
 import torch.nn.functional as F
 
-from hpmesh.accelerator.spmd_context import spmd_context, spmd_mesh_group
-from hpmesh.models.common.aux_loss import AuxLoss
-from hpmesh.models.common.moe import MicrobatchWiseLoadBalanceLoss
-from hpmesh.parallel.parallel_dims import ParallelDims
+from llmtuner.accelerator.spmd_context import spmd_context, spmd_mesh_group
+from llmtuner.models.common.aux_loss import AuxLoss
+from llmtuner.models.common.moe import MicrobatchWiseLoadBalanceLoss
+from llmtuner.parallel.parallel_dims import ParallelDims
 
 E, D, K, T = 4, 8, 2, 16
 COEFF = 0.7

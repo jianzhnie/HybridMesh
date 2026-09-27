@@ -32,11 +32,11 @@ import torch
 import torch.distributed as dist
 from torch.distributed.device_mesh import init_device_mesh
 
-from hpmesh.models.hf_factory import build_model_config_for
-from hpmesh.models.hf_wrapper import HFTransformerModel
-from hpmesh.parallel.context_parallel import apply_cp, shard_batch_for_cp
-from hpmesh.trainer import (
-    HybridMeshConfig,
+from llmtuner.models.hf_factory import build_model_config_for
+from llmtuner.models.hf_wrapper import HFTransformerModel
+from llmtuner.parallel.context_parallel import apply_cp, shard_batch_for_cp
+from llmtuner.trainer import (
+    LLMTunerConfig,
     ModelConfig,
     ParallelConfig,
     TrainingConfig,
@@ -48,8 +48,8 @@ VOCAB = 128
 TOL = 1e-9  # float64: wiring differences are O(1), arithmetic noise is O(1e-13)
 
 
-def _cfg() -> HybridMeshConfig:
-    return HybridMeshConfig(
+def _cfg() -> LLMTunerConfig:
+    return LLMTunerConfig(
         model=ModelConfig(
             model_name_or_path="qwen3",
             vocab_size=VOCAB,
@@ -69,7 +69,7 @@ def _cfg() -> HybridMeshConfig:
     )
 
 
-def _build_model(cfg: HybridMeshConfig, *, flex: bool, seed: int = 0):
+def _build_model(cfg: LLMTunerConfig, *, flex: bool, seed: int = 0):
     torch.manual_seed(seed)
     model = HFTransformerModel(build_model_config_for(cfg)).to(torch.float64)
     # The packed mask is a document mask; declare the corpus shape the way
@@ -130,7 +130,7 @@ def main() -> None:
     failures: list[str] = []
 
     with mock.patch(
-        "hpmesh.models.hf_wrapper.create_attention_mask",
+        "llmtuner.models.hf_wrapper.create_attention_mask",
         _uncompiled_create_attention_mask,
     ):
         inputs, out_labels, extra = model.preprocess_inputs(

@@ -10,7 +10,7 @@ experts and moves tokens between them. If the dispatcher's split bookkeeping or
 the permute is wrong, the routed tokens land on the wrong experts and the
 outputs diverge -- which is exactly what this compares.
 
-Stands alone from hpmesh's mesh plumbing on purpose: it builds its own process
+Stands alone from llmtuner's mesh plumbing on purpose: it builds its own process
 group, so it exercises the dispatcher without depending on how the trainer
 assembles a mesh.
 """
@@ -20,9 +20,9 @@ from __future__ import annotations
 import torch
 import torch.distributed as dist
 
-from hpmesh.models.common.grouped_experts import GroupedExperts
-from hpmesh.models.common.moe import MoE, RoutedExperts, TokenChoiceTopKRouter
-from hpmesh.models.common.token_dispatcher import (
+from llmtuner.models.common.grouped_experts import GroupedExperts
+from llmtuner.models.common.moe import MoE, RoutedExperts, TokenChoiceTopKRouter
+from llmtuner.models.common.token_dispatcher import (
     AllToAllTokenDispatcher,
     LocalTokenDispatcher,
 )

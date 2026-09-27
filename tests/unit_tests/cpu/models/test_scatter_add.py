@@ -16,7 +16,7 @@ require_env('spmd_types')
 
 import torch
 
-from hpmesh.models.common.scatter_add import deterministic_scatter_add
+from llmtuner.models.common.scatter_add import deterministic_scatter_add
 
 
 def _inputs(seed: int = 0):

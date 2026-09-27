@@ -2,7 +2,7 @@
 
 ``torchao``/``deep_ep``/``hybridep`` are not installed in this environment, so
 the optional-dependency seam is exercised against a fake ``torchao`` module
-injected into ``sys.modules`` -- the fake reproduces the interface hpmesh calls
+injected into ``sys.modules`` -- the fake reproduces the interface llmtuner calls
 (``torchao.prototype.moe_training.ep.permute.permute_and_pad``, sentinel-row
 padding semantics), not the real kernel's output. Numerical parity with real
 torchao is unverified until the dependency lands and these tests are re-run
@@ -20,14 +20,14 @@ import types
 import pytest
 import torch
 
-from hpmesh.config import ParallelConfig
-from hpmesh.models.common.token_dispatcher import (
+from llmtuner.config import ParallelConfig
+from llmtuner.models.common.token_dispatcher import (
     TORCHAO_INSTALL_HINT,
     AllToAllTokenDispatcher,
     LocalTokenDispatcher,
     TorchAOTokenDispatcher,
 )
-from hpmesh.parallel.expert_parallel.swap import swap_hf_moe_blocks
+from llmtuner.parallel.expert_parallel.swap import swap_hf_moe_blocks
 
 # --------------------------------------------------------------------------
 # config gating

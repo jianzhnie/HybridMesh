@@ -21,15 +21,15 @@ require_env('flex_attention', 'spmd_types')
 import pytest
 import torch
 
-from hpmesh.components.loss import IGNORE_INDEX, next_token_targets
-from hpmesh.models.hf_factory import (
+from llmtuner.components.loss import IGNORE_INDEX, next_token_targets
+from llmtuner.models.hf_factory import (
     _ATTN_IMPLEMENTATION,
     build_model_config,
     build_model_config_for,
     materialize_meta_model,
 )
-from hpmesh.models.hf_wrapper import HFTransformerModel
-from hpmesh.trainer import HybridMeshConfig, TrainingConfig
+from llmtuner.models.hf_wrapper import HFTransformerModel
+from llmtuner.trainer import LLMTunerConfig, TrainingConfig
 
 _HIDDEN = 32
 _VOCAB = 128
@@ -216,7 +216,7 @@ def test_non_flex_backend_rejects_a_length_one_document_boundary(
 
 def test_build_model_config_for_offline_arch() -> None:
     """A bare architecture name builds a local model from cfg's explicit sizes."""
-    cfg = HybridMeshConfig(training=TrainingConfig(seed=42))
+    cfg = LLMTunerConfig(training=TrainingConfig(seed=42))
 
     config = build_model_config_for(cfg)
 
@@ -262,7 +262,7 @@ def test_build_model_config_for_accepts_a_local_checkpoint_path(tmp_path) -> Non
     """
     from transformers import AutoConfig
 
-    from hpmesh.trainer import ModelConfig
+    from llmtuner.trainer import ModelConfig
 
     saved = AutoConfig.for_model(
         "qwen3",
@@ -275,7 +275,7 @@ def test_build_model_config_for_accepts_a_local_checkpoint_path(tmp_path) -> Non
     )
     saved.save_pretrained(tmp_path)
 
-    cfg = HybridMeshConfig(
+    cfg = LLMTunerConfig(
         model=ModelConfig(model_name_or_path=str(tmp_path)),
         training=TrainingConfig(seed=42),
     )
@@ -297,14 +297,14 @@ def test_the_mask_type_follows_the_corpus_rather_than_being_configured() -> None
     """
     from dataclasses import replace
 
-    from hpmesh.config import DataloaderConfig
+    from llmtuner.config import DataloaderConfig
 
     training = TrainingConfig(seed=42)
-    synthetic = build_model_config_for(HybridMeshConfig(training=training))
+    synthetic = build_model_config_for(LLMTunerConfig(training=training))
     assert synthetic.attn_mask_type == "causal"
 
     packed = build_model_config_for(
-        HybridMeshConfig(
+        LLMTunerConfig(
             training=replace(
                 training,
                 dataloader_config=DataloaderConfig(
@@ -335,7 +335,7 @@ def test_a_composite_config_carries_the_mask_type_down_to_the_text_stack() -> No
     """
     from transformers import AutoConfig
 
-    from hpmesh.models.hf_factory import unwrap_text_config
+    from llmtuner.models.hf_factory import unwrap_text_config
 
     for name in ("llava", "gemma3"):
         top = AutoConfig.for_model(name)
@@ -363,7 +363,7 @@ def test_a_composite_without_the_flag_stays_unset() -> None:
     """
     from transformers import AutoConfig
 
-    from hpmesh.models.hf_factory import unwrap_text_config
+    from llmtuner.models.hf_factory import unwrap_text_config
 
     top = AutoConfig.for_model("llava")
     assert not hasattr(top, "attn_mask_type")
@@ -382,9 +382,9 @@ def test_arch_overrides_reach_an_architecture_without_its_own_config_field() -> 
     ``arch_overrides`` is the path those settings take, and this pins that it
     lands on the built config rather than being silently dropped.
     """
-    from hpmesh.trainer import ModelConfig
+    from llmtuner.trainer import ModelConfig
 
-    cfg = HybridMeshConfig(
+    cfg = LLMTunerConfig(
         model=ModelConfig(
             model_name_or_path="deepseek_v3",
             vocab_size=128,
@@ -422,9 +422,9 @@ def test_arch_overrides_win_over_the_explicit_sizes() -> None:
     only ``arch_overrides`` would otherwise lose the merge to a field it never
     set. Merged last, the override decides.
     """
-    from hpmesh.trainer import ModelConfig
+    from llmtuner.trainer import ModelConfig
 
-    cfg = HybridMeshConfig(
+    cfg = LLMTunerConfig(
         model=ModelConfig(
             model_name_or_path="llama", arch_overrides={"vocab_size": 99}
         ),
@@ -439,7 +439,7 @@ def test_arch_overrides_are_ignored_when_the_config_file_wins(tmp_path) -> None:
     the one thing that would make the built model disagree with its weights."""
     from transformers import AutoConfig
 
-    from hpmesh.trainer import ModelConfig
+    from llmtuner.trainer import ModelConfig
 
     saved = AutoConfig.for_model(
         "qwen3",
@@ -452,7 +452,7 @@ def test_arch_overrides_are_ignored_when_the_config_file_wins(tmp_path) -> None:
     )
     saved.save_pretrained(tmp_path)
 
-    cfg = HybridMeshConfig(
+    cfg = LLMTunerConfig(
         model=ModelConfig(
             model_name_or_path=str(tmp_path),
             arch_overrides={"vocab_size": 7},
@@ -475,9 +475,9 @@ def test_wrapper_forward_returns_logits_the_trainer_can_score() -> None:
     shifting of its own. A sequence whose every position is predictable
     therefore contributes one prediction per token.
     """
-    from hpmesh.trainer.trainer import Trainer
+    from llmtuner.trainer.trainer import Trainer
 
-    cfg = HybridMeshConfig(
+    cfg = LLMTunerConfig(
         training=TrainingConfig(seed=42, max_seq_len=32, global_batch_size=2)
     )
 
@@ -566,5 +566,5 @@ def test_native_experts_implementation_is_the_default_and_builds() -> None:
 
     model = HFTransformerModel(config).eval()
 
-    # hpmesh never rewrites the kernel choice on the native path.
+    # llmtuner never rewrites the kernel choice on the native path.
     assert getattr(model.model.config, "_experts_implementation", None) is None

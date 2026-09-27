@@ -33,12 +33,12 @@ import pytest
 import torch
 import torch.nn.functional as F
 
-from hpmesh.models.common.aux_loss import (
+from llmtuner.models.common.aux_loss import (
     AuxLoss,
     collect_aux_loss_metrics,
     zero_aux_losses,
 )
-from hpmesh.models.common.moe import MicrobatchWiseLoadBalanceLoss
+from llmtuner.models.common.moe import MicrobatchWiseLoadBalanceLoss
 
 
 @pytest.fixture(autouse=True)

@@ -2,7 +2,7 @@
 
 Each entry answers "can this test module even be imported here": an import
 attempt (sys.modules first, so the stub runner's injected fakes count as
-present) or an attribute probe. Distinct from ``hpmesh.accelerator.capabilities``
+present) or an attribute probe. Distinct from ``llmtuner.accelerator.capabilities``
 on purpose: that is the *runtime* registry for torch knobs a built feature
 checks; this table is about import-level hard dependencies of test modules
 (DTensor, grain, pipelining, ...), which fail at collection, not at a guard.

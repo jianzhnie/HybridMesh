@@ -27,23 +27,23 @@ import numpy as np
 import pytest
 import torch
 
-from hpmesh.components.loss import IGNORE_INDEX
-from hpmesh.components.tokenizer import MultiModalTokenizer
-from hpmesh.datasets import (
+from llmtuner.components.loss import IGNORE_INDEX
+from llmtuner.components.tokenizer import MultiModalTokenizer
+from llmtuner.datasets import (
     IndexedJsonlSource,
     SingleDataset,
     build_dataset,
     build_source,
 )
-from hpmesh.datasets.multimodal.mm_collator import MultiModalCollator
-from hpmesh.datasets.multimodal.mm_datasets import (
+from llmtuner.datasets.multimodal.mm_collator import MultiModalCollator
+from llmtuner.datasets.multimodal.mm_datasets import (
     MultiModalProcessor,
     build_mm_sample_packing,
     packing_output_to_mm_sample,
     process_cc12_wd_sample,
     process_mm_sample,
 )
-from hpmesh.datasets.multimodal.mm_image import (
+from llmtuner.datasets.multimodal.mm_image import (
     calculate_vision_tokens,
     process_image,
     resize_to_navit_patch_grid,
@@ -51,8 +51,8 @@ from hpmesh.datasets.multimodal.mm_image import (
     smart_resize,
     vision_to_patches,
 )
-from hpmesh.datasets.multimodal.mm_text_utils import insert_vision_placeholders
-from hpmesh.datasets.multimodal.mm_video import load_video, process_video
+from llmtuner.datasets.multimodal.mm_text_utils import insert_vision_placeholders
+from llmtuner.datasets.multimodal.mm_video import load_video, process_video
 from tests.data_fixtures import (  # noqa: F401
     VOCAB,
     make_context,
@@ -516,7 +516,7 @@ def _collator(mm_tokenizer, **kwargs):
 
 
 def _mm_sample(num_tokens: int, token_ids: dict[str, int], *, image_tokens: int = 0):
-    from hpmesh.datasets import DatasetBuildContext  # noqa: F401  (type doc)
+    from llmtuner.datasets import DatasetBuildContext  # noqa: F401  (type doc)
 
     input_ids = torch.full((num_tokens,), VOCAB["lorem"], dtype=torch.long)
     labels = torch.full((num_tokens,), VOCAB["ipsum"], dtype=torch.long)

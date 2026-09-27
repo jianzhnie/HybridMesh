@@ -27,7 +27,7 @@ require_env('spmd_types')
 import pytest
 import torch
 
-from hpmesh.models.common.rope import (
+from llmtuner.models.common.rope import (
     ComplexRoPE,
     CosSinRoPE,
     RoPE,

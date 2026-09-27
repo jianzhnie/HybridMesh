@@ -18,13 +18,13 @@ import tempfile
 import pytest
 import torch
 
-from hpmesh.components.checkpointer import filesystem
-from hpmesh.components.loss import (
+from llmtuner.components.checkpointer import filesystem
+from llmtuner.components.loss import (
     IGNORE_INDEX,
     next_token_targets,
     vocab_shard_bounds,
 )
-from hpmesh.utils.gc import GarbageCollection
+from llmtuner.utils.gc import GarbageCollection
 
 # -- vocab_shard_bounds -------------------------------------------------------
 

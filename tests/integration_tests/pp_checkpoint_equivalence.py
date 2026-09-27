@@ -44,15 +44,15 @@ import sys
 import torch
 import torch.distributed as dist
 
-from hpmesh.config import CheckpointConfig, MetricsConfig
-from hpmesh.trainer import (
-    HybridMeshConfig,
+from llmtuner.config import CheckpointConfig, MetricsConfig
+from llmtuner.trainer import (
+    LLMTunerConfig,
     ModelConfig,
     OptimizerConfig,
     ParallelConfig,
     TrainingConfig,
 )
-from hpmesh.trainer.trainer import Trainer
+from llmtuner.trainer.trainer import Trainer
 
 SPLIT_STEP = 2  # N: checkpoint taken after this many steps
 EXTRA_STEPS = 2  # M: steps trained after the checkpoint (both runs)
@@ -66,8 +66,8 @@ SEED = 42
 FULL_LOSSES_FILE = "losses_full.json"
 
 
-def _cfg(workdir: str) -> HybridMeshConfig:
-    return HybridMeshConfig(
+def _cfg(workdir: str) -> LLMTunerConfig:
+    return LLMTunerConfig(
         model=ModelConfig(
             model_name_or_path="qwen3",  # offline: AutoConfig.for_model("qwen3", ...)
             vocab_size=VOCAB,

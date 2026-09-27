@@ -17,16 +17,16 @@ import pytest
 import torch
 import torch.nn as nn
 
-from hpmesh.models.common.activation import SwiGLU
-from hpmesh.models.common.async_linear import DistGEMMFeedForward
-from hpmesh.models.common.feed_forward import (
+from llmtuner.models.common.activation import SwiGLU
+from llmtuner.models.common.async_linear import DistGEMMFeedForward
+from llmtuner.models.common.feed_forward import (
     FeedForward,
     SigmoidGatedFeedForward,
     compute_ffn_hidden_dim,
 )
-from hpmesh.models.common.grouped_experts import GroupedExperts
-from hpmesh.models.common.linear import PartialBiasRowwiseLinear, RouterGateLinear
-from hpmesh.models.common.moe import TokenChoiceTopKRouter
+from llmtuner.models.common.grouped_experts import GroupedExperts
+from llmtuner.models.common.linear import PartialBiasRowwiseLinear, RouterGateLinear
+from llmtuner.models.common.moe import TokenChoiceTopKRouter
 
 
 def _ffn(dim: int = 8, hidden: int = 6) -> FeedForward:
@@ -250,7 +250,7 @@ def test_router_gate_matches_a_plain_fp32_linear() -> None:
 
 def test_router_gate_is_the_moe_router_projection() -> None:
     """One class, imported by the MoE router -- not a second copy of it."""
-    from hpmesh.models.common.moe import RouterGateLinear as FromMoe
+    from llmtuner.models.common.moe import RouterGateLinear as FromMoe
 
     assert FromMoe is RouterGateLinear
 
@@ -449,7 +449,7 @@ def test_the_grouped_mm_probe_follows_the_op(monkeypatch) -> None:
     op works even if the probe is hard-wired to ``True`` -- which is precisely
     the bug that would send every model down a branch that raises elsewhere.
     """
-    from hpmesh.models.common import grouped_experts as ge
+    from llmtuner.models.common import grouped_experts as ge
 
     def _works(*args, **kwargs):
         return torch.zeros(8, 8, dtype=torch.bfloat16)
@@ -470,7 +470,7 @@ def test_the_grouped_mm_probe_follows_the_op(monkeypatch) -> None:
 
 def test_the_grouped_mm_probe_agrees_with_the_real_op_here() -> None:
     """On whatever host this runs, the probe must match the actual call."""
-    from hpmesh.models.common.grouped_experts import grouped_mm_available
+    from llmtuner.models.common.grouped_experts import grouped_mm_available
 
     reported = grouped_mm_available()
     try:
@@ -498,7 +498,7 @@ def test_the_fused_path_matches_the_loop_bit_for_bit_in_bf16() -> None:
     assertion and would hide a mis-segmented expert. Skipped where the op is
     unavailable.
     """
-    from hpmesh.models.common.grouped_experts import grouped_mm_available
+    from llmtuner.models.common.grouped_experts import grouped_mm_available
 
     if not grouped_mm_available():
         pytest.skip("torch._grouped_mm is unavailable on this build")
@@ -536,7 +536,7 @@ def test_the_fused_path_is_refused_for_a_wider_dtype() -> None:
 
 def test_the_default_follows_the_probe() -> None:
     """``None`` means "decide here", and the decision is the probe's."""
-    from hpmesh.models.common.grouped_experts import grouped_mm_available
+    from llmtuner.models.common.grouped_experts import grouped_mm_available
 
     assert _grouped(use_grouped_mm=None).use_grouped_mm == grouped_mm_available()
     # An explicit value still wins, which is what lets a test pin a path.

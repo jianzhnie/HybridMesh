@@ -23,7 +23,7 @@ require_env('spmd_types')
 import pytest
 import torch
 
-from hpmesh.models.common.masks import (
+from llmtuner.models.common.masks import (
     VarlenMetadata,
     create_varlen_metadata_for_document,
     get_causal_mask_mod,

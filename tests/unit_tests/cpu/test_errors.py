@@ -1,4 +1,4 @@
-"""The hpmesh.errors hierarchy: three fail-fast semantics, told apart by type.
+"""The llmtuner.errors hierarchy: three fail-fast semantics, told apart by type.
 
 Each leaf also IS the builtin its guard points raised before the hierarchy
 existed, which is what keeps legacy ``pytest.raises(ValueError /
@@ -7,38 +7,38 @@ NotImplementedError)`` assertions catching the same failures.
 
 import pytest
 
-from hpmesh.errors import (
+from llmtuner.errors import (
     ConfigError,
     EnvironmentUnsupportedError,
-    HpmeshError,
+    LLMTunerError,
     UnsupportedCombinationError,
 )
 
 
-def test_all_leaves_are_hpmesh_errors() -> None:
+def test_all_leaves_are_llmtuner_errors() -> None:
     for exc in (ConfigError, UnsupportedCombinationError, EnvironmentUnsupportedError):
-        assert issubclass(exc, HpmeshError)
+        assert issubclass(exc, LLMTunerError)
         assert issubclass(exc, Exception)
 
 
 def test_config_error_stays_a_value_error() -> None:
     with pytest.raises(ValueError):
         raise ConfigError("bad field")
-    with pytest.raises(HpmeshError):
+    with pytest.raises(LLMTunerError):
         raise ConfigError("bad field")
 
 
 def test_combination_error_stays_a_not_implemented_error() -> None:
     with pytest.raises(NotImplementedError):
         raise UnsupportedCombinationError("tp x ep x cp")
-    with pytest.raises(HpmeshError):
+    with pytest.raises(LLMTunerError):
         raise UnsupportedCombinationError("tp x ep x cp")
 
 
 def test_environment_error_stays_a_not_implemented_error() -> None:
     with pytest.raises(NotImplementedError):
         raise EnvironmentUnsupportedError("needs torch >= 2.12")
-    with pytest.raises(HpmeshError):
+    with pytest.raises(LLMTunerError):
         raise EnvironmentUnsupportedError("needs torch >= 2.12")
 
 

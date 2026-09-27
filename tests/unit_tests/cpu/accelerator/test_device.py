@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import torch
 
-from hpmesh.accelerator import device
+from llmtuner.accelerator import device
 
 
 def test_device_priority_prefers_npu(monkeypatch) -> None:

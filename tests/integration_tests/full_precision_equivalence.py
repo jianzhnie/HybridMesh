@@ -28,7 +28,7 @@ import hashlib
 import json
 from typing import Any
 
-from hpmesh.components.metrics import MetricsProcessor
+from llmtuner.components.metrics import MetricsProcessor
 
 
 class Fingerprint:

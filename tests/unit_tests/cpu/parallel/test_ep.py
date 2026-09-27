@@ -17,8 +17,8 @@ require_env('spmd_types')
 import pytest
 import torch
 
-from hpmesh.parallel.expert_parallel import apply_ep
-from hpmesh.trainer import ParallelConfig
+from llmtuner.parallel.expert_parallel import apply_ep
+from llmtuner.trainer import ParallelConfig
 
 
 def test_apply_ep_is_a_no_op_when_ep_is_off() -> None:

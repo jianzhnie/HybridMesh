@@ -27,8 +27,8 @@ import pytest
 import torch
 import torch.distributed as dist
 
-from hpmesh.models.common.grouped_experts import GroupedExperts
-from hpmesh.models.common.moe import (
+from llmtuner.models.common.grouped_experts import GroupedExperts
+from llmtuner.models.common.moe import (
     MoE,
     RoutedExperts,
     TokenChoiceTopKRouter,
@@ -36,9 +36,9 @@ from hpmesh.models.common.moe import (
     register_moe_load_balancing_hook,
     update_expert_bias,
 )
-from hpmesh.models.common.token_dispatcher import LocalTokenDispatcher
-from hpmesh.models.hf_wrapper import HFTransformerModel
-from hpmesh.parallel.expert_parallel import swap_hf_moe_blocks
+from llmtuner.models.common.token_dispatcher import LocalTokenDispatcher
+from llmtuner.models.hf_wrapper import HFTransformerModel
+from llmtuner.parallel.expert_parallel import swap_hf_moe_blocks
 
 try:
     from transformers import AutoConfig

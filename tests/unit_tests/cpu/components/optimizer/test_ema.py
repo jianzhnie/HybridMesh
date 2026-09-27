@@ -13,8 +13,8 @@ import pytest
 import torch
 import torch.nn as nn
 
-from hpmesh.components.optimizer import EMA, OptimizersContainer
-from hpmesh.config import EMAConfig, OptimizerConfig
+from llmtuner.components.optimizer import EMA, OptimizersContainer
+from llmtuner.config import EMAConfig, OptimizerConfig
 
 
 def _model() -> nn.Module:

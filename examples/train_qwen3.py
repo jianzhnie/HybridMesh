@@ -1,7 +1,7 @@
 """Qwen3 training -- the whole thing in a few readable lines.
 
 The HuggingFace ecosystem end to end: ``AutoConfig`` builds a tiny Qwen3,
-``AutoModelForCausalLM`` provides the model, and hpmesh's ``Trainer`` runs the
+``AutoModelForCausalLM`` provides the model, and llmtuner's ``Trainer`` runs the
 loop. No hand-written model code, no network.
 
 Two things are worth reading here. The first is how little it takes to start: a
@@ -11,15 +11,15 @@ projection because several query heads share each K/V head. It is the one
 setting that makes this Qwen3 rather than a generic decoder, and
 ``AutoModelForCausalLM`` builds the shape on its own once the config says so.
 
-Run it (from the repo root, with hpmesh installed or on the path):
+Run it (from the repo root, with llmtuner installed or on the path):
     python -m examples.train_qwen3
 
 Note the ``-m``: running the file by path (``python examples/train_qwen3.py``)
-puts ``examples/`` on ``sys.path`` instead of the repo root, so ``import hpmesh``
+puts ``examples/`` on ``sys.path`` instead of the repo root, so ``import llmtuner``
 fails. ``-m`` puts the repo root there, which is where the package lives.
 
 or equivalently through the CLI, with the same sizes as flags:
-    python -m hpmesh --model_name_or_path qwen3 --num_hidden_layers 2 \
+    python -m llmtuner --model_name_or_path qwen3 --num_hidden_layers 2 \
         --num_attention_heads 4 --num_key_value_heads 2 --steps 20 \
         --max_seq_len 32 --global_batch_size 8
 
@@ -30,9 +30,9 @@ sizes below are ignored.
 
 from __future__ import annotations
 
-from hpmesh import Trainer
-from hpmesh.config import (
-    HybridMeshConfig,
+from llmtuner import Trainer
+from llmtuner.config import (
+    LLMTunerConfig,
     MetricsConfig,
     ModelConfig,
     OptimizerConfig,
@@ -41,9 +41,9 @@ from hpmesh.config import (
 )
 
 
-def qwen3_config() -> HybridMeshConfig:
+def qwen3_config() -> LLMTunerConfig:
     """A tiny offline Qwen3 (random init) for the single-device learning step."""
-    return HybridMeshConfig(
+    return LLMTunerConfig(
         model=ModelConfig(
             model_name_or_path="qwen3",  # offline: AutoConfig.for_model("qwen3", ...)
             vocab_size=128,

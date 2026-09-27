@@ -32,41 +32,41 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from hpmesh.accelerator.collectives import (
+from llmtuner.accelerator.collectives import (
     clip_grad_norm_,
 )
-from hpmesh.components.checkpointer import (
+from llmtuner.components.checkpointer import (
     DATALOADER,
     TRAIN_STATE,
     CheckpointManager,
 )
-from hpmesh.components.loss import (
+from llmtuner.components.loss import (
     IGNORE_INDEX,
     cross_entropy_loss,
     next_token_targets,
     vocab_shard_bounds,
 )
-from hpmesh.components.optimizer import OptimizersContainer
-from hpmesh.components.optimizer.lr_scheduler import build_lr_scheduler
-from hpmesh.config import (
+from llmtuner.components.optimizer import OptimizersContainer
+from llmtuner.components.optimizer.lr_scheduler import build_lr_scheduler
+from llmtuner.config import (
     CheckpointConfig,
-    HybridMeshConfig,
+    LLMTunerConfig,
     LRSchedulerConfig,
     OptimizerConfig,
     ParallelConfig,
     ParamGroupConfig,
     TrainingConfig,
 )
-from hpmesh.datasets.random_data import (
+from llmtuner.datasets.random_data import (
     DataLoaderExhausted,
     RandomTokenDataLoader,
     RandomTokenSource,
     batch_iterator,
 )
-from hpmesh.datasets.types import Batch
-from hpmesh.models.hf_factory import build_model_config
-from hpmesh.models.hf_wrapper import HFTransformerModel
-from hpmesh.trainer.trainer import Trainer
+from llmtuner.datasets.types import Batch
+from llmtuner.models.hf_factory import build_model_config
+from llmtuner.models.hf_wrapper import HFTransformerModel
+from llmtuner.trainer.trainer import Trainer
 
 
 def test_pp_forward_backward_releases_consumed_loss_graphs() -> None:
@@ -218,7 +218,7 @@ def test_the_timeout_applies_to_every_one_dimensional_group_and_the_default(
     """
     from datetime import timedelta
 
-    from hpmesh.parallel import collectives
+    from llmtuner.parallel import collectives
 
     lowered: list[tuple[timedelta, object]] = []
 
@@ -254,7 +254,7 @@ def test_timeout_uses_torch_210_compatibility_api(monkeypatch) -> None:
     """Torch 2.10 keeps runtime timeout adjustment in distributed_c10d."""
     from datetime import timedelta
 
-    from hpmesh.parallel import collectives
+    from llmtuner.parallel import collectives
 
     lowered = []
 
@@ -279,7 +279,7 @@ def test_timeout_adjustment_is_skipped_for_hccl(monkeypatch) -> None:
     """HCCL does not implement c10d's runtime timeout adjustment."""
     from datetime import timedelta
 
-    from hpmesh.parallel import collectives
+    from llmtuner.parallel import collectives
 
     class _Dims:
         def get_all_one_dimensional_meshes(self):
@@ -362,12 +362,12 @@ def test_clip_does_not_exhaust_a_generator() -> None:
 # -- the data iterator --------------------------------------------------------
 
 
-def _cfg_with_batch(**overrides) -> HybridMeshConfig:
+def _cfg_with_batch(**overrides) -> LLMTunerConfig:
     fields = {"global_batch_size": 8, "max_seq_len": 16, "seed": 42, **overrides}
-    return HybridMeshConfig(training=TrainingConfig(**fields))
+    return LLMTunerConfig(training=TrainingConfig(**fields))
 
 
-def _bare_trainer(cfg: HybridMeshConfig) -> Trainer:
+def _bare_trainer(cfg: LLMTunerConfig) -> Trainer:
     """A Trainer with ``__init__`` bypassed, for testing pure data helpers."""
     trainer = Trainer.__new__(Trainer)
     trainer.cfg = cfg
@@ -1266,7 +1266,7 @@ def test_create_seed_checkpoint_writes_a_step_0_checkpoint_and_exits(tmp_path) -
         [
             sys.executable,
             "-m",
-            "hpmesh",
+            "llmtuner",
             "--steps",
             "5",
             "--max_seq_len",

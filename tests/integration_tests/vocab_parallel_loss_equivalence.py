@@ -49,14 +49,14 @@ import torch
 import torch.distributed as dist
 import torch.nn.functional as F
 
-from hpmesh.components.loss import (
+from llmtuner.components.loss import (
     IGNORE_INDEX,
     LossParallelCrossEntropy,
     compute_logprobs,
     cross_entropy_loss,
     vocab_shard_bounds,
 )
-from hpmesh.utils.batch_invariant import set_batch_invariant_mode
+from llmtuner.utils.batch_invariant import set_batch_invariant_mode
 
 T = 64  # tokens per rank's local shard
 SEED = 42

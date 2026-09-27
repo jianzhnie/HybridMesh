@@ -2,7 +2,7 @@
 
 The ``renderers`` package is not installed in this environment, so the
 library seam is exercised against a fake module injected into
-``sys.modules`` -- the fake reproduces the interface hpmesh calls
+``sys.modules`` -- the fake reproduces the interface llmtuner calls
 (``create_renderer``, ``build_training_sample``, top-level config classes
 with a ``name``), not the real renderers' token-level output. Numerical
 parity with the real library is unverified until the dependency lands and
@@ -24,21 +24,21 @@ import types
 import numpy as np
 import pytest
 
-from hpmesh.components.loss import IGNORE_INDEX
-from hpmesh.components.tokenizer import HuggingFaceTokenizer
-from hpmesh.config import (
+from llmtuner.components.loss import IGNORE_INDEX
+from llmtuner.components.tokenizer import HuggingFaceTokenizer
+from llmtuner.config import (
     DataloaderConfig,
-    HybridMeshConfig,
+    LLMTunerConfig,
     ModelConfig,
     TrainingConfig,
 )
-from hpmesh.datasets.build import build_dataloader
-from hpmesh.datasets.text.renderer import (
+from llmtuner.datasets.build import build_dataloader
+from llmtuner.datasets.text.renderer import (
     RENDERERS_INSTALL_HINT,
     RendererTokenizerWrapper,
     build_chat_renderer,
 )
-from hpmesh.datasets.text.text import ChatProcessor
+from llmtuner.datasets.text.text import ChatProcessor
 from tests.data_fixtures import (
     make_context,
     tokenizer,  # noqa: F401  (fixture re-export)
@@ -300,7 +300,7 @@ def test_make_local_jsonl_sft_multiturn_builds_a_renderer_processor(
     recipe itself -- processor class, configured messages field, and the
     renderer it was handed.
     """
-    from hpmesh.datasets.text.text import make_local_jsonl_sft_multiturn
+    from llmtuner.datasets.text.text import make_local_jsonl_sft_multiturn
 
     corpus_path = tmp_path / "rows.jsonl"
     corpus_path.write_text('{"conversation": []}\n')
@@ -329,7 +329,7 @@ def test_build_dataloader_without_the_package_fails_loudly(tmp_path, monkeypatch
     corpus_path.write_text('{"messages": []}\n')
     with pytest.raises(ImportError, match="renderers==0.1.11"):
         build_dataloader(
-            HybridMeshConfig(
+            LLMTunerConfig(
                 model=ModelConfig(vocab_size=128),
                 training=TrainingConfig(
                     global_batch_size=4,

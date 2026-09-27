@@ -1,10 +1,10 @@
 """Config validation: the rejections, since the acceptances are the default runs.
 
-Every ``__post_init__`` in ``hpmesh/config/`` guards a combination that would
+Every ``__post_init__`` in ``llmtuner/config/`` guards a combination that would
 otherwise fail late -- inside a distributed launch, a checkpoint load, or a mesh
 build -- or, worse, silently train something other than what was asked for. The
 valid defaults are exercised by every other test in this suite (they construct a
-``HybridMeshConfig``); these are the branches that only run when a user is wrong.
+``LLMTunerConfig``); these are the branches that only run when a user is wrong.
 
 Each ``with pytest.raises`` is paired with a positive case where the guard has a
 boundary worth pinning (``-1`` is allowed for dp_shard, ``0`` is not), so the
@@ -20,14 +20,14 @@ require_env('dtensor')
 
 import pytest
 
-from hpmesh.components.checkpointer import LR_SCHEDULER, MODEL, OPTIMIZER
-from hpmesh.config import (
+from llmtuner.components.checkpointer import LR_SCHEDULER, MODEL, OPTIMIZER
+from llmtuner.config import (
     CheckpointConfig,
     LRSchedulerConfig,
     ParallelConfig,
     TrainingConfig,
 )
-from hpmesh.errors import UnsupportedCombinationError
+from llmtuner.errors import UnsupportedCombinationError
 
 # -- ParallelConfig ----------------------------------------------------------
 
@@ -73,7 +73,7 @@ def test_a_load_balancer_that_is_not_a_known_strategy_is_rejected() -> None:
 
 
 def test_ptrr_is_rejected_at_config_time_not_at_the_first_forward() -> None:
-    """It is a *recognized* name that hpmesh does not implement.
+    """It is a *recognized* name that llmtuner does not implement.
 
     Keeping it out of the message's "must be one of" list would report a
     deliberate, supported-in-upstream strategy as a typo, so it stays in the
@@ -86,7 +86,7 @@ def test_ptrr_is_rejected_at_config_time_not_at_the_first_forward() -> None:
 
 
 def test_sequence_parallel_cannot_be_turned_off() -> None:
-    """hpmesh's TP is sequence-parallel by construction, so the flag has no
+    """llmtuner's TP is sequence-parallel by construction, so the flag has no
     "off" to select.
 
     It used to be read by no line of the package: ``enable_sequence_parallel
@@ -276,7 +276,7 @@ def test_a_non_positive_loop_parameter_is_rejected(field: str, bad: int) -> None
 
 # -- the flat view the trainer reads -------------------------------------------
 #
-# ``HybridMeshConfig`` exposes the trainer's scalars as hand-written properties,
+# ``LLMTunerConfig`` exposes the trainer's scalars as hand-written properties,
 # so a new field on a group stays invisible to the trainer until its passthrough
 # exists. The failure mode is an AttributeError on the first training step, not
 # at parse time -- so the passthroughs are worth pinning explicitly.
@@ -284,24 +284,24 @@ def test_a_non_positive_loop_parameter_is_rejected(field: str, bad: int) -> None
 
 def test_accumulation_and_gc_freq_reach_the_flat_view() -> None:
     """The trainer reads both off ``cfg``, not off ``cfg.training``."""
-    from hpmesh.trainer import HybridMeshConfig
+    from llmtuner.trainer import LLMTunerConfig
 
-    cfg = HybridMeshConfig(
+    cfg = LLMTunerConfig(
         training=TrainingConfig(gradient_accumulation_steps=3, gc_freq=7)
     )
     assert cfg.gradient_accumulation_steps == 3
     assert cfg.gc_freq == 7
     # The defaults the trainer runs with when nothing is passed.
-    assert HybridMeshConfig().gradient_accumulation_steps == 1
-    assert HybridMeshConfig().gc_freq == 50
+    assert LLMTunerConfig().gradient_accumulation_steps == 1
+    assert LLMTunerConfig().gc_freq == 50
 
 
 def test_cp_must_divide_seq_len() -> None:
     """A ragged sequence split would give ranks unequal token counts."""
-    from hpmesh.trainer import HybridMeshConfig
+    from llmtuner.trainer import LLMTunerConfig
 
     with pytest.raises(ValueError):
-        HybridMeshConfig(
+        LLMTunerConfig(
             parallel=ParallelConfig(context_parallel_size=3),
             training=TrainingConfig(max_seq_len=64),
         )

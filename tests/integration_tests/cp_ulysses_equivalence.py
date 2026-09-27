@@ -46,26 +46,26 @@ import torch.nn.functional as F
 from torch.distributed.device_mesh import init_device_mesh
 from torch.nn.attention.flex_attention import create_block_mask
 
-from hpmesh.models.common.masks import get_causal_mask_mod
-from hpmesh.models.hf_factory import build_model_config_for
-from hpmesh.models.hf_wrapper import HFTransformerModel
-from hpmesh.parallel.context_parallel import (
+from llmtuner.models.common.masks import get_causal_mask_mod
+from llmtuner.models.hf_factory import build_model_config_for
+from llmtuner.models.hf_wrapper import HFTransformerModel
+from llmtuner.parallel.context_parallel import (
     apply_cp,
     shard_attention_mask_for_cp,
     shard_batch_for_cp,
 )
-from hpmesh.parallel.context_parallel.cp_kernel import (
+from llmtuner.parallel.context_parallel.cp_kernel import (
     CPFlexKernel,
     HeadToSeq,
     SeqToHead,
 )
-from hpmesh.trainer import (
-    HybridMeshConfig,
+from llmtuner.trainer import (
+    LLMTunerConfig,
     ModelConfig,
     ParallelConfig,
     TrainingConfig,
 )
-from hpmesh.utils.batch_invariant import is_in_batch_invariant_mode
+from llmtuner.utils.batch_invariant import is_in_batch_invariant_mode
 
 SEQ = 256  # torch's CP BlockMask path requires Q_LEN % (cp * 128) == 0
 VOCAB = 128
@@ -74,8 +74,8 @@ VOCAB = 128
 TOL = 1e-9
 
 
-def _cfg(num_kv_heads: int = 4) -> HybridMeshConfig:
-    return HybridMeshConfig(
+def _cfg(num_kv_heads: int = 4) -> LLMTunerConfig:
+    return LLMTunerConfig(
         model=ModelConfig(
             model_name_or_path="qwen3",
             vocab_size=VOCAB,
@@ -94,7 +94,7 @@ def _cfg(num_kv_heads: int = 4) -> HybridMeshConfig:
     )
 
 
-def _build_model(cfg: HybridMeshConfig, *, flex: bool, seed: int = 0):
+def _build_model(cfg: LLMTunerConfig, *, flex: bool, seed: int = 0):
     """Deterministically initialized tiny qwen3; identical on every rank."""
     torch.manual_seed(seed)
     model = HFTransformerModel(build_model_config_for(cfg)).to(torch.float64)

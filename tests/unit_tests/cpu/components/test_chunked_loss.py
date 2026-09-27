@@ -16,7 +16,7 @@ import torch
 import torch.nn.functional as F
 from torch import nn
 
-from hpmesh.components.loss import IGNORE_INDEX, chunked_lm_head_cross_entropy
+from llmtuner.components.loss import IGNORE_INDEX, chunked_lm_head_cross_entropy
 
 T = 13  # deliberately not divisible by 2, 3, or 4
 H = 8

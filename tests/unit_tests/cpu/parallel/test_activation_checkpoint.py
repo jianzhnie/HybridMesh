@@ -42,22 +42,22 @@ from torch.distributed.algorithms._checkpoint.checkpoint_wrapper import (
 )
 from torch.utils.checkpoint import CheckpointPolicy
 
-from hpmesh.config import (
+from llmtuner.config import (
     MemoryBudgetACConfig,
     ParallelConfig,
     SelectiveACConfig,
     TrainingConfig,
 )
-from hpmesh.models.hf_factory import build_model_config
-from hpmesh.models.hf_wrapper import HFTransformerModel
-from hpmesh.parallel.activation_checkpoint import (
+from llmtuner.models.hf_factory import build_model_config
+from llmtuner.models.hf_wrapper import HFTransformerModel
+from llmtuner.parallel.activation_checkpoint import (
     VALID_AC_MODES,
     _get_default_save_ops,
     apply_ac,
     mm_recompute_shapes,
     selective_policy,
 )
-from hpmesh.parallel.parallelize import parallelize_hf_transformers
+from llmtuner.parallel.parallelize import parallelize_hf_transformers
 
 _VOCAB = 32
 _HIDDEN = 16

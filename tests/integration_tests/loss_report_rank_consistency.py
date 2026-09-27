@@ -18,23 +18,23 @@ from __future__ import annotations
 import torch
 import torch.distributed as dist
 
-from hpmesh.components.loss import IGNORE_INDEX
-from hpmesh.config import MetricsConfig
-from hpmesh.trainer import (
-    HybridMeshConfig,
+from llmtuner.components.loss import IGNORE_INDEX
+from llmtuner.config import MetricsConfig
+from llmtuner.trainer import (
+    LLMTunerConfig,
     ModelConfig,
     OptimizerConfig,
     ParallelConfig,
     TrainingConfig,
 )
-from hpmesh.trainer.trainer import Trainer
+from llmtuner.trainer.trainer import Trainer
 
 SEQ = 32
 VOCAB = 128
 
 
-def _cfg() -> HybridMeshConfig:
-    return HybridMeshConfig(
+def _cfg() -> LLMTunerConfig:
+    return LLMTunerConfig(
         model=ModelConfig(
             model_name_or_path="qwen3",
             vocab_size=VOCAB,

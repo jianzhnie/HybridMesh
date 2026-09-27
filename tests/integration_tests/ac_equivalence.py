@@ -32,12 +32,12 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torch.distributed.tensor import DTensor
 
-from hpmesh.accelerator.dist import all_reduce
-from hpmesh.config import SelectiveACConfig
-from hpmesh.parallel.activation_checkpoint import apply_ac
-from hpmesh.parallel.fully_shard.apply import apply_fsdp
-from hpmesh.parallel.parallel_dims import ParallelDims
-from hpmesh.trainer import ParallelConfig
+from llmtuner.accelerator.dist import all_reduce
+from llmtuner.config import SelectiveACConfig
+from llmtuner.parallel.activation_checkpoint import apply_ac
+from llmtuner.parallel.fully_shard.apply import apply_fsdp
+from llmtuner.parallel.parallel_dims import ParallelDims
+from llmtuner.trainer import ParallelConfig
 
 AC_MODES = ("full", "selective")
 

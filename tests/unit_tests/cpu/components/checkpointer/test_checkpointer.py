@@ -17,17 +17,17 @@ require_env('dcp', 'dtensor')
 import torch
 import torch.nn as nn
 
-from hpmesh.components.checkpointer import (
+from llmtuner.components.checkpointer import (
     CheckpointManager,
     CheckpointStorage,
     ModelWrapper,
     canonical_fqn,
 )
-from hpmesh.components.checkpointer.dcp import FilesystemCheckpointStorage
-from hpmesh.components.optimizer import init_optim_state
-from hpmesh.components.optimizer.lr_scheduler import build_lr_scheduler
-from hpmesh.config import CheckpointConfig as Config
-from hpmesh.config import LRSchedulerConfig
+from llmtuner.components.checkpointer.dcp import FilesystemCheckpointStorage
+from llmtuner.components.optimizer import init_optim_state
+from llmtuner.components.optimizer.lr_scheduler import build_lr_scheduler
+from llmtuner.config import CheckpointConfig as Config
+from llmtuner.config import LRSchedulerConfig
 
 # -- canonical_fqn ------------------------------------------------------------
 
@@ -132,7 +132,7 @@ def _schedule(optimizer):
 
 
 def test_hf_options_are_rejected_without_a_state_dict_adapter(tmp_path) -> None:
-    """hpmesh ships no adapter, so the HF paths must refuse, not silently no-op."""
+    """llmtuner ships no adapter, so the HF paths must refuse, not silently no-op."""
     model = nn.Linear(4, 4)
     optimizer = torch.optim.AdamW(model.parameters(), lr=0.1)
     try:
@@ -348,7 +348,7 @@ def test_a_disabled_torch_checkpointing_manager_never_touches_the_backend() -> N
     machine without the backend; if the import moved above the guard, every
     caller would need the package installed just to not use it.
     """
-    from hpmesh.components.checkpointer.torch_checkpointing import (
+    from llmtuner.components.checkpointer.torch_checkpointing import (
         TorchCheckpointingManager,
     )
 
@@ -374,7 +374,7 @@ def test_an_enabled_torch_checkpointing_manager_without_the_backend_raises() -> 
 
     import pytest
 
-    from hpmesh.components.checkpointer.torch_checkpointing import (
+    from llmtuner.components.checkpointer.torch_checkpointing import (
         TorchCheckpointingManager,
     )
 
@@ -405,8 +405,8 @@ def test_an_enabled_manager_registers_the_lr_scheduler(monkeypatch) -> None:
     """
     import pytest
 
-    from hpmesh.components.checkpointer import LR_SCHEDULER
-    from hpmesh.components.checkpointer import torch_checkpointing as tc
+    from llmtuner.components.checkpointer import LR_SCHEDULER
+    from llmtuner.components.checkpointer import torch_checkpointing as tc
 
     class _StubBackend:
         def __getattr__(self, name):

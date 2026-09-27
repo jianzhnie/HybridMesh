@@ -49,16 +49,16 @@ from __future__ import annotations
 import torch
 import torch.distributed as dist
 
-from hpmesh.models.hf_factory import build_model_config_for
-from hpmesh.models.hf_wrapper import HFTransformerModel
-from hpmesh.parallel.context_parallel import (
+from llmtuner.models.hf_factory import build_model_config_for
+from llmtuner.models.hf_wrapper import HFTransformerModel
+from llmtuner.parallel.context_parallel import (
     apply_cp,
     shard_batch_for_cp,
     shard_batch_for_tp,
 )
-from hpmesh.parallel.parallel_dims import ParallelDims
-from hpmesh.parallel.tensor_parallel import apply_tp
-from hpmesh.trainer import HybridMeshConfig, ModelConfig, ParallelConfig, TrainingConfig
+from llmtuner.parallel.parallel_dims import ParallelDims
+from llmtuner.parallel.tensor_parallel import apply_tp
+from llmtuner.trainer import LLMTunerConfig, ModelConfig, ParallelConfig, TrainingConfig
 
 SEQ = 256  # torch's CP BlockMask path requires Q_LEN % (cp * 128) == 0
 VOCAB = 128
@@ -70,8 +70,8 @@ TOL = 1e-9
 IGNORE_INDEX = -100
 
 
-def _cfg(strategy: str, *, heads: int = HEADS) -> HybridMeshConfig:
-    return HybridMeshConfig(
+def _cfg(strategy: str, *, heads: int = HEADS) -> LLMTunerConfig:
+    return LLMTunerConfig(
         model=ModelConfig(
             model_name_or_path="qwen3",
             vocab_size=VOCAB,
@@ -91,7 +91,7 @@ def _cfg(strategy: str, *, heads: int = HEADS) -> HybridMeshConfig:
     )
 
 
-def _build(cfg: HybridMeshConfig, *, flex: bool, seed: int = 0) -> HFTransformerModel:
+def _build(cfg: LLMTunerConfig, *, flex: bool, seed: int = 0) -> HFTransformerModel:
     torch.manual_seed(seed)
     model = HFTransformerModel(build_model_config_for(cfg)).to(torch.float64)
     if flex:
@@ -145,7 +145,7 @@ def _dense_view(cp_mesh, tp_mesh):
 def _tp_wrapper_count(model: HFTransformerModel) -> int:
     """How many projections ``apply_tp`` swapped for a sharded realizer.
 
-    hpmesh's TP is manual-collective, not DTensor-based: ``apply_tp`` replaces a
+    llmtuner's TP is manual-collective, not DTensor-based: ``apply_tp`` replaces a
     target ``nn.Linear`` with ``ColumnParallelLinear`` / ``RowParallelLinear`` /
     ``ColwiseLinearNoGather``, whose stored weight is a literal slice of the
     original. So "did TP do anything" is a class-count question, not an

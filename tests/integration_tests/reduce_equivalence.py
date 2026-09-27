@@ -28,7 +28,7 @@ from __future__ import annotations
 import torch
 import torch.distributed as dist
 
-from hpmesh.accelerator.dist import all_reduce
+from llmtuner.accelerator.dist import all_reduce
 
 # Rank r holds 2 + r, so the SUM is 5 and the MAX is 3 on both ranks. A wrong
 # answer is then attributable to a specific rank rather than to "the sum is off".
@@ -113,7 +113,7 @@ def main() -> None:
         from torch.distributed.device_mesh import init_device_mesh
 
         # A 1-D mesh over both ranks. The mesh is the whole addressing story
-        # for these helpers -- hpmesh has no separate ``extra_pg``.
+        # for these helpers -- llmtuner has no separate ``extra_pg``.
         _mesh = init_device_mesh("cpu", (2,), mesh_dim_names=("dp",))
 
         rank = dist.get_rank()

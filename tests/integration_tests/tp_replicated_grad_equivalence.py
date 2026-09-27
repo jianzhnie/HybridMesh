@@ -32,17 +32,17 @@ import torch
 import torch.distributed as dist
 import torch.nn.functional as F
 
-from hpmesh.config import ParallelConfig
-from hpmesh.models.hf_factory import build_model_config
-from hpmesh.models.hf_wrapper import HFTransformerModel
-from hpmesh.parallel.parallel_dims import ParallelDims, build_mesh
-from hpmesh.parallel.tensor_parallel import apply_tp
-from hpmesh.parallel.tensor_parallel.tp import (
+from llmtuner.config import ParallelConfig
+from llmtuner.models.hf_factory import build_model_config
+from llmtuner.models.hf_wrapper import HFTransformerModel
+from llmtuner.parallel.parallel_dims import ParallelDims, build_mesh
+from llmtuner.parallel.tensor_parallel import apply_tp
+from llmtuner.parallel.tensor_parallel.tp import (
     ColumnParallelLinear,
     ColwiseLinearNoGather,
     RowParallelLinear,
 )
-from hpmesh.trainer.trainer import Trainer
+from llmtuner.trainer.trainer import Trainer
 
 SEQ = 16
 VOCAB = 64

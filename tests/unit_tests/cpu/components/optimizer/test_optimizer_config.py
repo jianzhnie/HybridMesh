@@ -18,12 +18,12 @@ import pytest
 import torch
 from transformers import HfArgumentParser
 
-from hpmesh.config import HybridMeshConfig, OptimizerConfig
+from llmtuner.config import LLMTunerConfig, OptimizerConfig
 
 
 def _parser() -> HfArgumentParser:
     """The production parser group list, so the flags are the real ones."""
-    from hpmesh.config import (
+    from llmtuner.config import (
         CheckpointConfig,
         DataloaderConfig,
         LRSchedulerConfig,
@@ -101,7 +101,7 @@ def test_flags_parse_and_the_flat_view_reaches_them() -> None:
     (_, _, optimizer, *_rest) = _parser().parse_args_into_dataclasses(
         args=["--betas", "0.9", "0.95", "--eps", "1e-6"]
     )
-    cfg = HybridMeshConfig(optimizer=optimizer)
+    cfg = LLMTunerConfig(optimizer=optimizer)
 
     assert cfg.betas == (0.9, 0.95)
     assert cfg.eps == 1e-6
@@ -119,7 +119,7 @@ def test_flags_parse_and_the_flat_view_reaches_them() -> None:
 
 def test_omitting_the_flags_leaves_the_defaults() -> None:
     (_, _, optimizer, *_rest) = _parser().parse_args_into_dataclasses(args=[])
-    cfg = HybridMeshConfig(optimizer=optimizer)
+    cfg = LLMTunerConfig(optimizer=optimizer)
 
     assert cfg.betas == (0.9, 0.999)
     assert cfg.eps == 1e-8

@@ -19,8 +19,8 @@ import pytest
 import torch
 import torch.nn as nn
 
-from hpmesh.components.optimizer import OptimizersContainer
-from hpmesh.config import OptimizerConfig, ParamGroupConfig
+from llmtuner.components.optimizer import OptimizersContainer
+from llmtuner.config import OptimizerConfig, ParamGroupConfig
 
 
 def _model() -> nn.Module:

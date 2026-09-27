@@ -6,7 +6,7 @@ Run under torchrun with 2 ranks:
 
 With ``dp_shard=1, cp=2`` every rank computes the loss over its own sequence
 shard, so its parameter gradients are partial: they only become the global
-(full-sequence) gradients once reduced across the CP group. hpmesh wires that
+(full-sequence) gradients once reduced across the CP group. llmtuner wires that
 reduction through FSDP -- ``resolve_fsdp_mesh`` puts ``cp`` on the shard axis,
 and ``apply_fsdp`` must therefore run whenever CP is enabled, not only when
 ``dp_shard > 1``. This test pins that contract end to end:
@@ -37,11 +37,11 @@ import torch.nn.functional as F
 from torch.distributed._composable.fsdp import FSDPModule
 from torch.distributed.tensor import DTensor
 
-from hpmesh.accelerator.dist import all_reduce
-from hpmesh.parallel.context_parallel import shard_batch_for_cp
-from hpmesh.parallel.fully_shard.apply import apply_fsdp
-from hpmesh.parallel.parallel_dims import ParallelDims
-from hpmesh.trainer import HybridMeshConfig, ParallelConfig, TrainingConfig
+from llmtuner.accelerator.dist import all_reduce
+from llmtuner.parallel.context_parallel import shard_batch_for_cp
+from llmtuner.parallel.fully_shard.apply import apply_fsdp
+from llmtuner.parallel.parallel_dims import ParallelDims
+from llmtuner.trainer import LLMTunerConfig, ParallelConfig, TrainingConfig
 
 VOCAB = 32
 HIDDEN = 16
@@ -121,7 +121,7 @@ def main() -> None:
     world = dist.get_world_size()
     assert world == 2, f"this check assumes 2 ranks, got {world}"
 
-    cfg = HybridMeshConfig(
+    cfg = LLMTunerConfig(
         parallel=ParallelConfig(context_parallel_size=2),
         training=TrainingConfig(max_seq_len=SEQ, steps=STEPS),
     )

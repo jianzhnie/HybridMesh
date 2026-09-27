@@ -20,8 +20,8 @@ import torch
 import torch.distributed as dist
 from torch.testing._internal.distributed.fake_pg import FakeStore
 
-from hpmesh.models.common import embedding as embedding_mod
-from hpmesh.models.common.embedding import Embedding
+from llmtuner.models.common import embedding as embedding_mod
+from llmtuner.models.common.embedding import Embedding
 
 
 def _single_rank_fake_pg():

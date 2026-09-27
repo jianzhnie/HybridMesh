@@ -13,19 +13,19 @@ import os
 import torch
 import torch.distributed as dist
 
-from hpmesh.config import CheckpointConfig
-from hpmesh.trainer import (
-    HybridMeshConfig,
+from llmtuner.config import CheckpointConfig
+from llmtuner.trainer import (
+    LLMTunerConfig,
     ModelConfig,
     ParallelConfig,
     TrainingConfig,
 )
-from hpmesh.trainer.trainer import Trainer
+from llmtuner.trainer.trainer import Trainer
 
 
 def main() -> None:
     failures: list[str] = []
-    cfg = HybridMeshConfig(
+    cfg = LLMTunerConfig(
         model=ModelConfig(
             model_name_or_path="qwen3",
             vocab_size=128,

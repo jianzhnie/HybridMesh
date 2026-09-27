@@ -19,22 +19,22 @@ require_env('dtensor', 'pipelining', 'spmd_types')
 import pytest
 import torch
 
-from hpmesh.config import (
-    HybridMeshConfig,
+from llmtuner.config import (
+    LLMTunerConfig,
     MetricsConfig,
     ModelConfig,
     OptimizerConfig,
     TrainingConfig,
 )
-from hpmesh.trainer.trainer import Trainer
+from llmtuner.trainer.trainer import Trainer
 
 STEPS = 3
 # fp32 CPU; the only sanctioned divergence is the per-chunk summation order.
 TOL = 1e-5
 
 
-def _cfg(chunked_loss_num_chunks: int, dump_folder: str) -> HybridMeshConfig:
-    return HybridMeshConfig(
+def _cfg(chunked_loss_num_chunks: int, dump_folder: str) -> LLMTunerConfig:
+    return LLMTunerConfig(
         model=ModelConfig(
             model_name_or_path="llama",
             vocab_size=128,
@@ -58,7 +58,7 @@ def _cfg(chunked_loss_num_chunks: int, dump_folder: str) -> HybridMeshConfig:
     )
 
 
-def _run(cfg: HybridMeshConfig) -> tuple[list[float], dict[str, torch.Tensor]]:
+def _run(cfg: LLMTunerConfig) -> tuple[list[float], dict[str, torch.Tensor]]:
     trainer = Trainer(cfg)
     try:
         data_iterator = trainer.data_iterator()

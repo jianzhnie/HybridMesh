@@ -17,7 +17,7 @@ from __future__ import annotations
 import torch
 import torch.nn.functional as F
 
-from hpmesh.components.loss import (
+from llmtuner.components.loss import (
     IGNORE_INDEX,
     compute_logprobs,
     cross_entropy_loss,

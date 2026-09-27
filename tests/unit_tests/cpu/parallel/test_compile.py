@@ -1,6 +1,6 @@
 """The compile step: gating, defaults, and the four compile-side toggles.
 
-``hpmesh/parallel/compile.py`` ports torchtitan's ``distributed/compile.py``:
+``llmtuner/parallel/compile.py`` ports torchtitan's ``distributed/compile.py``:
 per-block compile, async TP, regional_inductor and capture_scalar_outputs,
 each behind its own switch so the default is the historical whole-model
 ``torch.compile(model)``.
@@ -31,10 +31,10 @@ import contextlib
 import pytest
 import torch
 
-from hpmesh.accelerator.capabilities import has
-from hpmesh.config import (
+from llmtuner.accelerator.capabilities import has
+from llmtuner.config import (
     CompileConfig,
-    HybridMeshConfig,
+    LLMTunerConfig,
     ParallelConfig,
     TrainingConfig,
 )
@@ -42,10 +42,10 @@ from hpmesh.config import (
 try:
     from torch._dynamo import OptimizedModule
 
-    from hpmesh.models.hf_factory import build_model_config
-    from hpmesh.models.hf_wrapper import HFTransformerModel
-    from hpmesh.parallel import compile as compile_mod
-    from hpmesh.parallel.compile import apply_compile, maybe_regional_inductor
+    from llmtuner.models.hf_factory import build_model_config
+    from llmtuner.models.hf_wrapper import HFTransformerModel
+    from llmtuner.parallel import compile as compile_mod
+    from llmtuner.parallel.compile import apply_compile, maybe_regional_inductor
 
     _IMPORT_ERROR = None
 except Exception as e:  # noqa: BLE001 - env gate, see module docstring
@@ -117,7 +117,7 @@ def test_compile_config_rejects_empty_backend() -> None:
 @requires_parallel_config
 def test_async_tp_requires_compile() -> None:
     with pytest.raises(ValueError, match="requires training.compile=True"):
-        HybridMeshConfig(
+        LLMTunerConfig(
             parallel=ParallelConfig(tensor_parallel_size=2),
             training=TrainingConfig(
                 compile=False,
@@ -129,7 +129,7 @@ def test_async_tp_requires_compile() -> None:
 @requires_parallel_config
 def test_async_tp_requires_tp() -> None:
     with pytest.raises(ValueError, match="tensor_parallel_size > 1"):
-        HybridMeshConfig(
+        LLMTunerConfig(
             parallel=ParallelConfig(tensor_parallel_size=1),
             training=TrainingConfig(
                 compile=True,
@@ -140,7 +140,7 @@ def test_async_tp_requires_tp() -> None:
 
 @requires_parallel_config
 def test_async_tp_valid_combination_passes() -> None:
-    HybridMeshConfig(
+    LLMTunerConfig(
         parallel=ParallelConfig(tensor_parallel_size=2),
         training=TrainingConfig(
             compile=True,

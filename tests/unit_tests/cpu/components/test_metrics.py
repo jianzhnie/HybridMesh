@@ -17,9 +17,9 @@ import logging
 
 import pytest
 
-from hpmesh.accelerator.monitoring import Color, NoColor, colors_enabled, get_peak_flops
-from hpmesh.components import metrics as metrics_module
-from hpmesh.components.metrics import (
+from llmtuner.accelerator.monitoring import Color, NoColor, colors_enabled, get_peak_flops
+from llmtuner.components import metrics as metrics_module
+from llmtuner.components.metrics import (
     BaseLogger,
     DeviceMemoryMonitor,
     LoggerContainer,
@@ -29,15 +29,15 @@ from hpmesh.components.metrics import (
     ensure_pp_loss_visible,
     get_metrics_rank,
 )
-from hpmesh.config import (
-    HybridMeshConfig,
+from llmtuner.config import (
+    LLMTunerConfig,
     ModelConfig,
     TrainingConfig,
 )
-from hpmesh.config import (
+from llmtuner.config import (
     MetricsConfig as Config,
 )
-from hpmesh.models.hf_factory import num_flops_per_token
+from llmtuner.models.hf_factory import num_flops_per_token
 
 
 class _RecordingLogger(BaseLogger):
@@ -752,8 +752,8 @@ def test_a_tpu_name_must_start_with_tpu() -> None:
 # -- num_flops_per_token ------------------------------------------------------
 
 
-def _cfg(**model_kwargs) -> HybridMeshConfig:
-    return HybridMeshConfig(model=ModelConfig(**model_kwargs))
+def _cfg(**model_kwargs) -> LLMTunerConfig:
+    return LLMTunerConfig(model=ModelConfig(**model_kwargs))
 
 
 def test_num_flops_per_token_is_positive_and_grows_with_the_model() -> None:
@@ -777,7 +777,7 @@ def test_num_flops_per_token_is_affine_in_the_layer_count() -> None:
 
 def test_num_flops_per_token_matches_the_formula_exactly() -> None:
     """A fully specified model, so every term is checked rather than bounded."""
-    cfg = HybridMeshConfig(
+    cfg = LLMTunerConfig(
         model=ModelConfig(
             vocab_size=32,
             hidden_size=8,
@@ -810,11 +810,11 @@ def test_num_flops_per_token_matches_the_formula_exactly() -> None:
 def test_the_attention_term_grows_with_sequence_length() -> None:
     """The parameter term does not depend on the sequence length, so this
     isolates the attention term."""
-    short = HybridMeshConfig(
+    short = LLMTunerConfig(
         model=ModelConfig(hidden_size=8),
         training=TrainingConfig(max_seq_len=8),
     )
-    long = HybridMeshConfig(
+    long = LLMTunerConfig(
         model=ModelConfig(hidden_size=8),
         training=TrainingConfig(max_seq_len=32),
     )
@@ -827,14 +827,14 @@ def test_num_flops_per_token_is_zero_when_the_config_is_incomplete(
 ) -> None:
     """A missing size suppresses MFU and tflops rather than producing a number
     derived from guessed geometry."""
-    from hpmesh.models import hf_wrapper
+    from llmtuner.models import hf_wrapper
 
     class _Bare:
         seq_len = 4
 
     monkeypatch.setattr(hf_wrapper, "build_model_config_for", lambda cfg: _Bare())
 
-    assert hf_wrapper.num_flops_per_token(HybridMeshConfig()) == 0
+    assert hf_wrapper.num_flops_per_token(LLMTunerConfig()) == 0
 
 
 def test_num_flops_per_token_defaults_kv_heads_to_the_head_count(
@@ -842,7 +842,7 @@ def test_num_flops_per_token_defaults_kv_heads_to_the_head_count(
 ) -> None:
     """Missing GQA metadata must fall back to full multi-head, not crash. The
     failure mode is a silently wrong magnitude, so it is pinned here."""
-    from hpmesh.models import hf_wrapper
+    from llmtuner.models import hf_wrapper
 
     def _config(num_key_value_heads):
         class _Arch:
@@ -856,7 +856,7 @@ def test_num_flops_per_token_defaults_kv_heads_to_the_head_count(
         _Arch.num_key_value_heads = num_key_value_heads
         return _Arch()
 
-    cfg = HybridMeshConfig(
+    cfg = LLMTunerConfig(
         model=ModelConfig(hidden_size=8),
         training=TrainingConfig(max_seq_len=4),
     )

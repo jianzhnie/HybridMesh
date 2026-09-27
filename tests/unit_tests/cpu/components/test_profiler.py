@@ -16,9 +16,9 @@ import pickle
 import pytest
 import torch
 
-from hpmesh.accelerator.monitoring import record_memory_history
-from hpmesh.components import profiler as profiler_module
-from hpmesh.components.profiler import (
+from llmtuner.accelerator.monitoring import record_memory_history
+from llmtuner.components import profiler as profiler_module
+from llmtuner.components.profiler import (
     MEMORY_EXIT_DIR,
     MEMORY_STEP_DIR,
     PROFILE_ITER_DIR,
@@ -26,7 +26,7 @@ from hpmesh.components.profiler import (
     Profiler,
     caused_by_oom,
 )
-from hpmesh.config import ProfilerConfig as Config
+from llmtuner.config import ProfilerConfig as Config
 
 # -- config -------------------------------------------------------------------
 

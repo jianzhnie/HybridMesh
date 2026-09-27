@@ -3,7 +3,7 @@ requires = ["setuptools>=68"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "hpmesh"
+name = "llmtuner"
 version = "0.1.0"
 description = "Hybrid Parallel training over a Torch DeviceMesh -- a minimal, learning-oriented distributed-training framework (FSDP / TP / PP / CP / EP)."
 readme = "README.md"
@@ -68,13 +68,13 @@ dev = [
 ]
 
 [project.scripts]
-hpmesh-train = "hpmesh.trainer.train:main"
+llmtuner-train = "llmtuner.trainer.train:main"
 
 [project.urls]
-Homepage = "https://github.com/jianzhnie/HybridMesh"
+Homepage = "https://github.com/jianzhnie/TorchLLMTuner"
 
 [tool.setuptools.packages.find]
-include = ["hpmesh*"]
+include = ["llmtuner*"]
 
 # Directory layout mirrors torchtitan's: ``unit_tests/cpu`` is the pytest suite
 # (every module in it imports ``tests.data_fixtures``, so the repo root has to

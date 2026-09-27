@@ -36,21 +36,21 @@ import torch
 import torch.distributed as dist
 from torch.distributed.tensor import DTensor
 
-from hpmesh.accelerator.collectives import clip_grad_norm_
-from hpmesh.components.loss import IGNORE_INDEX, cross_entropy_loss
-from hpmesh.config import MetricsConfig
-from hpmesh.datasets.random_data import RandomTokenSource, batch_iterator
-from hpmesh.datasets.types import Batch
-from hpmesh.models.hf_factory import build_model_config_for
-from hpmesh.models.hf_wrapper import HFTransformerModel
-from hpmesh.trainer import (
-    HybridMeshConfig,
+from llmtuner.accelerator.collectives import clip_grad_norm_
+from llmtuner.components.loss import IGNORE_INDEX, cross_entropy_loss
+from llmtuner.config import MetricsConfig
+from llmtuner.datasets.random_data import RandomTokenSource, batch_iterator
+from llmtuner.datasets.types import Batch
+from llmtuner.models.hf_factory import build_model_config_for
+from llmtuner.models.hf_wrapper import HFTransformerModel
+from llmtuner.trainer import (
+    LLMTunerConfig,
     ModelConfig,
     OptimizerConfig,
     ParallelConfig,
     TrainingConfig,
 )
-from hpmesh.trainer.trainer import Trainer
+from llmtuner.trainer.trainer import Trainer
 
 STEPS = 4
 GLOBAL_BATCH = 8
@@ -68,8 +68,8 @@ LOSS_TOL = 1e-4
 PARAM_TOL = 1e-4
 
 
-def _cfg() -> HybridMeshConfig:
-    return HybridMeshConfig(
+def _cfg() -> LLMTunerConfig:
+    return LLMTunerConfig(
         model=ModelConfig(
             model_name_or_path="llama",
             vocab_size=VOCAB,
@@ -96,7 +96,7 @@ def _cfg() -> HybridMeshConfig:
     )
 
 
-def _reference_trajectory(cfg: HybridMeshConfig) -> tuple[list[float], dict]:
+def _reference_trajectory(cfg: LLMTunerConfig) -> tuple[list[float], dict]:
     """The same training, un-chunked and unparallelized: one process, full batch.
 
     Mirrors the trainer's non-PP step arithmetic exactly. As in

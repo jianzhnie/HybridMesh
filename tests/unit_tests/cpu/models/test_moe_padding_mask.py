@@ -23,16 +23,16 @@ import pytest
 import torch
 import torch.nn.functional as F
 
-from hpmesh.models.common.aux_loss import AuxLoss
-from hpmesh.models.common.grouped_experts import GroupedExperts
-from hpmesh.models.common.moe import (
+from llmtuner.models.common.aux_loss import AuxLoss
+from llmtuner.models.common.grouped_experts import GroupedExperts
+from llmtuner.models.common.moe import (
     MicrobatchWiseLoadBalanceLoss,
     MoE,
     QuantileBalancedTopKRouter,
     RoutedExperts,
     TokenChoiceTopKRouter,
 )
-from hpmesh.models.common.token_dispatcher import LocalTokenDispatcher
+from llmtuner.models.common.token_dispatcher import LocalTokenDispatcher
 
 _NUM_EXPERTS = 4
 _DIM = 8

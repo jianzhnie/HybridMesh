@@ -24,14 +24,14 @@ import logging
 import pytest
 import torch
 
-from hpmesh.models.common.activation import SwiGLU
-from hpmesh.models.common.async_linear import (
+from llmtuner.models.common.activation import SwiGLU
+from llmtuner.models.common.async_linear import (
     AllGatherFusedQKVLinear,
     DistGEMMFeedForward,
     RowParallelLinear,
     validate_dist_gemm_preconditions,
 )
-from hpmesh.models.common.qkv import QKVLinear
+from llmtuner.models.common.qkv import QKVLinear
 
 DIM = 16
 HIDDEN = 32
@@ -143,7 +143,7 @@ def test_feed_forward_uses_the_given_activation() -> None:
 
 def test_feed_forward_warns_when_tp_is_off(caplog) -> None:
     """Silently running unfused is the failure mode the warning exists for."""
-    import hpmesh.models.common.async_linear as dg
+    import llmtuner.models.common.async_linear as dg
 
     dg._WARNED_NO_TP = False
     ffn = _ffn()
@@ -156,7 +156,7 @@ def test_feed_forward_warns_when_tp_is_off(caplog) -> None:
 
 def test_feed_forward_warns_only_once(caplog) -> None:
     """A per-step warning would flood the log; one per process is enough."""
-    import hpmesh.models.common.async_linear as dg
+    import llmtuner.models.common.async_linear as dg
 
     dg._WARNED_NO_TP = False
     ffn = _ffn()
@@ -283,6 +283,6 @@ def test_fused_qkv_exposes_the_same_checkpoint_keys() -> None:
 
 def test_tp_group_is_none_without_a_mesh_context() -> None:
     """No registered SPMD mesh means no TP axis, so the fallback path is taken."""
-    from hpmesh.accelerator.spmd_context import spmd_mesh_group
+    from llmtuner.accelerator.spmd_context import spmd_mesh_group
 
     assert spmd_mesh_group("tp") is None

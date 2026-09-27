@@ -32,13 +32,13 @@ import torch.nn.functional as F
 from torch.distributed.tensor import DTensor
 from transformers import AutoConfig
 
-from hpmesh.accelerator.dist import all_reduce
-from hpmesh.accelerator.spmd_context import spmd_context
-from hpmesh.models.common.moe import MoE
-from hpmesh.models.hf_wrapper import HFTransformerModel
-from hpmesh.parallel.parallel_dims import ParallelDims
-from hpmesh.parallel.parallelize import parallelize_hf_transformers
-from hpmesh.trainer import ParallelConfig
+from llmtuner.accelerator.dist import all_reduce
+from llmtuner.accelerator.spmd_context import spmd_context
+from llmtuner.models.common.moe import MoE
+from llmtuner.models.hf_wrapper import HFTransformerModel
+from llmtuner.parallel.parallel_dims import ParallelDims
+from llmtuner.parallel.parallelize import parallelize_hf_transformers
+from llmtuner.trainer import ParallelConfig
 
 NUM_EXPERTS = 8
 TOP_K = 2

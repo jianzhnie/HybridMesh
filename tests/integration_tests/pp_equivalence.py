@@ -41,21 +41,21 @@ import torch
 import torch.distributed as dist
 import torch.nn as nn
 
-from hpmesh.accelerator.collectives import clip_grad_norm_
-from hpmesh.components.loss import IGNORE_INDEX, cross_entropy_loss
-from hpmesh.components.metrics import get_metrics_rank
-from hpmesh.config import MetricsConfig
-from hpmesh.datasets.random_data import RandomTokenSource, batch_iterator
-from hpmesh.models.hf_factory import build_model_config_for
-from hpmesh.models.hf_wrapper import HFTransformerModel
-from hpmesh.trainer import (
-    HybridMeshConfig,
+from llmtuner.accelerator.collectives import clip_grad_norm_
+from llmtuner.components.loss import IGNORE_INDEX, cross_entropy_loss
+from llmtuner.components.metrics import get_metrics_rank
+from llmtuner.config import MetricsConfig
+from llmtuner.datasets.random_data import RandomTokenSource, batch_iterator
+from llmtuner.models.hf_factory import build_model_config_for
+from llmtuner.models.hf_wrapper import HFTransformerModel
+from llmtuner.trainer import (
+    LLMTunerConfig,
     ModelConfig,
     OptimizerConfig,
     ParallelConfig,
     TrainingConfig,
 )
-from hpmesh.trainer.trainer import Trainer
+from llmtuner.trainer.trainer import Trainer
 
 STEPS = 4
 MICROBATCHES = 4
@@ -87,9 +87,9 @@ SCENARIOS = {
 V_SCHEDULES = {"ZBVZeroBubble"}
 
 
-def _cfg(schedule: str) -> HybridMeshConfig:
+def _cfg(schedule: str) -> LLMTunerConfig:
     num_layers, _ = SCENARIOS[schedule]
-    return HybridMeshConfig(
+    return LLMTunerConfig(
         model=ModelConfig(
             model_name_or_path="qwen3",  # offline: AutoConfig.for_model("qwen3", ...)
             vocab_size=VOCAB,
@@ -119,7 +119,7 @@ def _cfg(schedule: str) -> HybridMeshConfig:
     )
 
 
-def _reference_trajectory(cfg: HybridMeshConfig) -> list[float]:
+def _reference_trajectory(cfg: LLMTunerConfig) -> list[float]:
     """The same training step with no pipeline: same chunks, one process.
 
     Mirrors the trainer's step arithmetic exactly -- the same per-row target

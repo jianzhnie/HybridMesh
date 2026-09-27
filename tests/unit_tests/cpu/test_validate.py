@@ -17,8 +17,8 @@ from typing import Any
 import pytest
 import torch
 
-from hpmesh.components.loss import IGNORE_INDEX
-from hpmesh.config import HybridMeshConfig, TrainingConfig, ValidationConfig
+from llmtuner.components.loss import IGNORE_INDEX
+from llmtuner.config import LLMTunerConfig, TrainingConfig, ValidationConfig
 
 
 def _trainer_cls():
@@ -27,7 +27,7 @@ def _trainer_cls():
     collection, and the tests that need it skip rather than error. The config
     and gating tests above do not need it and always run."""
     return pytest.importorskip(
-        "hpmesh.trainer.trainer",
+        "llmtuner.trainer.trainer",
         reason="trainer import needs a newer torch than this host has",
     ).Trainer
 
@@ -90,7 +90,7 @@ def _make_trainer(
 ):
     Trainer = _trainer_cls()
     trainer = Trainer.__new__(Trainer)
-    cfg = HybridMeshConfig()
+    cfg = LLMTunerConfig()
     cfg.training.validation_config = validation
     trainer.cfg = cfg
     trainer.parallel_dims = None
@@ -104,7 +104,7 @@ def _make_trainer(
         log_validation=lambda loss, step: logged.update(loss=loss, step=step),
     )
     monkeypatch.setattr(
-        "hpmesh.trainer.validate.build_dataloader", lambda *a, **k: loader
+        "llmtuner.trainer.validate.build_dataloader", lambda *a, **k: loader
     )
     return trainer, logged
 
@@ -135,7 +135,7 @@ def test_validation_steps_must_be_positive_or_neg1() -> None:
 
 
 def test_validation_defaults_to_off() -> None:
-    # TrainingConfig alone: HybridMeshConfig() also builds ParallelConfig,
+    # TrainingConfig alone: LLMTunerConfig() also builds ParallelConfig,
     # whose schedule check imports torch.distributed.pipelining (absent on
     # older torch), which is not what this assertion is about.
     assert TrainingConfig().validation is None
@@ -197,7 +197,7 @@ def test_should_validate() -> None:
 
     def gating_trainer(validation: ValidationConfig | None):
         trainer = Trainer.__new__(Trainer)
-        cfg = HybridMeshConfig()
+        cfg = LLMTunerConfig()
         cfg.training.validation_config = validation
         trainer.cfg = cfg
         return trainer

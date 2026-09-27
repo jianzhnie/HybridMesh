@@ -22,7 +22,7 @@ require_env('spmd_types')
 
 import pytest
 
-from hpmesh.parallel.context_parallel.cp_kernel import (
+from llmtuner.parallel.context_parallel.cp_kernel import (
     reject_unrepresentable_attention_kwargs,
 )
 

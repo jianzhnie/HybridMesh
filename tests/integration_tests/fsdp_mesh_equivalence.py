@@ -50,10 +50,10 @@ import torch.nn.functional as F
 from torch.distributed._composable.fsdp import FSDPModule
 from torch.distributed.tensor import DTensor
 
-from hpmesh.accelerator.dist import all_reduce
-from hpmesh.parallel.fully_shard.apply import apply_fsdp
-from hpmesh.parallel.parallel_dims import ParallelDims
-from hpmesh.trainer import ParallelConfig
+from llmtuner.accelerator.dist import all_reduce
+from llmtuner.parallel.fully_shard.apply import apply_fsdp
+from llmtuner.parallel.parallel_dims import ParallelDims
+from llmtuner.trainer import ParallelConfig
 
 VOCAB = 32
 HIDDEN = 16

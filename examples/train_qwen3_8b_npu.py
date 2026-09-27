@@ -18,11 +18,11 @@ import os
 
 import torch
 
-from hpmesh import Trainer
-from hpmesh.config import (
+from llmtuner import Trainer
+from llmtuner.config import (
     CheckpointConfig,
     DataloaderConfig,
-    HybridMeshConfig,
+    LLMTunerConfig,
     MetricsConfig,
     ModelConfig,
     OptimizerConfig,
@@ -37,16 +37,16 @@ DATASET_PATH = (
 )
 
 
-def qwen3_8b_npu_config() -> HybridMeshConfig:
-    model_path = os.environ.get("HPMESH_QWEN3_8B_PATH", MODEL_PATH)
-    dataset_path = os.environ.get("HPMESH_DATASET_PATH", DATASET_PATH)
-    save_checkpoint = os.environ.get("HPMESH_SAVE_CHECKPOINT", "1") == "1"
+def qwen3_8b_npu_config() -> LLMTunerConfig:
+    model_path = os.environ.get("LLMTUNER_QWEN3_8B_PATH", MODEL_PATH)
+    dataset_path = os.environ.get("LLMTUNER_DATASET_PATH", DATASET_PATH)
+    save_checkpoint = os.environ.get("LLMTUNER_SAVE_CHECKPOINT", "1") == "1"
     if not os.path.isfile(os.path.join(model_path, "config.json")):
         raise FileNotFoundError(f"Qwen3-8B config.json not found under {model_path}")
     if not os.path.isfile(dataset_path):
         raise FileNotFoundError(f"training dataset not found: {dataset_path}")
 
-    return HybridMeshConfig(
+    return LLMTunerConfig(
         model=ModelConfig(model_name_or_path=model_path),
         parallel=ParallelConfig(
             data_parallel_shard_size=-1,
@@ -56,9 +56,9 @@ def qwen3_8b_npu_config() -> HybridMeshConfig:
             weight_decay=0.1,
         ),
         training=TrainingConfig(
-            global_batch_size=int(os.environ.get("HPMESH_GLOBAL_BATCH_SIZE", "8")),
-            max_seq_len=int(os.environ.get("HPMESH_MAX_SEQ_LEN", "4096")),
-            steps=int(os.environ.get("HPMESH_STEPS", "100")),
+            global_batch_size=int(os.environ.get("LLMTUNER_GLOBAL_BATCH_SIZE", "8")),
+            max_seq_len=int(os.environ.get("LLMTUNER_MAX_SEQ_LEN", "4096")),
+            steps=int(os.environ.get("LLMTUNER_STEPS", "100")),
             seed=42,
             deterministic=False,
             activation_checkpoint_mode="full",
@@ -84,8 +84,8 @@ def qwen3_8b_npu_config() -> HybridMeshConfig:
             ),
             metrics_config=MetricsConfig(log_freq=1),
             dump_folder=os.environ.get(
-                "HPMESH_DUMP_FOLDER",
-                "/home/jianzhnie/llmtuner/llm/HybridMesh/outputs/qwen3-8b-npu",
+                "LLMTUNER_DUMP_FOLDER",
+                "/home/jianzhnie/llmtuner/llm/TorchLLMTuner/outputs/qwen3-8b-npu",
             ),
         ),
     )

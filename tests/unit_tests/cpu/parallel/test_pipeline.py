@@ -20,19 +20,19 @@ import torch.distributed as dist
 import torch.nn as nn
 from torch.distributed.device_mesh import init_device_mesh
 
-from hpmesh.models.hf_factory import build_model_config
-from hpmesh.models.hf_wrapper import HFTransformerModel
-from hpmesh.parallel.parallel_dims import ParallelDims
-from hpmesh.parallel.pipeline_parallel.apply import (
+from llmtuner.models.hf_factory import build_model_config
+from llmtuner.models.hf_wrapper import HFTransformerModel
+from llmtuner.parallel.parallel_dims import ParallelDims
+from llmtuner.parallel.pipeline_parallel.apply import (
     apply_pp,
     prepend_first_stage_modules,
     validate_microbatches,
 )
-from hpmesh.parallel.pipeline_parallel.pipeline import (
+from llmtuner.parallel.pipeline_parallel.pipeline import (
     generate_llm_fqn_per_model_part,
     split_model_into_stages,
 )
-from hpmesh.trainer import ParallelConfig
+from llmtuner.trainer import ParallelConfig
 
 
 def test_single_stage_owns_everything() -> None:
@@ -267,7 +267,7 @@ def _dims(*, pp: int = 2, ep: int = 1, world_size: int = 2) -> ParallelDims:
 def test_zero_or_negative_microbatches_is_rejected() -> None:
     """A 0 would otherwise surface as a ZeroDivisionError on the divisibility
     check -- torchtitan raises this in its config's ``__post_init__``, which
-    hpmesh's config does not do, so ``validate_microbatches`` owns it."""
+    llmtuner's config does not do, so ``validate_microbatches`` owns it."""
     for n in (0, -2):
         with pytest.raises(ValueError, match="num_pp_microbatches"):
             validate_microbatches(

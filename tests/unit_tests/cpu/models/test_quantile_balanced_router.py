@@ -32,8 +32,8 @@ import pytest
 import torch
 import torch.distributed as dist
 
-from hpmesh.models.common.grouped_experts import GroupedExperts
-from hpmesh.models.common.moe import (
+from llmtuner.models.common.grouped_experts import GroupedExperts
+from llmtuner.models.common.moe import (
     MoE,
     QuantileBalancedTopKRouter,
     RoutedExperts,
@@ -41,7 +41,7 @@ from hpmesh.models.common.moe import (
     register_moe_quantile_balancing_hook,
     update_quantile_expert_bias,
 )
-from hpmesh.models.common.token_dispatcher import LocalTokenDispatcher
+from llmtuner.models.common.token_dispatcher import LocalTokenDispatcher
 
 _NUM_EXPERTS = 4
 _DIM = 8

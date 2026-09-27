@@ -4,7 +4,7 @@ The redistributions themselves need two ranks and live in
 ``tests/cp_equivalence.py`` and ``cp_wiring_equivalence.py``. What can be checked
 without a mesh is where the module is *explicit*: the strategy dispatch, the
 refusals that carry the whole safety argument, and the ulysses head-divisibility
-check. The refusal matters more here than anywhere else in hpmesh -- every other
+check. The refusal matters more here than anywhere else in llmtuner -- every other
 component degrades gracefully when a parallelism axis is off, but a CP
 redistribution cannot, because skipping it does not skip work, it changes the
 answer.
@@ -27,11 +27,11 @@ import inspect
 import pytest
 import torch
 
-from hpmesh.parallel.context_parallel import (
+from llmtuner.parallel.context_parallel import (
     CPFlexKernel,
     apply_cp,
 )
-from hpmesh.trainer import ParallelConfig
+from llmtuner.trainer import ParallelConfig
 
 
 def test_apply_cp_is_a_no_op_when_cp_is_off() -> None:
@@ -216,8 +216,8 @@ def test_full_length_mask_tracks_batch_invariant_mode(monkeypatch) -> None:
     from torch.distributed.device_mesh import init_device_mesh
     from torch.testing._internal.distributed.fake_pg import FakeStore
 
-    from hpmesh.parallel.context_parallel.cp_kernel import CPFlexKernel
-    from hpmesh.utils.batch_invariant import set_batch_invariant_mode
+    from llmtuner.parallel.context_parallel.cp_kernel import CPFlexKernel
+    from llmtuner.utils.batch_invariant import set_batch_invariant_mode
 
     store = FakeStore()
     dist.init_process_group("fake", store=store, rank=0, world_size=1)

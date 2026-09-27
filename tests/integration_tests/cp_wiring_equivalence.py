@@ -48,16 +48,16 @@ import torch.distributed as dist
 import torch.nn.functional as F
 from torch.distributed.device_mesh import init_device_mesh
 
-from hpmesh.models.hf_factory import build_model_config_for
-from hpmesh.models.hf_wrapper import HFTransformerModel
-from hpmesh.parallel.context_parallel import (
+from llmtuner.models.hf_factory import build_model_config_for
+from llmtuner.models.hf_wrapper import HFTransformerModel
+from llmtuner.parallel.context_parallel import (
     apply_cp,
     shard_attention_mask_for_cp,
     shard_batch_for_cp,
 )
-from hpmesh.parallel.context_parallel.cp_kernel import CPFlexKernel
-from hpmesh.trainer import (
-    HybridMeshConfig,
+from llmtuner.parallel.context_parallel.cp_kernel import CPFlexKernel
+from llmtuner.trainer import (
+    LLMTunerConfig,
     ModelConfig,
     ParallelConfig,
     TrainingConfig,
@@ -71,8 +71,8 @@ DOC_LENS = (100, 96, 60)  # the packed scenario; sums to SEQ
 TOL = 1e-9
 
 
-def _cfg(load_balancer: str | None) -> HybridMeshConfig:
-    return HybridMeshConfig(
+def _cfg(load_balancer: str | None) -> LLMTunerConfig:
+    return LLMTunerConfig(
         model=ModelConfig(
             model_name_or_path="qwen3",
             vocab_size=VOCAB,
@@ -90,7 +90,7 @@ def _cfg(load_balancer: str | None) -> HybridMeshConfig:
     )
 
 
-def _build_model(cfg: HybridMeshConfig, *, flex: bool, seed: int = 0):
+def _build_model(cfg: LLMTunerConfig, *, flex: bool, seed: int = 0):
     """Deterministically initialized tiny qwen3; identical on every rank."""
     torch.manual_seed(seed)
     model = HFTransformerModel(build_model_config_for(cfg)).to(torch.float64)
@@ -255,14 +255,14 @@ def _check_gather_backward(cp_mesh, failures: list[str]) -> float:
 def _masks_for(positions: torch.Tensor, mesh, load_balancer: str | None):
     """The packed CP mask, built with the wrapper's mods in the TEST's frame.
 
-    Uncompiled on purpose: hpmesh's compiler wrapper owns a module-level
+    Uncompiled on purpose: llmtuner's compiler wrapper owns a module-level
     ``torch.compile(create_block_mask)``, and this CPU-only run reaches it with
     a graph whose document-id gather trips an inductor vectorizer bug
     (``VecMask<int>`` vs ``VecMask<float>``). CUDA runs are unaffected.
     """
     from torch.nn.attention.flex_attention import and_masks, create_block_mask
 
-    from hpmesh.models.common.masks import get_causal_mask_mod, get_document_mask_mod
+    from llmtuner.models.common.masks import get_causal_mask_mod, get_document_mask_mod
 
     full = create_block_mask(
         and_masks(get_causal_mask_mod(), get_document_mask_mod(positions)),
@@ -336,7 +336,7 @@ def _check_preprocess_inputs_matches(mesh, failures: list[str]) -> float:
             return mesh["cp"] if name == "cp" else None
 
     with mock.patch(
-        "hpmesh.models.hf_wrapper.create_attention_mask",
+        "llmtuner.models.hf_wrapper.create_attention_mask",
         _uncompiled_create_attention_mask,
     ):
         inputs, out_labels, extra = model.preprocess_inputs(

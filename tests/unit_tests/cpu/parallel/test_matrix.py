@@ -8,7 +8,7 @@ config-vs-matrix agreement to test anymore because there is only one copy.
 
 import pytest
 
-from hpmesh.parallel import matrix
+from llmtuner.parallel import matrix
 
 
 def test_every_row_has_a_verdict_reason_and_guard() -> None:
@@ -44,7 +44,7 @@ def test_config_phase_is_out_of_scope() -> None:
 def test_guards_point_at_real_files() -> None:
     from pathlib import Path
 
-    root = Path(__file__).parents[4] / "hpmesh"
+    root = Path(__file__).parents[4] / "llmtuner"
     for row in matrix.ENTRIES:
         path = row.guard.split("::")[0]
         assert (root / path).is_file(), row.guard
@@ -88,7 +88,7 @@ def test_rows_reject_with_their_entry_type() -> None:
 
 
 def test_validation_once_rows_are_config_errors() -> None:
-    from hpmesh.errors import ConfigError
+    from llmtuner.errors import ConfigError
 
     with pytest.raises(ConfigError):
         matrix.validation_once_requires_dp1(2)

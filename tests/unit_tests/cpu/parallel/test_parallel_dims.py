@@ -25,12 +25,12 @@ import torch
 import torch.distributed as dist
 from torch.distributed.device_mesh import init_device_mesh
 
-from hpmesh.parallel.parallel_dims import ParallelDims, build_parallel_dims
-from hpmesh.trainer import HybridMeshConfig, ParallelConfig
+from llmtuner.parallel.parallel_dims import ParallelDims, build_parallel_dims
+from llmtuner.trainer import LLMTunerConfig, ParallelConfig
 
 
-def _config(**parallel_kw) -> HybridMeshConfig:
-    return HybridMeshConfig(parallel=ParallelConfig(**parallel_kw))
+def _config(**parallel_kw) -> LLMTunerConfig:
+    return LLMTunerConfig(parallel=ParallelConfig(**parallel_kw))
 
 
 @pytest.fixture(scope="module")
@@ -221,7 +221,7 @@ def test_build_parallel_dims_resolves_against_world_size() -> None:
     ``None`` is the sentinel every downstream ``parallel_dims is None`` guard
     keys on, so returning a degenerate object here would make them all dead.
     """
-    assert build_parallel_dims(HybridMeshConfig(), world_size=1) is None
+    assert build_parallel_dims(LLMTunerConfig(), world_size=1) is None
 
     cfg = _config(data_parallel_shard_size=-1, tensor_parallel_size=2)
     pd = build_parallel_dims(cfg, world_size=8)
@@ -276,7 +276,7 @@ def test_cp_only_still_needs_a_loss_reduction() -> None:
 
 def test_sharding_a_weight_that_does_not_divide_is_rejected() -> None:
     """A ragged split would silently give ranks different-size shards."""
-    from hpmesh.parallel.tensor_parallel.tp import shard_weight
+    from llmtuner.parallel.tensor_parallel.tp import shard_weight
 
     with pytest.raises(ValueError, match="not divisible by"):
         shard_weight(torch.zeros(5, 4), 0, tp_size=2, tp_rank=0)
@@ -284,7 +284,7 @@ def test_sharding_a_weight_that_does_not_divide_is_rejected() -> None:
 
 def test_sharding_a_weight_keeps_only_this_ranks_slice() -> None:
     """The non-vacuity check: rank 1 of 2 gets the second half along dim 0."""
-    from hpmesh.parallel.tensor_parallel.tp import shard_weight
+    from llmtuner.parallel.tensor_parallel.tp import shard_weight
 
     weight = torch.arange(8).reshape(4, 2)
     assert shard_weight(weight, 0, tp_size=2, tp_rank=1).tolist() == [[4, 5], [6, 7]]
@@ -294,7 +294,7 @@ def test_an_unknown_shard_kind_is_rejected() -> None:
     """``kind`` selects the collective the wrapper installs; a typo is fatal."""
     import torch.nn as nn
 
-    from hpmesh.parallel.tensor_parallel.tp import ShardingConfig
+    from llmtuner.parallel.tensor_parallel.tp import ShardingConfig
 
     with pytest.raises(ValueError, match="Unknown shard kind"):
         ShardingConfig(kind="diagonal", implementation=nn.Linear)
