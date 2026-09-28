@@ -1,8 +1,8 @@
 """Multimodal dataset recipes and their media helpers.
 
 Deliberately empty of imports. Importing a module *from* here pulls in
-torchvision (and, for ``mm_video``, a video backend), so a re-export would make
-``import llmtuner.datasets.multimodal.mm_datasets`` -- or anything that walks this
+torchvision (and, for ``video``, a video backend), so a re-export would make
+``import llmtuner.datasets.multimodal.datasets`` -- or anything that walks this
 package -- drag the whole media stack along. ``build_dataloader`` imports the
 two modules it needs inside the branch that has already decided the recipe name
 is multimodal, so a missing torchvision surfaces there, where it can be turned

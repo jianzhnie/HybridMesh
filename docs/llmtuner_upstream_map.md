@@ -25,7 +25,7 @@ C 类上会把项目**故意删掉**的抽象又拽回来。
 | `components/metrics.py` | `observability/metrics.py` |
 | `models/common/scatter_add.py` | `ops/scatter_add.py` |
 | `parallel/pipeline_parallel/pipeline.py` | `experiments/transformers_modeling_backend/pipeline.py` |
-| `datasets/text/text.py` | `hf_datasets/text_datasets.py` |
+| `datasets/text/processors.py` | `hf_datasets/text_datasets.py` |
 | `components/checkpointer/filesystem.py` | `tools/filesystem.py` |
 
 ## 图例
@@ -57,9 +57,9 @@ C 类上会把项目**故意删掉**的抽象又拽回来。
 | `components/checkpointer/utils.py` | `components/checkpointer/utils.py` | 1.000 |
 | `components/checkpointer/filesystem.py` | `tools/filesystem.py` | 1.000 |
 | `components/optimizer/utils.py` | `components/optimizer/utils.py` | 0.996 |
-| `datasets/multimodal/mm_image.py` | `hf_datasets/multimodal/utils/image.py` | 0.977 |
-| `datasets/multimodal/mm_text_utils.py` | `hf_datasets/multimodal/utils/text.py` | 0.971 |
-| `datasets/multimodal/mm_video.py` | `hf_datasets/multimodal/utils/video.py` | 0.967 |
+| `datasets/multimodal/image.py` | `hf_datasets/multimodal/utils/image.py` | 0.977 |
+| `datasets/multimodal/text_utils.py` | `hf_datasets/multimodal/utils/text.py` | 0.971 |
+| `datasets/multimodal/video.py` | `hf_datasets/multimodal/utils/video.py` | 0.967 |
 | `components/tokenizer.py` | `components/tokenizer.py` | 0.907 |
 
 ## A2 —— 移植但已改写（比例中等，需逐处核对）
@@ -78,11 +78,11 @@ C 类上会把项目**故意删掉**的抽象又拽回来。
 | `datasets/collators.py` | `components/data/collators.py` | 0.145 | |
 | `datasets/dataset.py` | `components/data/dataset.py` | 0.267 | 去 `Configurable`；三个节点类去 `Config` 后缀，构建走自由函数 `build_dataset` |
 | `datasets/loader.py` | `components/data/loader.py` | 0.590 | 去 `Configurable`；`GrainDataLoader` 直接收参数，无 config 类 |
-| `datasets/multimodal/mm_collator.py` | `hf_datasets/multimodal/mm_collator.py` | 0.777 | 增加 MRoPE grid/run/长度校验，当前已是契约适配 |
-| `datasets/multimodal/mm_datasets.py` | `hf_datasets/multimodal/mm_datasets.py` | 0.310 | 去 `Configurable`；packing 改自由函数 `build_mm_sample_packing` |
+| `datasets/multimodal/collator.py` | `hf_datasets/multimodal/mm_collator.py` | 0.777 | 增加 MRoPE grid/run/长度校验，当前已是契约适配 |
+| `datasets/multimodal/datasets.py` | `hf_datasets/multimodal/mm_datasets.py` | 0.310 | 去 `Configurable`；packing 改自由函数 `build_mm_sample_packing` |
 | `datasets/packing.py` | `components/data/packing.py` | 0.065 | 自由函数外还增加文档容量、padding mask、长文档切分和可恢复 remainder，按语义维护 |
 | `datasets/sources.py` | `components/data/sources.py` | 0.700 | |
-| `datasets/text/text.py` | `hf_datasets/text_datasets.py` | 0.767 | 路径与 processor 构造契约已适配 |
+| `datasets/text/processors.py` | `hf_datasets/text_datasets.py` | 0.767 | 路径与 processor 构造契约已适配 |
 | `datasets/types.py` | `components/data/types.py` | 0.506 | 去 Configurable 后重塑 build context 与 iteration policy |
 | `models/common/aux_loss.py` | `models/common/aux_loss.py` | 0.682 | |
 | `models/common/async_linear.py`（2026-09-26 文件名对齐上游，原 dist_gemm.py） | `models/common/async_linear.py` | 0.527 | |
@@ -392,7 +392,7 @@ region"建立在 llmtuner 没有的 `Module.configure_remat_regions` 协议上�
 导入契约靠这一点维持。
 
 **上游路径对应关系因此不再一一成立**（`hf_datasets/multimodal/utils/image.py` 在
-llmtuner 侧是 `datasets/multimodal/mm_image.py`），本表的 llmtuner 列是唯一权威。
+llmtuner 侧是 `datasets/multimodal/image.py`），本表的 llmtuner 列是唯一权威。
 
 ## TP/SP 对齐结论（2026-09-27）
 
@@ -931,7 +931,7 @@ llmtuner 侧是 `datasets/multimodal/mm_image.py`），本表的 llmtuner 列是
   models 层反向 import 数据源，模块 docstring 已说明）。loader 的
   `dataset.batch(collator.num_rows_per_batch(), drop_remainder=repeat, batch_fn=collator)` 与
   `ThreadPrefetchIterDataset` 逐字相同，差异只是"数据集图由调用方建好再传进来"（C 类单入口设计）。
-  (e) `datasets/text/text.py` ↔ 上游 `hf_datasets/text_datasets.py`：SFT 信号的三条关键规则
+  (e) `datasets/text/processors.py` ↔ 上游 `hf_datasets/text_datasets.py`：SFT 信号的三条关键规则
   **逐字一致**——超长丢弃（`len(tokens) - 1 > max_context_length`，按 `-1` 而非全长）、prompt 段
   labels 置 `IGNORE_INDEX`（`labels[:max(prompt_len - 1, 0)]`）、renderer 路径用
   `~loss_mask[1:]` 掩码；`DATASETS` 注册表三项（c4/c4_test/c4_validation）同源。llmtuner 新增

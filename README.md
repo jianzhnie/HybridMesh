@@ -48,7 +48,7 @@ torchrun --nproc_per_node=2 -m llmtuner --data_parallel_shard_size 2
 | `llmtuner/trainer/trainer.py` | 训练循环：`train` -> `train_step` -> `forward_backward_step`，token 归一化 loss + 梯度裁剪 + 非有限值检测 | 可运行 |
 | `llmtuner/datasets/{types,random_data}.py` | `Batch` + 无限微批次迭代器（源耗尽即中止整步，不训练半个 batch） | 可运行 |
 | `llmtuner/datasets/{loader,sources,packing,text}.py` | Grain 数据层：语料 -> 打包 -> 每 DP rank 分片；`DATALOADER` 状态进 checkpoint | 可运行 |
-| `llmtuner/datasets/multimodal/mm_*.py` | 多模态语料（图/视频/文本处理器 + collator）——**已接线**：`datasets/build.py` 惰性导入，`DataloaderConfig.dataset` 点名即用（需 torchvision） | 可运行 |
+| `llmtuner/datasets/multimodal/*.py` | 多模态语料（图/视频/文本处理器 + collator）——**已接线**：`datasets/build.py` 惰性导入，`DataloaderConfig.dataset` 点名即用（需 torchvision） | 可运行 |
 | `llmtuner/components/checkpointer/{base,dcp,torch_checkpointing}.py` | 每 rank 一份检查点，`step` / `ntokens_seen` / 模型 / 优化器，可续训；`base.py` 是共用骨架，两种后端各一个 manager | 可运行 |
 | `llmtuner/components/loss.py` | 交叉熵（含 vocab-parallel 形式）+ next-token 目标构造 | 已实现 |
 | `llmtuner/components/{metrics,profiler}.py` | 训练指标 + profiler | 可运行 |

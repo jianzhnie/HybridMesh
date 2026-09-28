@@ -247,7 +247,7 @@ step 1 恢复 optimizer、scheduler、dataloader 和 train state 后完成并保
 | `MetricsProcessor` | 同名上游类 | 去 Configurable；按真实 step window 算吞吐/MFU，log frequency 构造时校验，**通过（适配）**。2026-09-28 十二次增量复核：训练/校验两条日志的 key 集合与 `tps`/`tflops`/`time_metrics`/`memory` 公式与上游一致；差异为形状——上游自由函数 `compute_training_performance_metrics` 的载荷内联进 `_derive`/`_Derived`，MFU 抑制条件由 `has_quantization` 换成 `gpu_peak_flops == 0 or num_flops_per_token == 0`（无量化路径的等价替代，见模块 docstring），`_build_metric_logger` 去掉 `ft_*` 并只吞 ImportError；`should_log` 不再有写 `step_last_log` 的副作用（移到 `log`/`log_validation`，且容忍先 log 后 should_log）。删除零调用者的 `set_num_flops_per_token`（上游无此方法）。模块全程不碰 `torch.distributed`（复核成立） |
 | `get_metrics_rank`, `ensure_pp_loss_visible` | 上游 `_get_metrics_rank` / PP warning | llmtuner 明确 PP schedule 可见性：rank 查询去私有化为 `get_metrics_rank`，`ensure_pp_loss_visible` 增加 `not pp_enabled` 提前返回（上游无该守卫，只靠唯一调用点门控，语义等价），**通过** |
 | `Profiler`, `MemoryProfiler` | `observability/profiler.py` | 去 Configurable，schedule 与 OOM 处理保留；`caused_by_oom` 与上游 773e16e75 语义等价（含防环与隐式链）。2026-09-28 十一次增量：修一处设备面缺口——上游 activity 列表是「CUDA 可用加 CUDA，否则 XPU 可用加 XPU」，llmtuner 原先只加 CUDA 且 docstring 误称设备只有 cuda/cpu，而 `accelerator/device.py` 的 `DEVICE_PRIORITY` 含 xpu（可达），XPU 运行的 trace 会退化成 CPU-only；现按 resolved device 补 `xpu` 分支（其余设备仍 CPU-only，与上游一致），用例 `test_the_trace_activity_follows_the_resolved_device` 钉住 cpu/cuda/xpu 三态。裁剪登记：`leaf_folder`（只服务上游 torchft 的 per-replica 子目录）、CUDA-graph annotations（随 D10 无图路径）、`structured_logger` span、`active()` builder；memory history 经 `accelerator/monitoring` 的 device 探针（上游非 CUDA 分支调不存在的 `torch.memory`），**通过（适配）** |
-| `BaseTokenizer`, `HuggingFaceTokenizer` | `components/tokenizer.py` | A1；encode 强制 `add_special_tokens=False` 后自行处理 BOS/EOS。2026-09-23 起 `apply_chat_template` 接受 `Sequence[Mapping]`（上游 4a0d8dab3 多轮 SFT 配套），**通过**。2026-09-24 起 `apply_chat_template` 自动注入 `bos_token`/`eos_token` kwargs 与默认 `add_generation_prompt=True`（上游 backend tokenizer 同源）；SFT 全量渲染在 `datasets/text/text.py` 显式传 `add_generation_prompt=False` |
+| `BaseTokenizer`, `HuggingFaceTokenizer` | `components/tokenizer.py` | A1；encode 强制 `add_special_tokens=False` 后自行处理 BOS/EOS。2026-09-23 起 `apply_chat_template` 接受 `Sequence[Mapping]`（上游 4a0d8dab3 多轮 SFT 配套），**通过**。2026-09-24 起 `apply_chat_template` 自动注入 `bos_token`/`eos_token` kwargs 与默认 `add_generation_prompt=True`（上游 backend tokenizer 同源）；SFT 全量渲染在 `datasets/text/processors.py` 显式传 `add_generation_prompt=False` |
 | `MultiModalTokenizer` | 同文件多模态 tokenizer | 组合 text/vision token 契约，**通过** |
 
 ## 8. Utils 与 C 类模块
@@ -402,15 +402,15 @@ helper 在前文涉及关键算法时单列。成组条目（`config/`、`traine
 | `datasets/collators.py` | `Collator`, `TextCollator` | A2，`components/data/collators.py` |
 | `datasets/dataset.py` | dataset nodes 与 build 工厂 | A2，`components/data/dataset.py` |
 | `datasets/loader.py` | `BaseDataLoader`, `GrainDataLoader` | A2，`components/data/loader.py` |
-| `datasets/multimodal/mm_collator.py` | `MultiModalCollator` | A2，`hf_datasets/multimodal/mm_collator.py` |
-| `datasets/multimodal/mm_datasets.py` | processor 与 sample packing | A2，`hf_datasets/multimodal/mm_datasets.py` |
-| `datasets/multimodal/mm_image.py` | decode/resize/patch helpers | A1，`hf_datasets/multimodal/utils/image.py` |
-| `datasets/multimodal/mm_text_utils.py` | padding 与 placeholder helpers | A1，`hf_datasets/multimodal/utils/text.py` |
-| `datasets/multimodal/mm_video.py` | video load/process | A1，`hf_datasets/multimodal/utils/video.py` |
+| `datasets/multimodal/collator.py` | `MultiModalCollator` | A2，`hf_datasets/multimodal/mm_collator.py` |
+| `datasets/multimodal/datasets.py` | processor 与 sample packing | A2，`hf_datasets/multimodal/mm_datasets.py` |
+| `datasets/multimodal/image.py` | decode/resize/patch helpers | A1，`hf_datasets/multimodal/utils/image.py` |
+| `datasets/multimodal/text_utils.py` | padding 与 placeholder helpers | A1，`hf_datasets/multimodal/utils/text.py` |
+| `datasets/multimodal/video.py` | video load/process | A1，`hf_datasets/multimodal/utils/video.py` |
 | `datasets/packing.py` | 两种 packing 与 Stateful iterator | A2，`components/data/packing.py` |
 | `datasets/random_data.py` | synthetic source/loader | C |
 | `datasets/sources.py` | JSONL/HF sources 与 cursor | A2，`components/data/sources.py` |
-| `datasets/text/text.py` | text/chat processors | A2，`hf_datasets/text_datasets.py` |
+| `datasets/text/processors.py` | text/chat processors | A2，`hf_datasets/text_datasets.py` |
 | `datasets/text/renderer.py` | 可选 renderer 适配层（`build_chat_renderer` / `RendererTokenizerWrapper`） | B，`components/renderer.py`（未装 `renderers` 时 ImportError） |
 | `datasets/types.py` | build context/iteration policy | A2，`components/data/types.py` |
 | `models/common/activation.py` | activation wrappers | C，同名不同源 |

@@ -22,7 +22,7 @@ from ...components.loss import IGNORE_INDEX
 from ...components.tokenizer import MultiModalTokenizer
 from ..collators import Collator, TrainerBatch
 from ..types import DatasetBuildContext
-from .mm_image import vision_to_patches
+from .image import vision_to_patches
 
 __all__ = ["MultiModalCollator"]
 

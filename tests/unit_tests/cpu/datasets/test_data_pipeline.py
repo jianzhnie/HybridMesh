@@ -45,7 +45,7 @@ from llmtuner.datasets import (
     build_first_fit_packing,
 )
 from llmtuner.datasets.random_data import RandomTokenDataLoader
-from llmtuner.datasets.text.text import ChatProcessor
+from llmtuner.datasets.text.processors import ChatProcessor
 from tests.data_fixtures import (
     CHAT_TEMPLATE,
     NUM_ROWS,

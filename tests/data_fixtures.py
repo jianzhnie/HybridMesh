@@ -23,7 +23,7 @@ from llmtuner.datasets import (
     IndexedJsonlSource,
     SingleDataset,
 )
-from llmtuner.datasets.text.text import TextProcessor
+from llmtuner.datasets.text.processors import TextProcessor
 
 # A whitespace WordLevel vocabulary: small enough to reason about by hand, and
 # whitespace-based rather than BPE so a document's tokens are predictable.

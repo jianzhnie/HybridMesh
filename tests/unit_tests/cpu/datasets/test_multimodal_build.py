@@ -42,7 +42,7 @@ from llmtuner.datasets import (
     build_dataloader,
     build_source,
 )
-from llmtuner.datasets.text.text import DATASETS as TEXT_DATASETS
+from llmtuner.datasets.text.processors import DATASETS as TEXT_DATASETS
 from tests.data_fixtures import VOCAB, write_tokenizer
 
 IMAGE_TOKEN = "<|image_pad|>"
@@ -59,17 +59,17 @@ MM_TOKENS = (IMAGE_TOKEN, VIDEO_TOKEN, VISION_START, VISION_END, PAD_TOKEN)
 # instead of as an assertion that silently stops matching anything.
 MM_MODULES = (
     "llmtuner.datasets.multimodal",
-    "llmtuner.datasets.multimodal.mm_collator",
-    "llmtuner.datasets.multimodal.mm_datasets",
-    "llmtuner.datasets.multimodal.mm_image",
-    "llmtuner.datasets.multimodal.mm_text_utils",
-    "llmtuner.datasets.multimodal.mm_video",
+    "llmtuner.datasets.multimodal.collator",
+    "llmtuner.datasets.multimodal.datasets",
+    "llmtuner.datasets.multimodal.image",
+    "llmtuner.datasets.multimodal.text",
+    "llmtuner.datasets.multimodal.video",
 )
 
 # The text recipe module, which the text path *does* import. Listed for the
 # same reason: it keeps the guard meaningful across a rename of the file, which
 # would otherwise leave a stale string matching nothing.
-TEXT_RECIPE_MODULE = "llmtuner.datasets.text.text"
+TEXT_RECIPE_MODULE = "llmtuner.datasets.text.processors"
 
 
 def _loaded(names: tuple[str, ...]) -> list[str]:
@@ -140,7 +140,7 @@ def test_build_dataloader_names_a_multimodal_recipe(tmp_path, monkeypatch):
     """The end-to-end seam: a config names ``cc12m-test`` and the loader that
     comes back carries image patches and grids in its batches."""
     pytest.importorskip("torchvision")
-    from llmtuner.datasets.multimodal.mm_datasets import (
+    from llmtuner.datasets.multimodal.datasets import (
         MM_DATASETS,
         MultiModalProcessor,
         process_cc12_wd_sample,
@@ -191,7 +191,7 @@ def test_unknown_recipe_lists_both_registries(tmp_path):
     """A typo must show the caller every name that would have worked, from
     both catalogs, in one error."""
     pytest.importorskip("torchvision")
-    from llmtuner.datasets.multimodal.mm_datasets import MM_DATASETS
+    from llmtuner.datasets.multimodal.datasets import MM_DATASETS
 
     with pytest.raises(ValueError, match="unknown dataset") as excinfo:
         _build(

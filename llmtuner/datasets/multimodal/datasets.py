@@ -84,8 +84,8 @@ from ..dataset import (
 )
 from ..sources import HuggingFaceStreamingSource
 from ..types import DatasetBuildContext, DatasetIterationPolicy
-from .mm_image import calculate_vision_tokens, process_image, resize_to_pixel_budget
-from .mm_text_utils import insert_vision_placeholders
+from .image import calculate_vision_tokens, process_image, resize_to_pixel_budget
+from .text import insert_vision_placeholders
 
 logger = get_logger(__name__)
 

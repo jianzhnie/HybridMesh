@@ -2,7 +2,7 @@
 
 The public surface is the substrate below plus ``build_dataloader``, which
 assembles them from a ``llmtuner.config.DataloaderConfig``. The concrete dataset
-catalogs (``datasets.text.text``, ``datasets.multimodal.mm_datasets``) are
+catalogs (``datasets.text.processors``, ``datasets.multimodal.datasets``) are
 deliberately not re-exported: they pull in optional dependencies -- torchvision,
 and a video backend behind them -- that a run using none of them should not have
 to install. Neither subpackage's ``__init__`` imports its children, for the same

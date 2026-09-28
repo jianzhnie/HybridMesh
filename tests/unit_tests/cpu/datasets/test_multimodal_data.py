@@ -35,15 +35,15 @@ from llmtuner.datasets import (
     build_dataset,
     build_source,
 )
-from llmtuner.datasets.multimodal.mm_collator import MultiModalCollator
-from llmtuner.datasets.multimodal.mm_datasets import (
+from llmtuner.datasets.multimodal.collator import MultiModalCollator
+from llmtuner.datasets.multimodal.datasets import (
     MultiModalProcessor,
     build_mm_sample_packing,
     packing_output_to_mm_sample,
     process_cc12_wd_sample,
     process_mm_sample,
 )
-from llmtuner.datasets.multimodal.mm_image import (
+from llmtuner.datasets.multimodal.image import (
     calculate_vision_tokens,
     process_image,
     resize_to_navit_patch_grid,
@@ -51,8 +51,8 @@ from llmtuner.datasets.multimodal.mm_image import (
     smart_resize,
     vision_to_patches,
 )
-from llmtuner.datasets.multimodal.mm_text_utils import insert_vision_placeholders
-from llmtuner.datasets.multimodal.mm_video import load_video, process_video
+from llmtuner.datasets.multimodal.text import insert_vision_placeholders
+from llmtuner.datasets.multimodal.video import load_video, process_video
 from tests.data_fixtures import (  # noqa: F401
     VOCAB,
     make_context,

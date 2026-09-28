@@ -31,7 +31,7 @@ from .collators import TextCollator
 from .loader import BaseDataLoader, GrainDataLoader
 from .packing import build_concat_then_split_packing, build_first_fit_packing
 from .random_data import RandomTokenDataLoader
-from .text.text import (
+from .text.processors import (
     DATASETS,
     make_local_jsonl,
     make_local_jsonl_sft,
@@ -55,8 +55,8 @@ def _multimodal_registry(dataset_name: str):
     live in this package and the config layer must not import them.
     """
     try:
-        from .multimodal.mm_collator import MultiModalCollator
-        from .multimodal.mm_datasets import MM_DATASETS, build_mm_sample_packing
+        from .multimodal.collator import MultiModalCollator
+        from .multimodal.datasets import MM_DATASETS, build_mm_sample_packing
     except ImportError as exc:
         raise ImportError(
             f"dataset {dataset_name!r} is not one of the text "

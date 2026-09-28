@@ -9,7 +9,7 @@ signature with its validation, and the choice between the two recipes moves to
 the call site.
 
 The multimodal packing node is the third recipe and lives in
-``multimodal/mm_datasets.py``, next to the dataset it packs: naming it here
+``multimodal/datasets.py``, next to the dataset it packs: naming it here
 would make the text-only path import torchvision.
 
 The state handling is the subtle part. ``_DocumentAwareConcatThenSplitIterator``

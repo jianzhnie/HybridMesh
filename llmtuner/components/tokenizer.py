@@ -501,7 +501,7 @@ class HuggingFaceTokenizer(BaseTokenizer):
         torchtitan's ``HFBackendTokenizer``) as defaults only -- any caller
         that passes the kwargs explicitly wins. SFT full-conversation renders
         must pass ``add_generation_prompt=False`` explicitly, as
-        ``datasets/text/text.py`` does.
+        ``datasets/text/processors.py`` does.
         """
         kwargs.setdefault("bos_token", self.bos_token or "")
         kwargs.setdefault("eos_token", self.eos_token or "")

@@ -33,12 +33,12 @@ from llmtuner.config import (
     TrainingConfig,
 )
 from llmtuner.datasets.build import build_dataloader
+from llmtuner.datasets.text.processors import ChatProcessor
 from llmtuner.datasets.text.renderer import (
     RENDERERS_INSTALL_HINT,
     RendererTokenizerWrapper,
     build_chat_renderer,
 )
-from llmtuner.datasets.text.text import ChatProcessor
 from tests.data_fixtures import (
     make_context,
     tokenizer,  # noqa: F401  (fixture re-export)
@@ -300,7 +300,7 @@ def test_make_local_jsonl_sft_multiturn_builds_a_renderer_processor(
     recipe itself -- processor class, configured messages field, and the
     renderer it was handed.
     """
-    from llmtuner.datasets.text.text import make_local_jsonl_sft_multiturn
+    from llmtuner.datasets.text.processors import make_local_jsonl_sft_multiturn
 
     corpus_path = tmp_path / "rows.jsonl"
     corpus_path.write_text('{"conversation": []}\n')
