@@ -1,98 +1,15 @@
-"""Stateful packing: turning a tokenized dataset into fixed-length rows.
-
-Vendored from torchtitan ``components/data/packing.py``. The two recipes are
-free functions, not configs. A packing config would only ever hold the dataset
-it wraps plus one or two knobs, and every caller constructs it one line before
-building it -- so the description earned nothing the parameters do not already
-carry. ``num_packing_bins`` moves into :func:`build_first_fit_packing`'s
-signature with its validation, and the choice between the two recipes moves to
-the call site.
-
-The multimodal packing node is the third recipe and lives in
-``multimodal/datasets.py``, next to the dataset it packs: naming it here
-would make the text-only path import torchvision.
-
-The state handling is the subtle part. ``_DocumentAwareConcatThenSplitIterator``
-records the parent's cursor *before* it pulls a document, not after, because a
-document may be consumed across several output rows; on restore it rewinds the
-parent to the recorded cursor and re-pulls. Getting that wrong duplicates or
-skips documents at a resume boundary, and nothing downstream would notice.
-"""
 
 from __future__ import annotations
 
-from functools import partial
 from typing import Any
 
 import grain.python as grain
 import numpy as np
 
-from ..components.loss import IGNORE_INDEX
-from .dataset import (
-    DatasetConcat,
-    DatasetMix,
-    SingleDataset,
+from ...components.loss import IGNORE_INDEX
+from ..dataset import (
     TextSequence,
-    as_iter_dataset,
-    build_dataset,
 )
-from .types import DatasetBuildContext, DatasetIterationPolicy
-
-__all__ = ["build_concat_then_split_packing", "build_first_fit_packing"]
-
-
-def _row_lengths(context: DatasetBuildContext) -> dict[str, int]:
-    """The per-feature row length every packing node fills to.
-
-    All four token features are packed to the same length; the dict is what the
-    Grain packing iterators take, and building it in one place is what keeps the
-    two packers' idea of a row identical.
-    """
-    return {
-        "input_ids": context.num_tokens_per_batch,
-        "labels": context.num_tokens_per_batch,
-        "positions": context.num_tokens_per_batch,
-        "padding_mask": context.num_tokens_per_batch,
-    }
-
-
-def build_concat_then_split_packing(
-    dataset: (SingleDataset | DatasetMix | DatasetConcat),
-    *,
-    context: DatasetBuildContext,
-    dataset_iteration_policy: DatasetIterationPolicy,
-) -> grain.IterDataset:
-    """Concatenate documents, chunking them into fixed-length rows."""
-    dataset_graph = build_dataset(
-        dataset,
-        context=context,
-        dataset_iteration_policy=dataset_iteration_policy,
-    )
-    if context.max_num_documents is not None:
-        dataset_graph = as_iter_dataset(dataset_graph, context=context)
-        return _DocumentAwareConcatThenSplitIterDataset(
-            dataset_graph,
-            max_num_documents_per_row=context.max_num_documents,
-            max_context_length=context.max_context_length,
-            num_tokens_per_row=context.num_tokens_per_batch,
-        )
-    dataset_graph = dataset_graph.map(
-        partial(
-            _text_sequence_to_packing_input,
-            max_context_length=context.max_context_length,
-        )
-    )
-    dataset_graph = as_iter_dataset(dataset_graph, context=context)
-    dataset_graph = grain.experimental.ConcatThenSplitIterDataset(
-        dataset_graph, length_struct=_row_lengths(context)
-    )
-    dataset_graph = dataset_graph.filter(_packing_output_is_full)
-    return dataset_graph.map(
-        partial(
-            _packing_output_to_text_sequence,
-            max_context_length=context.max_context_length,
-        )
-    )
 
 
 class _DocumentAwareConcatThenSplitIterDataset(grain.IterDataset):
@@ -247,66 +164,6 @@ class _DocumentAwareConcatThenSplitIterator(grain.DatasetIterator):
             self._remainder_offset = state["remainder_offset"]
 
 
-def build_first_fit_packing(
-    dataset: (SingleDataset | DatasetMix | DatasetConcat),
-    *,
-    context: DatasetBuildContext,
-    dataset_iteration_policy: DatasetIterationPolicy,
-    num_packing_bins: int = 8,
-) -> grain.IterDataset:
-    """Pack document chunks no longer than the context window.
-
-    ``num_packing_bins`` is how many candidate rows are kept open; more bins can
-    reduce padding, but buffer more samples.
-    """
-    if num_packing_bins <= 0:
-        raise ValueError("num_packing_bins must be positive")
-
-    dataset_graph = build_dataset(
-        dataset,
-        context=context,
-        dataset_iteration_policy=dataset_iteration_policy,
-    )
-    dataset_graph = as_iter_dataset(dataset_graph, context=context)
-    dataset_graph = grain.experimental.FlatMapIterDataset(
-        dataset_graph,
-        _SplitTextSequenceDocuments(
-            max_context_length=context.max_context_length,
-        ),
-    )
-    dataset_graph = dataset_graph.map(
-        partial(
-            _text_sequence_to_packing_input,
-            max_context_length=context.max_context_length,
-        )
-    )
-    # TODO(data-global-pack-plan): Consider packing before DP sharding so
-    # ranks receive similarly filled rows.
-    dataset_graph = grain.experimental.FirstFitPackIterDataset(
-        dataset_graph,
-        length_struct=_row_lengths(context),
-        padding_struct={
-            "input_ids": 0,
-            "labels": IGNORE_INDEX,
-            "positions": 0,
-            "padding_mask": True,
-        },
-        num_packing_bins=num_packing_bins,
-        meta_features=("labels", "positions"),
-        seed=dataset_iteration_policy.seed,
-        shuffle_bins=dataset_iteration_policy.shuffle,
-        max_sequences_per_bin=(
-            context.max_num_documents if context.max_num_documents is not None else None
-        ),
-    )
-    return dataset_graph.map(
-        partial(
-            _packing_output_to_text_sequence,
-            max_context_length=context.max_context_length,
-        )
-    )
-
-
 class _SplitTextSequenceDocuments(grain.experimental.FlatMapTransform):
     """Expose context-sized document chunks to Grain's native packing limit."""
 
@@ -363,66 +220,3 @@ def _next_document_chunk_end(
             end = start + 1 + int(next_starts[0])
     return end
 
-
-def _packing_output_is_full(packing_output: dict[str, np.ndarray]) -> bool:
-    """Return whether concat-then-split filled the entire token batch."""
-    return bool(np.all(np.asarray(packing_output["input_ids_segment_ids"]) != 0))
-
-
-def _text_sequence_to_packing_input(
-    text_sequence: TextSequence,
-    *,
-    max_context_length: int,
-) -> dict[str, np.ndarray]:
-    """Convert a `TextSequence` to the array dictionary expected by text packing.
-
-    Missing positions become `0..num_tokens-1`.
-    """
-    positions = text_sequence.positions
-    if positions is None:
-        positions = (
-            np.arange(len(text_sequence.input_ids), dtype=np.int64) % max_context_length
-        )
-    padding_mask = text_sequence.padding_mask
-    if padding_mask is None:
-        padding_mask = np.zeros(len(text_sequence.input_ids), dtype=np.bool_)
-    return {
-        "input_ids": np.asarray(text_sequence.input_ids),
-        "labels": np.asarray(text_sequence.labels),
-        "positions": np.asarray(positions),
-        "padding_mask": np.asarray(padding_mask),
-    }
-
-
-def _packing_output_to_text_sequence(
-    packing_output: dict[str, np.ndarray],
-    *,
-    max_context_length: int,
-) -> TextSequence:
-    """Finalize packed text by masking padding and canonicalizing positions."""
-    segment_ids = np.asarray(packing_output["input_ids_segment_ids"])
-    padding_mask = np.asarray(packing_output["padding_mask"], dtype=np.bool_).copy()
-    padding_mask[segment_ids == 0] = True
-    labels = np.asarray(packing_output["labels"]).copy()
-    labels[padding_mask] = IGNORE_INDEX
-
-    # A zero starts a document. For [0, 1, 2, 0, 1], segment_starts is
-    # [0, 0, 0, 3, 3], so subtracting it restores [0, 1, 2, 0, 1].
-    boundaries = np.asarray(packing_output["positions"]) == 0
-    token_indices = np.arange(len(boundaries), dtype=np.int64)
-    segment_starts = np.maximum.accumulate(np.where(boundaries, token_indices, 0))
-    positions = token_indices - segment_starts
-
-    packing_padding = segment_ids == 0
-    if np.any(packing_padding):
-        first_padding_token = int(np.flatnonzero(packing_padding)[0])
-        positions[first_padding_token:] = (
-            np.arange(len(positions) - first_padding_token) % max_context_length
-        )
-
-    return TextSequence(
-        input_ids=np.asarray(packing_output["input_ids"]),
-        labels=labels,
-        positions=positions,
-        padding_mask=padding_mask,
-    )
