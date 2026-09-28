@@ -25,6 +25,7 @@ from torch.distributed.checkpoint.stateful import Stateful
 
 from ..components.tokenizer import BaseTokenizer
 from .collators import Collator, TextCollator, TrainerBatch
+from .dataset import as_iter_dataset
 from .types import DatasetBuildContext
 
 __all__ = [
@@ -141,8 +142,7 @@ class GrainDataLoader(BaseDataLoader):
         # before the loader sees it. Investigate an earlier boundary where one
         # shared worker pool processes samples, instead of creating a pool per
         # dataset or packing per worker.
-        if isinstance(dataset, grain.MapDataset):
-            dataset = dataset.to_iter_dataset(read_options=read_options)
+        dataset = as_iter_dataset(dataset, context=context)
 
         # Batch and collate samples.
         dataset = dataset.batch(

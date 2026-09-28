@@ -33,11 +33,27 @@ from .dataset import (
     DatasetMix,
     SingleDataset,
     TextSequence,
+    as_iter_dataset,
     build_dataset,
 )
 from .types import DatasetBuildContext, DatasetIterationPolicy
 
 __all__ = ["build_concat_then_split_packing", "build_first_fit_packing"]
+
+
+def _row_lengths(context: DatasetBuildContext) -> dict[str, int]:
+    """The per-feature row length every packing node fills to.
+
+    All four token features are packed to the same length; the dict is what the
+    Grain packing iterators take, and building it in one place is what keeps the
+    two packers' idea of a row identical.
+    """
+    return {
+        "input_ids": context.num_tokens_per_batch,
+        "labels": context.num_tokens_per_batch,
+        "positions": context.num_tokens_per_batch,
+        "padding_mask": context.num_tokens_per_batch,
+    }
 
 
 def build_concat_then_split_packing(
@@ -53,10 +69,7 @@ def build_concat_then_split_packing(
         dataset_iteration_policy=dataset_iteration_policy,
     )
     if context.max_num_documents is not None:
-        if isinstance(dataset_graph, grain.MapDataset):
-            dataset_graph = dataset_graph.to_iter_dataset(
-                read_options=context.read_options
-            )
+        dataset_graph = as_iter_dataset(dataset_graph, context=context)
         return _DocumentAwareConcatThenSplitIterDataset(
             dataset_graph,
             max_num_documents_per_row=context.max_num_documents,
@@ -69,16 +82,9 @@ def build_concat_then_split_packing(
             max_context_length=context.max_context_length,
         )
     )
-    if isinstance(dataset_graph, grain.MapDataset):
-        dataset_graph = dataset_graph.to_iter_dataset(read_options=context.read_options)
+    dataset_graph = as_iter_dataset(dataset_graph, context=context)
     dataset_graph = grain.experimental.ConcatThenSplitIterDataset(
-        dataset_graph,
-        length_struct={
-            "input_ids": context.num_tokens_per_batch,
-            "labels": context.num_tokens_per_batch,
-            "positions": context.num_tokens_per_batch,
-            "padding_mask": context.num_tokens_per_batch,
-        },
+        dataset_graph, length_struct=_row_lengths(context)
     )
     dataset_graph = dataset_graph.filter(_packing_output_is_full)
     return dataset_graph.map(
@@ -261,8 +267,7 @@ def build_first_fit_packing(
         context=context,
         dataset_iteration_policy=dataset_iteration_policy,
     )
-    if isinstance(dataset_graph, grain.MapDataset):
-        dataset_graph = dataset_graph.to_iter_dataset(read_options=context.read_options)
+    dataset_graph = as_iter_dataset(dataset_graph, context=context)
     dataset_graph = grain.experimental.FlatMapIterDataset(
         dataset_graph,
         _SplitTextSequenceDocuments(
@@ -279,12 +284,7 @@ def build_first_fit_packing(
     # ranks receive similarly filled rows.
     dataset_graph = grain.experimental.FirstFitPackIterDataset(
         dataset_graph,
-        length_struct={
-            "input_ids": context.num_tokens_per_batch,
-            "labels": context.num_tokens_per_batch,
-            "positions": context.num_tokens_per_batch,
-            "padding_mask": context.num_tokens_per_batch,
-        },
+        length_struct=_row_lengths(context),
         padding_struct={
             "input_ids": 0,
             "labels": IGNORE_INDEX,

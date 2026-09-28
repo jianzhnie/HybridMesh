@@ -269,10 +269,21 @@ per-rank token 数（Grain）与 global batch + 行切片（synthetic）是两�
    `distributed/utils.py` 十次增量（2026-09-28，连带补上 `PYTHONHASHSEED` 与
    `detect_anomaly`）。余下只有 TP/SP 布局的根治（D14）与 PP×校验（D18），两者都需要
    多卡或新 torch，见第 5 条。
-3. `llmtuner/components/`（checkpointer/metrics/profiler/optimizer）—— 进行中：
-   checkpointer 与 profiler 已复核（2026-09-28 十一次增量，前者 AST 归一化逐文件对照、
-   并删掉 `TorchCheckpointingManager` 的死成员 `staging_future`；后者补上 XPU activity
-   分支）；metrics 与 optimizer 仍待走。
-4. `llmtuner/datasets/`、`llmtuner/models/common/*` 的数值等价性。
+3. `llmtuner/components/`（checkpointer/metrics/profiler/optimizer）—— **全树已走完**（2026-09-28
+  十一次增量：checkpointer 与 profiler，前者 AST 归一化逐文件对照并删掉
+   `TorchCheckpointingManager` 的死成员 `staging_future`，后者补上 XPU activity 分支；
+  十二次增量：metrics 与 optimizer，前者删掉零调用者的 `set_num_flops_per_token`，
+   后者新登记两条 D 类缺口——`fused_opt_states_bf16` 与 `optimizer_factory_kwargs_by_name`，
+   并把 `DistMuon` 与范围外的 `distributed/flex_shard/` 显式连上；同轮修掉 `fused`
+   在 CPU 上首步崩溃的真 bug——按设备解析该 flag，无 fused 核时降级为 for-loop；
+   十三次增量：补走不在本清单里的 `loss.py` 与 `tokenizer.py`，前者数值路径逐行对齐、
+   结构差异四条登记，后者仅 Config 移除类差异）。
+4. `llmtuner/datasets/`、`llmtuner/models/common/*` 的数值等价性 —— 进行中：
+   `datasets/` 的六个核心文件（`types`/`collators`/`loader`/`packing`/`dataset`/`sources`）
+   与 `text/text.py` 已代码级对照完毕（2026-09-28 十四次增量，见 upstream map），结论是忠实
+   移植 + 已登记的形状差异；余 `multimodal/*`、`random_data.py`、`build.py` 未走。
+   `models/common/*` 尚未开始。**该批的运行期证据仍缺**：`tests/unit_tests/cpu/datasets/`
+   整体被 `require_env('grain')` 门控，本机未装 grain（pyproject 钉 `0.2.18`，本机镜像只有
+   `0.2.3`，版本不符故不装），57 例全 skip。
 5. D18 的实现（PP×校验），以及任何运行期/数值等价性验证——都需要 torch≥2.12 + 多卡，
    本机不可达（§0 的"验证边界"）。

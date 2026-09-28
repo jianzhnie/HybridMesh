@@ -52,9 +52,10 @@ __all__ = [
     "SingleDataset",
     "TextSequence",
     "WeightedDataset",
+    "as_iter_dataset",
     "build_dataset",
+    "is_not_none",
 ]
-
 
 GrainDataset: TypeAlias = grain.MapDataset | grain.IterDataset
 
@@ -133,6 +134,34 @@ class SingleDataset:
     build context rather than raising.
     """
     post_filters: tuple[Callable[[Any], bool], ...] = ()
+
+
+def is_not_none(sample: Any) -> bool:
+    """``post_filters`` entry for a processor that drops unusable rows.
+
+    Every processor in this package signals "drop this row" by returning
+    ``None`` (too long, missing field, unrenderable media), so the filter that
+    acts on that signal is the same one everywhere. Named rather than a lambda
+    so the recipes that use it read as one contract, and so the predicate stays
+    picklable.
+    """
+    return sample is not None
+
+
+def as_iter_dataset(
+    dataset: GrainDataset, *, context: DatasetBuildContext
+) -> grain.IterDataset:
+    """The graph as an ``IterDataset``, converting only if it is map-style.
+
+    Streaming transforms (``ConcatThenSplit``, ``FlatMap``, window shuffle) and
+    ``IterDataset.mix`` need an iter graph; a map-style one has to be read into
+    one first, and ``read_options`` decides how many rows are read concurrently.
+    Passing an iter graph through unchanged is what makes this usable on either
+    kind of child.
+    """
+    if isinstance(dataset, grain.MapDataset):
+        return dataset.to_iter_dataset(read_options=context.read_options)
+    return dataset
 
 
 def build_dataset(
@@ -344,12 +373,7 @@ def _build_mix(
             cast(list[grain.MapDataset], children),
             weights=weights,
         )
-    children = [
-        child.to_iter_dataset(read_options=context.read_options)
-        if isinstance(child, grain.MapDataset)
-        else child
-        for child in children
-    ]
+    children = [as_iter_dataset(child, context=context) for child in children]
     return grain.IterDataset.mix(children, weights=weights)
 
 

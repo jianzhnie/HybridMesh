@@ -170,6 +170,9 @@ A2 分类（见上表），mesh 构建这一段记在该行的"改写点"里，�
 | `distributed/compile.py` | **已移植**（2026-09-24，批 8）：逐 block compile、async TP `_micro_pipeline_tp`、`regional_inductor`、`capture_scalar_outputs` 四件全部落 `llmtuner/parallel/compile.py` + `CompileConfig`，见下"已从 D 移除" |
 | `models/common/moe_sharding.py` | **部分移除**（2026-09-25）。其载荷 MoE-under-TP 已在 `parallel/tensor_parallel/tp.py` 落 B 类适配：HF plan 的 `packed_colwise`/`packed_rowwise`/`moe_tp_experts` 规格不再 raise，专家权重沿 F 维原地切分、router Replicate、块边界 AG/RS 对偶 collective；**tp×ep 同日起按上游语义放行**（TP 只切 dense、EP 独占 routed 专家沿 E 切、router Replicate，`apply_tp` 在 ep>1 时把块留给 swap，专家梯度排除由 `tp_sharded_param_ids` 统一判定；tp×ep×cp 与 shared-expert×tp 保持 loud-raise）。声明层+装配层就位并有 CPU 单测，但真多卡前后向等价性**环境未覆盖**（本机 torch 2.2.2 的 gloo 可用，缺的是模型/并行层所需的新 API，见"版本与漂移"），待 torch≥2.12 多卡复跑后方可视为完整移除。见下"已从 D 移除（部分）" |
 | `components/optimizer/ema.py`（2026-09 新增，515 行） | **已移植**（2026-09-24，`llmtuner/components/optimizer/ema.py`）：在线 EMA 模型平均，config/trainer/checkpointer 三侧接线完成，见下"已从 D 移除" |
+| `components/optimizer/optimizer.py` 的 `implementation="fused_opt_states_bf16"`（+ `_register_bf16_optimizer_state_hook`） | **登记缺口**（2026-09-28，components 批次 optimizer 走查）：上游第四种实现模式用 Adam 的 step pre-hook 预建 bf16 `exp_avg`/`exp_avg_sq`（fused CUDA 核据此走 fp32 参数+bf16 状态的混合精度路径，省一半优化器状态显存），再用 `register_load_state_dict_post_hook` 在 DCP 载入后把被 torch 转回参数 dtype 的状态重新降为 bf16。llmtuner 的 `implementation` 只声明 `fused`/`foreach`/`for-loop`（配置期即 Literal 拒绝，装配期 `_build_impl_kwargs` 再兜一道 `ValueError`）。不移植的理由是**不可验证**：它的全部价值来自那个 CUDA fused 核，本机无 CUDA 也无从复现上游的显存收益；同时它改写 checkpoint 里 Adam 状态的 dtype，属续训兼容敏感面，盲写风险高于收益。解锁条件：CUDA 目标设备 + 确有优化器状态显存诉求；届时实现要点即上面两条 hook（上游 `components/optimizer/optimizer.py:339` 起） |
+| `components/optimizer/optimizer.py` 的 `optimizer_factory_kwargs_by_name` | **登记缺口（无消费者）**（2026-09-28，同上）：上游用它把「实例级对象」——per-parameter compute metadata、通信 bucket 规格——按 optimizer 名传进工厂，而它现在的两个消费者（`DistMuon`、Float8 系优化器）都在 llmtuner 裁剪面内（前者属已在 C 类登记为范围外的 `distributed/flex_shard/`）。按本仓"有调用者再补"的口径不预置字段；补 `DistMuon` 时一并加 |
+
 | Ulysses CP × varlen/packed（baff3c681） | **已移植**（2026-09-25，批 5）：`apply_cp` 不再 fail-fast，wrapper 全长透传文档 mask、kernel 按 mask Q 长度分派，见下"已从 D 移除" |
 | 多轮对话 SFT 的 renderer 路径（4a0d8dab3） | **已适配为可选路径**（2026-09-25，§9.1 第 12 项）：不引入硬依赖、不复制 Configurable 外形。`datasets/text/renderer.py` 为可选导入适配层（`build_chat_renderer` + `RendererTokenizerWrapper`），`ChatProcessor(renderer=...)` 走多-turn renderer 分支，`--chat_renderer`/`--messages_field` 接线 `local_jsonl_sft`；未装 `renderers` 时启用 loud-raise（ImportError 带安装指引），默认关闭逐位不变。真实库数值**未验证**（本机无 renderers，单测以 fake 模块覆盖接口与 mask 移位语义）；解锁条件：pyproject 加 optional extra `renderers==0.1.11` 后装包复跑 |
 | `models/common/token_dispatcher.py` 的 DeepEP/HybridEP 两个 dispatcher | 登记缺口（2026-09-25，§9.1 第 13 项）：CUDA-only（`deep_ep`/`hybridep` 内核 + GB200/NVLink72 假设）且 dispatch/combine 经上游 `distributed/deepep/` wrappers（1155 行）驱动，可选导入无法忠实表达契约，故不 vendor；`ParallelConfig.ep_token_dispatcher="deepep"/"hybridep"` 配置期 NotImplementedError（含解锁条件），swap 入口防御性同语义。解锁条件：vendor 上游 wrappers + pyproject 加 CUDA-only optional extra + CUDA 目标设备复跑数值。`AllToAllTokenDispatcher` 满足同一 dispatch/combine 契约 |
@@ -807,6 +810,178 @@ llmtuner 侧是 `datasets/multimodal/mm_image.py`），本表的 llmtuner 列是
   (c) 测试/文档：`test_profiler.py` +1 例；`llmtuner_torchtitan_symbol_guide.md` §7.2/§7.3
   与 `llmtuner_trainer_walkthrough.md` §12 同步。`components/` 批次余下 metrics 与 optimizer
   两个模块。
+- 2026-09-28 十二次增量（`components/` 批次收尾：metrics + optimizer 走查）：同样以 AST 归一化
+  逐文件对照，结论如下。
+  (a) **metrics（`components/metrics.py` ↔ `observability/metrics.py`）：逐项对齐，无能力缺口。**
+  训练与校验两条日志的 key 集合、`tps`/`tflops` 公式、`time_metrics`/`memory` 派生、
+  `should_log` 的 `step == 1 or step % log_freq == 0` 判据全部一致。差异四类，全部为已登记
+  裁剪或适配：(1) 上游的自由函数 `compute_training_performance_metrics`（供 trainer 与实验
+  共用）没有移植，llmtuner 把它内联进 `MetricsProcessor._derive` 的 `_Derived` dataclass；
+  语义相同，形状不同；(2) MFU 抑制条件：上游看 `has_quantization`，llmtuner 看
+  `gpu_peak_flops == 0 or num_flops_per_token == 0`（无量化路径，故用"设备未知就不报"等价替代）；
+  (3) `_build_metric_logger` 去掉 `ft_enable`/`ft_replica_id`（无副本概念）、wandb 失败策略
+  改为只吞 ImportError，rank 判定改用 `get_distributed_rank()`（单进程安全）；
+  (4) `DeviceMemoryMonitor` 改吃 `device_type`、CPU 分支返回全零 `DeviceMemStats`、
+  `_to_pct` 加除零守卫、`build_device_memory_monitor()` 在 CPU 上不打印容量；
+  `ensure_pp_loss_visible` 增加 `not pp_enabled` 提前返回（上游该函数无此守卫，仅靠唯一调用点
+  门控，语义等价），`_get_metrics_rank` 去私有化为 `get_metrics_rank`。模块 docstring 声称
+  "从不调用 `torch.distributed`"经复核成立。
+  **本次唯一代码改动**：删除 `MetricsProcessor.set_num_flops_per_token`——全仓零调用者，且其
+  docstring 的理由（"metrics processor 先于模型构造、当时拿不到该数"）与 llmtuner 的实现相反
+  （构造函数本来就收 `num_flops_per_token`）；上游也没有这个方法（它由 trainer 直接赋值属性）。
+  (b) **optimizer（`components/optimizer/`）：三条登记差异（两条为本次新登记），其余对齐。**
+  `optimizer.py` 的构造算法（逐 model part × 逐 optimizer 名的分组、pattern 首个命中即认领、
+  `_build_impl_kwargs`、`_log_optimizer`、`step`、flat FQN state dict）与上游同构。
+  **新登记**：上游第四种 `implementation="fused_opt_states_bf16"`（Adam step pre-hook 预建
+  bf16 状态 + load post-hook 复原 dtype，CUDA fused 混合精度核）与
+  `optimizer_factory_kwargs_by_name` 未移植，两条均入 D 表（前者不可验证：价值全在 CUDA
+  fused 核且改写 checkpoint 状态 dtype；后者无消费者）。**补登记**：`_resolve_optimizer_factory`
+  的第三个工厂 `DistMuon` 位于 `distributed/flex_shard/`，该目录早已作为范围外 C 类登记，
+  此处把两者显式连上；`default_adamw`（上游 `lr=8e-4`/betas (0.9,0.95)/wd 0.1 的便捷构造）
+  未移植，其上游调用者只有 torchft llama3 recipe 与 RL 示例（均在裁剪面内），训练路径由
+  config 的 catch-all 默认组覆盖（betas 用 torch 默认，config 已声明为 NUMERIC 分叉）。
+  **形状差异**：MoE 负载均衡/quantile hook 的注册点从容器挪到 `trainer/builder.py`（上游是
+  各模型自己的代码注册），hook 本体在 `models/common/balancing.py`；与上游"容器只提供
+  `Optimizer.__init__` 的 hook 机制"一致。**优于上游的两处**：`_validate_params` 会点名未被
+  认领的可训练参数并检出重复认领（上游只是一条 `assert expected == actual`）；`step` 的
+  closure 断言改 `ValueError`。
+  `utils.py`（ratio 0.996）：只剩 `isinstance(x, A | B)` 与 `zip(..., strict=False)` 之类
+  现代化改写，无能力差异。`lr_scheduler.py`：WSD 公式逐行核对一致（同样的 0-based `+1`
+  修正、`stable_steps = total + 1 - warmup - decay`、三种 decay 形状与 `min_lr_factor` 缩放）；
+  差异为 `_wsd_factor` 提到模块级 + `build_lr_scheduler` 自由函数取代上游嵌套闭包与
+  `Config.build`，以及已登记的 `decay_ratio` 默认 0.0（上游 None）、`total_steps < 训练步数`
+  拒绝、`load_state_dict({})` 空字典 no-op、`LRSchedulersContainer(total_steps=...)` 断言 seam。
+  `ema.py` 属 2026-09-24 批 3a 已移植项，本轮无改动。
+  (c) **走查中发现并修掉一个真 bug（本轮唯一行为改动）：`implementation="fused"` 在 CPU 上必崩。**
+  取证：`torch.optim.AdamW([p], fused=True)` 在 CPU 上**构造期**即 `RuntimeError`
+  （`requires ... supported devices: ['cuda','xpu','privateuseone']`），但 llmtuner（与上游同形）
+  把 `fused` 放进每个 param group 而非构造参数，torch 只校验构造参数，于是 CPU 上构造通过、
+  第一次 `step()` 才炸：`NotImplementedError: Could not run 'aten::_fused_adamw_' with arguments
+  from the 'CPU' backend`。而 `implementation` 的默认值正是 `fused`，所以**文档里的 quickstart
+  （单进程 `--steps 20`）在 CPU 上会在首步 optimizer.step 崩溃**；旧 config help 却写着
+  "falls back to the for-loop kernel elsewhere"，测试 `test_the_implementation_flag_reaches_the_
+  inner_optimizer` 还把 `group["fused"] is True` 钉住（因为它只构造、不 step，看不见崩溃）。
+  上游不会遇到：torchtitan 是 GPU-only。**修法（保持上游形状、落实本仓自己的承诺）**：
+  `_build_impl_kwargs` 先问 torch 该设备有没有 fused 核（`torch.optim.adam.
+  _get_fused_kernels_supported_devices()`，取不到时回退 `{"cuda","xpu"}`），没有就把
+  `fused` 降级为 for-loop 并记一行 info；`fused` 是"内核偏好"而非硬要求（它是默认值），
+  且在 CPU 上 for-loop 与 foreach 实测逐位一致（5 步 AdamW，`torch.equal` 全真）。CUDA/XPU 上
+  行为与上游逐字相同。测试：改写 `test_the_implementation_flag_reaches_the_inner_optimizer`
+  为按设备判定，新增降级用例与**回归用例**（默认 config 在 CPU 上真的 `step()` 一次）。
+  (d) 验证：全量 CPU 套件 152 passed / 59 skipped / 9 failed（失败集同基线）；optimizer
+  子套件 43 passed（2 个 `test_optimizer_config` 失败仍是缺 `torch.distributed.pipelining`）。
+- 2026-09-28 十三次增量（`components/` 全树收口：`loss.py` + `tokenizer.py` 走查）：这两个文件
+  不在 `walkthrough` §12 第 3 项的子清单里（loss 由 vocab-loss 批次覆盖过半、tokenizer 属
+  A1），因此是回答"components 是否完全对齐"时才补走的。结论：
+  (a) **`components/tokenizer.py` ↔ 上游同名文件：对齐。** AST 归一化后 11 处差异全是
+  `Configurable`/嵌套 `Config` 的移除（`BaseTokenizer`/`HuggingFaceTokenizer`/
+  `MultiModalTokenizer` 改成显式构造参数）、`open(..., 'r')` 之类现代化，以及上游 PR-1540 的
+  `assets/tokenizer` 弃用提示（llmtuner 无该历史路径）。`apply_chat_template` 注入 bos/eos
+  kwargs 与 `add_generation_prompt=True` 是已登记的上游 backend tokenizer 同源改动。
+  (b) **`components/loss.py` ↔ 上游同名文件：数值路径逐行对齐，结构差异四条（三条本轮新登记）。**
+  逐行核对的是最要紧的那段：vocab-parallel `forward` 的三个 TP all-reduce（max → sumexp →
+  gather）、shard 边界公式（`chunk_size = ceil(V/tp)` + 双侧 `min(V, ...)`）、`out_of_range`
+  掩码、`backward` 的融合导数（`grad_update = out_of_range - 1` 与
+  `(grad_input + exp(log_probs)) * grad_output`）、`_vocab_parallel_entropy` 的 `isneginf`
+  守卫与 stack 后单次 all-reduce、`compute_logprobs` 的两条分支、`mse_loss` 的
+  `float().detach()` 与 sum 归约——与上游逐行一致（含 `reduction="none"` 的 `[T]` 语义）。
+  **新登记差异**：(1) 上游 `cross_entropy_loss` 暴露 `reduction: sum|none`，llmtuner 固定
+  `"sum"`（`"none"` 只有 `LossParallelCrossEntropy.apply` 与 `compute_logprobs` 用），无消费者；
+  (2) 上游 `ChunkedLossWrapper` 支持**多输出** tuple pred/labels（dMTP 类模型）并返回
+  `(loss, metrics)`（`_combine_chunk_metrics` 逐 chunk 合并），llmtuner 的
+  `chunked_lm_head_cross_entropy` 只接单个 `(T, H)`、只返回求和 loss；(3) 上游用预分配缓冲的
+  `GradAccumulator`（就地拷贝），llmtuner 用 list + `torch.cat`（多一次 `T*H` 拷贝）。
+  另登记：上游的 `spmd_typecheck` 静态断言不移植（llmtuner 无 spmd 曲面），
+  `_LossParallelCrossEntropy`/`_VocabParallelEntropy` 去私有化；`compute_logprobs`/`mse_loss`
+  在 llmtuner **无生产调用者**（上游分别只服务 `rl/` 与 flux 的 `MSELoss`，均在裁剪面内），
+  仓内唯一引用是 `tests/integration_tests/vocab_parallel_loss_equivalence.py`，按"移植曲面"保留；
+  chunk 循环期间不改 lm_head 的 FSDP reshard/grad-sync 早前已登记为性能差异，此处不重复。
+  (c) 结论：`llmtuner/components/` 六个单元（checkpointer、metrics、profiler、optimizer、
+  loss、tokenizer）已全部走查完毕；未对齐项只剩逐条登记的差异与 D 表条目
+  （`fused_opt_states_bf16`、`optimizer_factory_kwargs_by_name`、范围外的 `DistMuon`，以及
+  未安装/未跑过的 `torch_checkpointing` 后端）。本轮无代码改动，套件数字不变
+  （152 passed / 59 skipped / 9 failed）。
+- 2026-09-28 十四次增量（`walkthrough` §12 第 4 项开篇：`datasets/` 核心走查）：`components/data/`
+  与 `llmtuner/datasets/` 的六个核心文件逐一做了 AST 归一化对照 + 逐行读数值相关段，结论是
+  **忠实移植**，差异全部是已登记的"去 Configurable/去 microbatch 类型"那一类。
+  (a) `packing.py`（3 hunk / 28 行）：只有两处 `Config.build()` → `build_*_packing()` 自由函数，
+  grain 图本身逐字相同——`length_struct`/`padding_struct`（`labels` 填 `IGNORE_INDEX`、`padding_mask`
+  填 `True`）、`meta_features=("labels","positions")`、`seed`/`shuffle_bins`/`num_packing_bins`/
+  `max_sequences_per_bin`、`_DocumentAwareConcatThenSplitIterDataset/Iterator`（含 remainder
+  `get_state/set_state`）、`_next_document_chunk_end`/`_packing_output_is_full` 全部无差异。
+  (b) `collators.py`（4/21）：`TextCollator` 的载荷逐字相同（zeros + `torch.cat` + 超长 raise +
+  `positions[num_tokens:].remainder_(max_context_length)` + `num_valid_tokens=(labels !=
+  IGNORE_INDEX).sum()`）。差异只有类型面：上游 `TrainingMicrobatch`/`TokenizedTrainingMicrobatch`
+  两个 dataclass → llmtuner 的 `TrainerBatch: TypeAlias = dict[str, Any]`，字段名 `input` 不变；
+  `num_rows_per_microbatch()` → `num_rows_per_batch()`。**一处需要登记的设备面差异**：
+  `HAS_PIN_MEMORY` 上游取 `torch.accelerator.is_available()`（"机器上有加速器"），llmtuner 取
+  `should_use_pin_memory()`（"**本进程解析出的**设备是加速器"）——在"有 GPU 但 `--use_cpu`"的
+  机器上前者为 True、后者为 False；pin 内存只对加速器拷贝有意义，故 llmtuner 的判定更贴合实际，
+  且 CPU-only 机器上不会去 pin。
+  (c) `dataset.py`（6/93）与 `sources.py`（6/63）：同样只有 Configurable → dataclass + 自由函数的
+  形状变化。`dataset.py` 的 DP 分片数学被提成 `shard_for_dp`（`divmod` + `min(rank, remainder)`
+  的错位切分逐字相同，`DatasetConcat` 内联的那份也改调它，公式一致）、子策略
+  （`shuffle=False, repeat=False, dp_rank=0, dp_world_size=1`）、mix 的 `seed + index` 派生、
+  `MapDataset.mix`/`IterDataset.mix` 分派全部一致；`sources.py` 的索引 JSONL 解析、
+  `split_dataset_by_node`、streaming 不支持精确 resume 的拒绝、`load_dataset` 的一等字段与
+  kwargs 冲突校验（提成 `_reject_duplicated_hf_fields`）全部一致。
+  (d) `types.py`（3/27）与 `loader.py`（3/23）：`DatasetBuildContext`/`DatasetIterationPolicy`
+  新增 `__post_init__` 校验（已登记）；`TrainingMicrobatch` 类层次删除符合 microbatch 分叉；
+  llmtuner 另加 `Batch` dataclass（`input_ids`/`labels`，合成路径用；放这里是为了避免
+  models 层反向 import 数据源，模块 docstring 已说明）。loader 的
+  `dataset.batch(collator.num_rows_per_batch(), drop_remainder=repeat, batch_fn=collator)` 与
+  `ThreadPrefetchIterDataset` 逐字相同，差异只是"数据集图由调用方建好再传进来"（C 类单入口设计）。
+  (e) `datasets/text/text.py` ↔ 上游 `hf_datasets/text_datasets.py`：SFT 信号的三条关键规则
+  **逐字一致**——超长丢弃（`len(tokens) - 1 > max_context_length`，按 `-1` 而非全长）、prompt 段
+  labels 置 `IGNORE_INDEX`（`labels[:max(prompt_len - 1, 0)]`）、renderer 路径用
+  `~loss_mask[1:]` 掩码；`DATASETS` 注册表三项（c4/c4_test/c4_validation）同源。llmtuner 新增
+  `make_local_jsonl{,_sft,_multiturn}` 三个工厂（C 类，服务 CLI 的本地语料）与 `renderer` 参数
+  直通。**交叉验证**：llmtuner 的 tokenizer 抄的是上游 `experiments/transformers_modeling_backend/
+  tokenizer.py` 的 `apply_chat_template`（默认 `add_generation_prompt=True`），而上游 SFT 数据路径
+  用的是基础 `components/tokenizer.py` 的 tokenizer（HF 默认 False）——所以 llmtuner 的
+  `ChatProcessor` 必须显式传 `add_generation_prompt=False` 才与上游渲染一致，代码里正是这么写的，
+  该写法与它依赖的那个默认值同源。
+  (f) 环境与验证边界：`tests/unit_tests/cpu/datasets/` 的 3 个文件（含 57 例的
+  `test_data_pipeline.py`）整体被 `require_env('grain')` 门控，本机未装 grain 故**全部 skip**；
+  pyproject 钉 `grain==0.2.18`，而本机 PyPI 镜像只有 `0.2.3`（`pip install --dry-run` 甚至误报
+  可装，`pip download` 直接失败），版本不符，故**不在本机装**——装错版本会让这批用例的结论失去
+  意义。因此本轮的 `datasets/` 结论是**代码级对照**（AST 归一化 + 逐行读），不是运行期证据；
+  运行期等价性仍需在装了 grain 0.2.18 的环境复跑这 57 例。
+  (g) `datasets/` 余下未走：`random_data.py` 与 `build.py`（都是已登记的 C 类）、
+  `text/renderer.py`（已登记的可选导入适配层）、`multimodal/*`（下一轮）。`models/common/*`
+  的数值等价性（§12 第 4 项的后半）尚未开始。
+- 2026-09-28 十五次增量（`datasets/` 重构与优化）：
+  (a) **去重三处，全部行为不变**（用归一化 AST diff 逐条确认改动范围）：
+  (1) `lambda sample: sample is not None` 在 `text/text.py`（6 处）与 `multimodal/mm_datasets.py`
+  （3 处）共 9 份，提成 `dataset.py::is_not_none` —— 每个 processor 都用返回 `None` 表示"丢弃这行"，
+  过滤谓词本就只有一个；具名后九处引用读作同一契约，且谓词可 pickle。
+  (2) `if isinstance(graph, grain.MapDataset): graph = graph.to_iter_dataset(read_options=...)`
+  在 6 处重复（`packing.py` ×3、`loader.py`、`multimodal/mm_datasets.py`、`dataset.py` 的 mix 子节点），
+  提成 `dataset.py::as_iter_dataset(graph, context=...)`；`loader.py` 那处原用局部 `read_options`，
+  与它构造 context 时传入的是同一个对象，故语义一致。
+  (3) `packing.py` 的 4 键 `length_struct` 字面量出现两次（concat-then-split 与 first-fit），
+  提成模块内 `_row_lengths(context)`；`text/text.py` 的三个 `make_local_jsonl*` 工厂各自重复
+  `SingleDataset(source=IndexedJsonlSource(patterns=(path,)), ..., post_filters=...)`，提成
+  `_local_jsonl_recipe(path=, processor=)`。全部是同值替换，无行为变化。
+  (b) **一次"差一点改错"的记录（有价值，留档）**：对照上游时发现 `process_cc12_wd_sample`
+  缺了上游的 `if image is None: texts=[text]` 兜底，看起来是"缺图行会崩"的 bug——实测确认
+  `insert_vision_placeholders([None, "text"], [])` 会 `TypeError: sequence item 0: expected str
+  instance, NoneType found`。但进一步读仓内用例发现**这是本仓有意为之**：
+  `test_insert_vision_placeholders_rejects_a_slot_with_no_token_count` 与
+  `test_process_cc12_wd_sample_raises_when_the_image_field_is_absent` 把"缺图 = 样本畸形 → 响亮失败"
+  钉成了契约（上游则是静默降级为纯文本行）。故**不改行为**，只在 `process_cc12_wd_sample` 处
+  留注释说明该分叉并指向用例；差异登记于 symbol guide §6。
+  (c) 有意不动的重复：`process_cc12_wd_sample`/`_process_obelics_sample` 那份九参数显式转发表
+  与上游逐字相同（`_process_mm_sample` 的上游调用方也这么写），属"上游形状"，不为了 DRY 而偏离。
+  (d) 验证：本机**无法运行** `tests/unit_tests/cpu/datasets/`——pyproject 钉 `grain==0.2.18`，
+  而该版本在 PyPI 上只有 macOS **arm64** wheel（`macosx_11_0_arm64`），没有 x86_64，本机是 Intel
+  mac 故装不上；能装的最新版 `0.2.3` 又缺 `ConcatThenSplitIterDataset`（默认 packing 用的就是它），
+  拿它跑不能说明问题，故不装。`tests/caps.py` 的 `grain` 探针探测的是 `grain.python`（会连带 import
+  jax），所以本机这批用例继续 skip。**本轮的验证手段**：逐文件归一化 AST diff（证明"只改了预期的
+  那几处"）、`ruff check`（含 F821 未定义名检查）、以及把被修/被查函数的实际调用跑通——
+  `process_cc12_wd_sample` 在纯文本行上的行为用 sys.modules 里的 grain 桩真跑过（确认兜底会去
+  `insert_vision_placeholders` 的那条 TypeError 路径，也确认显式 raise 是当前行为）。
+  运行期等价性仍需在装对 grain 的机器（Linux/arm64 mac）复跑这 57+ 例。
 - 检查后续漂移：`git -C <torchtitan> log f35966713..HEAD -- torchtitan/`。
 - 2026-09-23 映射修订：上游 `distributed/linear.py` 已删除、内容迁入
   `models/common/dist_gemm.py`（改名 `AsyncAllGatherLinear`/`AsyncLinearReduceScatter`，

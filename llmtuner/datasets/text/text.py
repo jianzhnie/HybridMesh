@@ -22,7 +22,7 @@ import numpy as np
 
 from ...components.loss import IGNORE_INDEX
 from ...utils.logger_utils import get_logger
-from ..dataset import SampleProcessor, SingleDataset, TextSequence
+from ..dataset import SampleProcessor, SingleDataset, TextSequence, is_not_none
 from ..sources import (
     HuggingFaceRandomAccessSource,
     HuggingFaceStreamingSource,
@@ -265,17 +265,29 @@ class ChatProcessor(SampleProcessor):
         return self._tokenize_sample(sample)
 
 
+def _local_jsonl_recipe(
+    *, path: str, processor: type[SampleProcessor]
+) -> SingleDataset:
+    """One indexed JSONL file, read through ``processor``.
+
+    The three ``local_jsonl*`` factories differ only in the processor: same
+    source, same "a processor drops a row by returning ``None``" filter. Built
+    here so a new variant cannot forget either half.
+    """
+    return SingleDataset(
+        source=IndexedJsonlSource(patterns=(path,)),
+        processor=processor,
+        post_filters=(is_not_none,),
+    )
+
+
 def make_local_jsonl(*, path: str) -> SingleDataset:
     """Build the ``local_jsonl`` recipe over a caller-supplied corpus.
 
     A function rather than an entry in :data:`DATASETS`: the path is a runtime
     argument, so it cannot live in a module-level dict without a global.
     """
-    return SingleDataset(
-        source=IndexedJsonlSource(patterns=(path,)),
-        processor=TextProcessor,
-        post_filters=(lambda sample: sample is not None,),
-    )
+    return _local_jsonl_recipe(path=path, processor=TextProcessor)
 
 
 def make_local_jsonl_sft(
@@ -304,11 +316,7 @@ def make_local_jsonl_sft(
 
             super().__init__(context=context, messages_fn=messages)
 
-    return SingleDataset(
-        source=IndexedJsonlSource(patterns=(path,)),
-        processor=_LocalJsonlChatProcessor,
-        post_filters=(lambda sample: sample is not None,),
-    )
+    return _local_jsonl_recipe(path=path, processor=_LocalJsonlChatProcessor)
 
 
 def make_local_jsonl_sft_multiturn(
@@ -347,10 +355,8 @@ def make_local_jsonl_sft_multiturn(
                 context=context, messages_fn=messages, renderer=renderer
             )
 
-    return SingleDataset(
-        source=IndexedJsonlSource(patterns=(path,)),
-        processor=_LocalJsonlMultiTurnChatProcessor,
-        post_filters=(lambda sample: sample is not None,),
+    return _local_jsonl_recipe(
+        path=path, processor=_LocalJsonlMultiTurnChatProcessor
     )
 
 
@@ -362,7 +368,7 @@ DATASETS: dict[str, SingleDataset] = {
             split="train",
         ),
         processor=TextProcessor,
-        post_filters=(lambda sample: sample is not None,),
+        post_filters=(is_not_none,),
     ),
     "c4_test": SingleDataset(
         source=HuggingFaceRandomAccessSource(
@@ -373,7 +379,7 @@ DATASETS: dict[str, SingleDataset] = {
             },
         ),
         processor=TextProcessor,
-        post_filters=(lambda sample: sample is not None,),
+        post_filters=(is_not_none,),
     ),
     "c4_validation": SingleDataset(
         source=HuggingFaceStreamingSource(
@@ -382,6 +388,6 @@ DATASETS: dict[str, SingleDataset] = {
             split="validation",
         ),
         processor=TextProcessor,
-        post_filters=(lambda sample: sample is not None,),
+        post_filters=(is_not_none,),
     ),
 }

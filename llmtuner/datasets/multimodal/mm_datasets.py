@@ -78,7 +78,9 @@ from ..dataset import (
     DatasetMix,
     SampleProcessor,
     SingleDataset,
+    as_iter_dataset,
     build_dataset,
+    is_not_none,
 )
 from ..sources import HuggingFaceStreamingSource
 from ..types import DatasetBuildContext, DatasetIterationPolicy
@@ -254,6 +256,12 @@ def process_cc12_wd_sample(
     text = sample.get("txt", "")
     image = sample.get("jpg", None)
 
+    # Deliberate divergence: upstream falls back to a text-only row here, which
+    # leaves the ``None`` slot with no token count for ``insert_vision_placeholders``
+    # to expand -- llmtuner lets that raise instead. A ``cc12m-wds`` row with no
+    # ``jpg`` is malformed, not an image that failed to decode, and the sample
+    # processor drops the latter explicitly; see
+    # ``tests/unit_tests/cpu/datasets/test_multimodal_data.py``.
     texts = [None, text]
     images = [image, None]
 
@@ -359,7 +367,7 @@ MM_DATASETS: dict[str, SingleDataset] = {
             MultiModalProcessor,
             sample_processor=_process_obelics_sample,
         ),
-        post_filters=(lambda sample: sample is not None,),
+        post_filters=(is_not_none,),
     ),
     "cc12m": SingleDataset(
         source=HuggingFaceStreamingSource(
@@ -370,7 +378,7 @@ MM_DATASETS: dict[str, SingleDataset] = {
             MultiModalProcessor,
             sample_processor=process_cc12_wd_sample,
         ),
-        post_filters=(lambda sample: sample is not None,),
+        post_filters=(is_not_none,),
     ),
     "cc12m-test": SingleDataset(
         source=HuggingFaceStreamingSource(
@@ -384,7 +392,7 @@ MM_DATASETS: dict[str, SingleDataset] = {
             MultiModalProcessor,
             sample_processor=process_cc12_wd_sample,
         ),
-        post_filters=(lambda sample: sample is not None,),
+        post_filters=(is_not_none,),
     ),
 }
 
@@ -417,8 +425,7 @@ def build_mm_sample_packing(
         lambda sample: len(sample["input_ids"]) <= context.max_context_length
     )
     dataset_graph = dataset_graph.map(_mm_sample_to_packing_input)
-    if isinstance(dataset_graph, grain.MapDataset):
-        dataset_graph = dataset_graph.to_iter_dataset(read_options=context.read_options)
+    dataset_graph = as_iter_dataset(dataset_graph, context=context)
     # TODO(data-global-pack-plan): Consider packing before DP sharding so
     # ranks receive similar text and media work.
     dataset_graph = grain.experimental.FirstFitPackIterDataset(
