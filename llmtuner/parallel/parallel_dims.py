@@ -275,9 +275,19 @@ class ParallelDims:
 
         return self._world_mesh
 
-    def _validate_meshes(self):
-        """Validate that created meshes have the expected sizes."""
-        expected_sizes = {
+    def _expected_mesh_sizes(self) -> dict[str, int]:
+        """The size contract of every single-axis mesh ``build_mesh`` creates.
+
+        Split out of ``_validate_meshes`` so the contract is stated once and is
+        readable without a process group -- which is the only way to pin the
+        one deliberate divergence from upstream: ``loss`` spans ``tp`` as well
+        as ``dp`` and ``cp``. llmtuner's TP is sequence-parallel end to end, so
+        each rank's loss sum covers only its ``T / tp`` token shard; upstream's
+        TP ranks each hold the full sequence, so its ``loss`` mesh stops at
+        ``dp * cp`` and the tp reduction happens inside the vocab-parallel CE
+        instead (see the ``lm_head`` row in docs/llmtuner_upstream_map.md).
+        """
+        sizes = {
             "pp": self.pp,
             "batch": self.dp_replicate * self.dp_shard,
             "loss": self.dp_replicate * self.dp_shard * self.cp * self.tp,
@@ -287,10 +297,13 @@ class ParallelDims:
             "ep": self.ep,
             "efsdp": self.dp_shard * self.cp * self.tp // self.ep,
         }
-        expected_sizes["dp"] = self.dp_replicate * self.dp_shard
-        expected_sizes["dp_shard"] = self.dp_shard
+        sizes["dp"] = self.dp_replicate * self.dp_shard
+        sizes["dp_shard"] = self.dp_shard
+        return sizes
 
-        for mesh_name, expected_size in expected_sizes.items():
+    def _validate_meshes(self) -> None:
+        """Validate that created meshes have the expected sizes."""
+        for mesh_name, expected_size in self._expected_mesh_sizes().items():
             actual_size = self._single_axis_meshes[mesh_name].size()
             assert actual_size == expected_size, (
                 f"Mesh '{mesh_name}' has unexpected size: "

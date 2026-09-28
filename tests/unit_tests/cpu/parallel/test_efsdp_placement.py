@@ -2,7 +2,7 @@
 
 ``apply_fsdp_to_decoder`` picks ``Shard(1)`` (shard the expert *features*)
 over ``Shard(0)`` (shard the experts) when ``efsdp * ep > num_experts`` -- the
-FSDP degree over the sparse region exceeds the expert count, so sharding the
+FSDP shard size over the sparse region exceeds the expert count, so sharding the
 expert axis would pad. Upstream compares against the TOTAL expert count; the
 EP swap builds ``GroupedExperts`` per rank, so its ``num_experts`` is the local
 shard (total / ep), and reading it instead makes the condition
@@ -44,9 +44,9 @@ from llmtuner.models.common.grouped_experts import GroupedExperts
 from llmtuner.models.common.moe import MoE, RoutedExperts, TokenChoiceTopKRouter
 from llmtuner.models.common.token_dispatcher import LocalTokenDispatcher
 from llmtuner.parallel.fully_shard.fsdp import (
-    _fsdp_shard_degree,
     apply_fsdp_to_decoder,
     enable_fsdp_symm_mem,
+    fsdp_shard_size,
 )
 
 _DIM = 8
@@ -140,7 +140,7 @@ def _expert_placement(
     return captured["fn"](expert_param).placement
 
 
-def test_equal_degree_and_experts_shards_the_expert_axis(
+def test_equal_size_and_experts_shards_the_expert_axis(
     single_rank_group, monkeypatch
 ) -> None:
     """``efsdp * ep == total``: Shard(0) exactly fits; the shard-count read
@@ -149,7 +149,7 @@ def test_equal_degree_and_experts_shards_the_expert_axis(
     assert placement == Shard(0)
 
 
-def test_degree_below_experts_shards_the_expert_axis(
+def test_size_below_experts_shards_the_expert_axis(
     single_rank_group, monkeypatch
 ) -> None:
     """``efsdp * ep < total``: Shard(0); the buggy read flips this to Shard(1)
@@ -158,7 +158,7 @@ def test_degree_below_experts_shards_the_expert_axis(
     assert placement == Shard(0)
 
 
-def test_degree_above_experts_shards_the_feature_axis(
+def test_size_above_experts_shards_the_feature_axis(
     single_rank_group, monkeypatch
 ) -> None:
     """``efsdp * ep > total``: Shard(1) avoids padding the expert axis. Not a
@@ -168,7 +168,30 @@ def test_degree_above_experts_shards_the_feature_axis(
     assert placement == Shard(1)
 
 
-# -- FSDP shard degree over the dense mesh -------------------------------------
+# -- the flat Shard(1) vs upstream's Shard(ndim - 2) --------------------------
+
+
+def test_packed_expert_weights_shard_their_output_dim_at_index_one() -> None:
+    """The EP=1 override's flat ``Shard(1)`` cuts what upstream's
+    ``Shard(weight.ndim - 2)`` cuts.
+
+    Upstream derives the dim from the rank because its stacked/grouped weights
+    carry a projection axis; llmtuner packs experts along index 0 and puts the
+    output-feature dim at index 1 for all three projections. That layout is what
+    makes the flat index correct, so pin it: a reshuffle (expert axis moved, or
+    the up/down projection's feature axis swapped) would silently shard the
+    wrong segment instead of failing.
+    """
+    experts = GroupedExperts(_DIM, _HIDDEN, num_experts=2, use_grouped_mm=False)
+    E, F, D = experts.num_experts, _HIDDEN, _DIM
+    assert experts.w1_EFD.shape == (E, F, D)
+    assert experts.w3_EFD.shape == (E, F, D)
+    assert experts.w2_EDF.shape == (E, D, F)
+    for param in experts.parameters():
+        assert Shard(param.ndim - 2) == Shard(1)
+
+
+# -- FSDP shard size over the dense mesh -------------------------------------
 
 
 class _MeshStub:
@@ -189,20 +212,20 @@ class _MeshStub:
         return _MeshStub({name: self._axes[name]})
 
 
-def test_shard_degree_is_the_shard_axis_when_no_replication() -> None:
-    assert _fsdp_shard_degree(_MeshStub({"dp_shard": 4})) == 4
+def test_shard_size_is_the_shard_axis_when_no_replication() -> None:
+    assert fsdp_shard_size(_MeshStub({"dp_shard": 4})) == 4
 
 
-def test_shard_degree_folds_cp_into_the_shard_axis() -> None:
+def test_shard_size_folds_cp_into_the_shard_axis() -> None:
     """``resolve_fsdp_mesh`` flattens (dp_shard, cp) into ``dp_shard_cp``."""
-    assert _fsdp_shard_degree(_MeshStub({"dp_shard_cp": 8})) == 8
+    assert fsdp_shard_size(_MeshStub({"dp_shard_cp": 8})) == 8
 
 
-def test_shard_degree_excludes_dp_replicate() -> None:
+def test_shard_size_excludes_dp_replicate() -> None:
     """HSDP: dp_replicate=2, dp_shard=4, num_experts=4 must compare 4, not 8 --
     counting the replicate axis mis-picks Shard(1) for the experts."""
-    assert _fsdp_shard_degree(_MeshStub({"dp_replicate": 2, "dp_shard": 4})) == 4
-    assert _fsdp_shard_degree(_MeshStub({"dp_replicate": 2, "dp_shard_cp": 8})) == 8
+    assert fsdp_shard_size(_MeshStub({"dp_replicate": 2, "dp_shard": 4})) == 4
+    assert fsdp_shard_size(_MeshStub({"dp_replicate": 2, "dp_shard_cp": 8})) == 8
 
 
 # -- symmetric-memory scope -----------------------------------------------------

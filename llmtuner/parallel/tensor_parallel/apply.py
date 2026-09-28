@@ -57,8 +57,8 @@ def apply_tp(
     # model's own config is the first place the counts exist.
     require_heads_divisible_by(
         model,
-        degree=cfg.tp,
-        divisor="tp",
+        size=cfg.tp,
+        axis="tp",
         why=(
             "tensor parallelism shards attention heads across the TP group, so "
             "each rank must hold a whole number of heads"

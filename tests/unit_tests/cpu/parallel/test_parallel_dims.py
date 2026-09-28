@@ -175,6 +175,28 @@ def test_a_multi_axis_request_returns_one_mesh_from_the_cache(
     assert first is second
 
 
+def test_the_loss_mesh_spans_tp_as_well_as_dp_and_cp() -> None:
+    """llmtuner's one mesh divergence from upstream, pinned without a group.
+
+    Upstream's loss mesh is ``dp * cp``: its TP ranks each hold the whole
+    sequence, so the tp reduction happens inside the vocab-parallel CE.
+    llmtuner's TP is sequence-parallel end to end, so a rank's loss sum covers
+    only its ``T / tp`` token shard and the reduce group has to span tp too --
+    which is exactly what the trainer gates on (``dp_cp_enabled or tp_enabled``
+    picks ``"loss"`` over ``"dp"``). Reading the size contract off a
+    ``ParallelDims`` that never built a mesh is the point: the mesh-level test
+    of the same thing needs a process group, and this is the claim a future
+    refactor would silently flip to upstream's.
+    """
+    dims = _dims(world_size=8, dp_shard=2, cp=2, tp=2)
+    sizes = dims._expected_mesh_sizes()
+
+    assert sizes["batch"] == 2  # dp * dp_shard, tp not folded in
+    assert sizes["cp"] == 2
+    assert sizes["tp"] == 2
+    assert sizes["loss"] == sizes["batch"] * sizes["cp"] * sizes["tp"] == 8
+
+
 # -- config resolution: derive_dp and build_parallel_dims ---------------------
 
 
@@ -256,8 +278,9 @@ def test_cp_only_still_needs_a_loss_reduction() -> None:
     process group (``get_optional_mesh`` builds meshes). The sizes themselves
     are pinned by the ``expected_sizes`` table in ``parallel_dims.py``, which
     is what makes the property sufficient: ``loss`` is defined there as
-    ``dp_replicate * dp_shard * cp``, so choosing it is choosing a group that
-    spans the cp axis. The end-to-end version runs under torchrun in
+    ``dp_replicate * dp_shard * cp * tp``, so choosing it is choosing a group
+    that spans both the cp and the tp axis. The end-to-end version runs under
+    torchrun in
     ``tests/integration_tests/cp_wiring_equivalence.py``.
     """
     cfg = _config(data_parallel_shard_size=1, context_parallel_size=2)

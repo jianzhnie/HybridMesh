@@ -86,6 +86,21 @@ from .. import matrix
 logger = get_logger(__name__)
 
 
+__all__ = [
+    "FusedExperts",
+    "fused_experts_of",
+    "ignores_norm_topk_prob",
+    "is_hf_moe_block",
+    "moe_block_of",
+    "read_expert_groups",
+    "read_route_norm",
+    "read_route_scale",
+    "resolve_score_func",
+    "resolve_top_k",
+    "router_of",
+]
+
+
 def router_of(block: nn.Module) -> nn.Module | None:
     """The block's router module, whatever the family calls it.
 
@@ -207,10 +222,10 @@ def is_hf_moe_block(module: nn.Module) -> bool:
         raise
     if experts is None:
         return False
-    return _has_router_weight(router_of(module)) and _resolve_top_k(module) is not None
+    return _has_router_weight(router_of(module)) and resolve_top_k(module) is not None
 
 
-def _resolve_top_k(block: nn.Module) -> int | None:
+def resolve_top_k(block: nn.Module) -> int | None:
     """Top-K per token, from the block or its router."""
     for owner in (block, router_of(block)):
         if owner is None:
@@ -259,10 +274,10 @@ def read_route_norm(block: nn.Module, router: nn.Module) -> bool:
         value = getattr(owner, "norm_topk_prob", None)
         if value is not None:
             return bool(value)
-    return _resolve_score_func(block, router) != "sigmoid"
+    return resolve_score_func(block, router) != "sigmoid"
 
 
-def _resolve_score_func(block: nn.Module, router: nn.Module) -> str:
+def resolve_score_func(block: nn.Module, router: nn.Module) -> str:
     """The router's scoring function.
 
     ``e_score_correction_bias`` is the reliable DeepSeek-V3/GLM4 marker: a router

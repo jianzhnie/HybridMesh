@@ -51,11 +51,12 @@ STAGES: tuple[Stage, ...] = (
     ),
     Stage(
         "ac",
-        False,
+        True,
         "After the sharding wrappers (it must enclose the TP/CP-modified "
         "layer), before compile and FSDP -- torchtitan's order in "
-        "``parallelize_llama``. Not on the PP path "
-        "(matrix.pp_activation_checkpoint).",
+        "``parallelize_llama``. On the PP path too: upstream hands "
+        "``ac_config`` to each model part's own ``parallelize`` call, so each "
+        "stage's chunk is checkpointed on its own layers.",
     ),
     Stage(
         "compile",

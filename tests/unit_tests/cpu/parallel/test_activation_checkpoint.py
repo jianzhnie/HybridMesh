@@ -35,6 +35,8 @@ require_env(
 )
 
 
+from types import SimpleNamespace
+
 import pytest
 import torch
 from torch.distributed.algorithms._checkpoint.checkpoint_wrapper import (
@@ -50,6 +52,7 @@ from llmtuner.config import (
 )
 from llmtuner.models.hf_factory import build_model_config
 from llmtuner.models.hf_wrapper import HFTransformerModel
+from llmtuner.parallel import activation_checkpoint as ac_mod
 from llmtuner.parallel.activation_checkpoint import (
     VALID_AC_MODES,
     _get_default_save_ops,
@@ -172,6 +175,129 @@ def test_parallelize_hf_transformers_threads_selective_ac() -> None:
     )
 
     assert all(isinstance(layer, CheckpointWrapper) for layer in model.layers)
+
+
+# -- the pp path --------------------------------------------------------------
+
+
+class _FakeParallelDims:
+    """Just enough of ``ParallelDims`` for the pp branch to be entered.
+
+    The branch reads ``pp_enabled``, asks for the dense and tp meshes (both
+    ``None``: this test's tp is 1) and hands ``parallel_dims`` to
+    ``apply_fsdp``, which is monkeypatched out -- what is pinned here is the
+    per-chunk stage list, not the mesh plumbing.
+    """
+
+    pp_enabled = True
+
+    @staticmethod
+    def spmd_dense_mesh():
+        return None
+
+    @staticmethod
+    def get_optional_mesh(name):
+        return None
+
+
+def test_the_pp_path_checkpoints_every_stage_chunk(monkeypatch) -> None:
+    """AC is a stage on the pp path too, applied per chunk.
+
+    Upstream hands ``ac_config`` to each model part's own ``parallelize`` call,
+    so a stage's chunk is checkpointed on the layers it holds. llmtuner used to
+    refuse AC outright when ``pp > 1``; this is that refusal gone.
+    """
+    part = _model()
+    stages = [SimpleNamespace(submod=part)]
+    monkeypatch.setattr(
+        "llmtuner.parallel.parallelize.apply_pp",
+        lambda model, **kwargs: (stages, [part], True, True),
+    )
+    monkeypatch.setattr(
+        "llmtuner.parallel.parallelize.build_pipeline_schedule",
+        lambda schedule_stages, **kwargs: None,
+    )
+    monkeypatch.setattr(
+        "llmtuner.parallel.parallelize.apply_fsdp", lambda m, cfg, parallel_dims: m
+    )
+
+    setup = parallelize_hf_transformers(
+        _model(),
+        cfg=ParallelConfig(),
+        mesh=None,
+        parallel_dims=_FakeParallelDims(),
+        activation_checkpoint="full",
+        global_batch_size=2,
+    )
+
+    assert all(
+        isinstance(layer, CheckpointWrapper) for layer in setup.model_parts[0].layers
+    )
+    # ``stage.submod`` is rebound when a transform replaces the chunk, so the
+    # schedule runs the checkpointed layers and not the pre-wrap module.
+    assert setup.stages[0].submod is setup.model_parts[0]
+
+
+def test_the_pp_path_is_a_no_op_when_ac_is_off(monkeypatch) -> None:
+    """The other half of the refusal: mode 'none' still assembles, unwrapped."""
+    part = _model()
+    monkeypatch.setattr(
+        "llmtuner.parallel.parallelize.apply_pp",
+        lambda model, **kwargs: ([SimpleNamespace(submod=part)], [part], True, True),
+    )
+    monkeypatch.setattr(
+        "llmtuner.parallel.parallelize.build_pipeline_schedule",
+        lambda schedule_stages, **kwargs: None,
+    )
+    monkeypatch.setattr(
+        "llmtuner.parallel.parallelize.apply_fsdp", lambda m, cfg, parallel_dims: m
+    )
+
+    setup = parallelize_hf_transformers(
+        _model(),
+        cfg=ParallelConfig(),
+        mesh=None,
+        parallel_dims=_FakeParallelDims(),
+        global_batch_size=2,
+    )
+
+    assert not any(
+        isinstance(layer, CheckpointWrapper) for layer in setup.model_parts[0].layers
+    )
+
+
+# -- the dynamo cache workaround ----------------------------------------------
+
+
+def test_the_dynamo_cache_workaround_sets_the_knob_when_present(monkeypatch) -> None:
+    """Upstream's SAC+PP fix: select compiled graphs in insertion order.
+
+    Two graphs are valid once a second microbatch recompiles with dynamic
+    shapes, and dynamo's default latest-wins selection can hand back the one
+    whose wrapper wants an extra symint that SAC's cached HOP output lacks.
+    """
+    seen: list[bool] = []
+    monkeypatch.setattr(
+        torch._C._dynamo.eval_frame, "_set_lru_cache", seen.append, raising=False
+    )
+    monkeypatch.setattr(ac_mod, "has", lambda name: name == "dynamo_lru_cache")
+
+    apply_ac(_model(), "full")
+
+    assert seen == [False]
+
+
+def test_the_dynamo_cache_workaround_is_skipped_without_the_knob(monkeypatch) -> None:
+    """Older torch has no knob, so AC still runs -- it just cannot apply it."""
+    seen: list[bool] = []
+    monkeypatch.setattr(
+        torch._C._dynamo.eval_frame, "_set_lru_cache", seen.append, raising=False
+    )
+    monkeypatch.setattr(ac_mod, "has", lambda name: False)
+
+    apply_ac(_model(), "full")
+
+    assert seen == []
 
 
 # -- memory_budget ------------------------------------------------------------

@@ -104,8 +104,8 @@ def apply_cp(
         # tp * cp (upstream's head_shard_degree in config/validation.py).
         require_heads_divisible_by(
             model,
-            degree=cfg.tp * cp_mesh.size(),
-            divisor="tp*cp",
+            size=cfg.tp * cp_mesh.size(),
+            axis="tp*cp",
             why=(
                 f"ulysses splits each TP rank's local heads across the CP group "
                 f"(tp={cfg.tp}, cp={cp_mesh.size()}), so the global count must "

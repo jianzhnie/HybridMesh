@@ -48,11 +48,14 @@ Not ported, deliberately:
   ``"region"`` is a loud ``NotImplementedError`` at both the config and the
   ``apply_ac`` boundary; unlocking it means adding the ``torch_remat``
   dependency plus a region-declaration channel on HF decoder layers.
-* ``_disable_dynamo_lru_cache``. It works around a SAC-with-pipeline-parallel
-  recompilation interaction, and llmtuner refuses activation checkpointing on the
-  ``pp > 1`` path outright (see ``parallelize``), so the case it fixes is
-  unreachable here. It also mutates a process-global dynamo knob, which is not
-  something to do speculatively (see https://github.com/pytorch/pytorch/issues/166926).
+
+Upstream's ``_disable_dynamo_lru_cache`` IS ported, because the case it fixes
+is reachable here: activation checkpointing applies on the ``pp > 1`` path too
+(per stage chunk, upstream's ``ac_config``-per-model-part order). It is the
+only place that touches that process-global knob, it runs only when a mode is
+actually applied, and it is capability-guarded -- the knob is absent from the
+torch 2.2.2 build this repo develops against, where the function logs and
+returns instead of failing the run.
 
 The remaining deviation from upstream is the entry point: torchtitan selects a
 policy by instantiating an ``ActivationCheckpointing`` subclass, llmtuner by
@@ -269,6 +272,34 @@ def _wrap_selective(
     )
 
 
+def _disable_dynamo_lru_cache() -> None:
+    """Select dynamo graphs in insertion order (upstream's SAC+PP workaround).
+
+    With activation checkpointing and pipeline parallelism together, a second
+    microbatch's forward recompiles with dynamic shapes enabled, so two valid
+    compiled graphs exist for the same region. Dynamo's default latest-wins
+    (LRU) selection can then hand back the one whose runtime wrapper expects
+    an extra symint output, which SAC's cached inductor-HOP output does not
+    carry, and the assertion fails; insertion order avoids it. See
+    https://github.com/pytorch/pytorch/issues/166926.
+
+    Upstream calls this at the top of every policy's ``apply``, not only on
+    the PP path, and so does this module -- but only when a mode is actually
+    being applied, and only where the knob exists. It is a process-global,
+    private torch setting: this is the one place that touches it.
+    """
+    if not has("dynamo_lru_cache"):
+        logger.info(
+            "torch %s has no torch._C._dynamo.eval_frame._set_lru_cache; "
+            "activation checkpointing runs without upstream's SAC + "
+            "pipeline-parallel cache workaround.",
+            torch.__version__,
+        )
+        return
+    # pyrefly: ignore [missing-attribute]
+    torch._C._dynamo.eval_frame._set_lru_cache(False)
+
+
 def _apply_memory_budget(cfg: MemoryBudgetACConfig) -> None:
     """Set the one global ``"memory_budget"`` consists of (upstream's
     ``MemoryBudgetAC.apply``).
@@ -276,6 +307,9 @@ def _apply_memory_budget(cfg: MemoryBudgetACConfig) -> None:
     The partitioner reads ``activation_memory_budget`` at compile time, so on
     a torch without that knob setting it would be a silent no-op -- refuse
     instead. Upstream never restores the global; it is a per-run setting.
+    Upstream's ``apply`` sets the dynamo cache selection before touching the
+    budget; the same order here, but after the check, so a config this torch
+    cannot honour mutates nothing.
     """
     if not has("functorch_activation_memory_budget"):
         raise NotImplementedError(
@@ -284,6 +318,7 @@ def _apply_memory_budget(cfg: MemoryBudgetACConfig) -> None:
             f"torch ({torch.__version__}) does not have; the budget would be "
             "a global nothing reads."
         )
+    _disable_dynamo_lru_cache()
     torch._functorch.config.activation_memory_budget = cfg.memory_budget
     logger.info("Selected %s memory budget option", cfg.memory_budget)
 
@@ -368,6 +403,11 @@ def apply_ac(
             f"apply_ac expects a HFTransformerModel (with .layers); got "
             f"{type(model).__name__}."
         )
+
+    # Upstream sets this before wrapping, for every policy; so does the
+    # memory_budget branch above (inside ``_apply_memory_budget``). Placed
+    # after the checks so a rejected config never mutates a global.
+    _disable_dynamo_lru_cache()
 
     for layer_id, transformer_block in layers.named_children():
         if mode == "selective":

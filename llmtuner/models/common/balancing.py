@@ -3,7 +3,7 @@
 Split out of ``moe.py``: the sign-based bias update
 (``register_moe_load_balancing_hook``) and the quantile-histogram update
 (``register_moe_quantile_balancing_hook``), plus their reduction helpers.
-Both are optimizer step pre-hooks over the MoE blocks ``_iter_moe_layers``
+Both are optimizer step pre-hooks over the MoE blocks ``iter_moe_layers``
 finds; the blocks themselves and the routers live in ``moe.py`` /
 ``routers.py``.
 """
@@ -18,7 +18,7 @@ import torch.nn as nn
 
 from llmtuner.accelerator.dist import all_reduce
 
-from .moe import MoE, _iter_moe_layers
+from .moe import MoE, iter_moe_layers
 from .routers import QuantileBalancedTopKRouter
 
 if TYPE_CHECKING:
@@ -105,7 +105,7 @@ def register_moe_load_balancing_hook(
     working setup while the rest drift (torchtitan makes the same check in
     ``_should_register_moe_balancing_hook``).
     """
-    mappers = [(part, _iter_moe_layers(part)) for part in model_parts]
+    mappers = [(part, iter_moe_layers(part)) for part in model_parts]
     all_layers = [moe for _, layers in mappers for moe in layers]
     if not all_layers:
         return
@@ -186,7 +186,7 @@ def register_moe_quantile_balancing_hook(
     working setup while the load-balance hook either no-ops or raises on the
     inconsistent coeff configuration.
     """
-    all_layers = [moe for part in model_parts for moe in _iter_moe_layers(part)]
+    all_layers = [moe for part in model_parts for moe in iter_moe_layers(part)]
     quantile_layers = [
         moe
         for moe in all_layers

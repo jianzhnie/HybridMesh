@@ -32,7 +32,7 @@ from llmtuner.models.common.moe import (
     MoE,
     RoutedExperts,
     TokenChoiceTopKRouter,
-    _iter_moe_layers,
+    iter_moe_layers,
     register_moe_load_balancing_hook,
     update_expert_bias,
 )
@@ -75,7 +75,7 @@ def _moe(*, coeff: float | None = 0.1) -> MoE:
 
 
 class _Holder(torch.nn.Module):
-    """Stands in for a model part: ``_iter_moe_layers`` walks ``.layers``."""
+    """Stands in for a model part: ``iter_moe_layers`` walks ``.layers``."""
 
     def __init__(self, moes: list[MoE | None]) -> None:
         super().__init__()
@@ -248,7 +248,7 @@ def test_a_dense_layer_among_sparse_ones_is_skipped() -> None:
     sparse = _moe()
     model = _Holder([sparse, None, None])
 
-    assert _iter_moe_layers(model) == [sparse]
+    assert iter_moe_layers(model) == [sparse]
 
 
 def test_the_hook_updates_a_real_swapped_model() -> None:
@@ -285,7 +285,7 @@ def test_the_hook_updates_a_real_swapped_model() -> None:
     model = HFTransformerModel(config).float().eval()
     assert swap_hf_moe_blocks(model) == 2
 
-    layers = _iter_moe_layers(model)
+    layers = iter_moe_layers(model)
     assert len(layers) == 2, "the hook cannot see the swapped-in blocks"
 
     optimizer = torch.optim.SGD([torch.nn.Parameter(torch.zeros(1))], lr=0.1)
@@ -326,7 +326,7 @@ def test_every_layer_of_every_part_is_updated() -> None:
     for moe in (a, b, c):
         moe.tokens_per_expert_E.copy_(torch.tensor([10.0, 0.0, 5.0, 5.0]))
 
-    update_expert_bias([(p, _iter_moe_layers(p)) for p in parts], parallel_dims=None)
+    update_expert_bias([(p, iter_moe_layers(p)) for p in parts], parallel_dims=None)
 
     for moe in (a, b, c):
         assert float(moe.expert_bias_E[1]) > 0, "a layer was skipped"

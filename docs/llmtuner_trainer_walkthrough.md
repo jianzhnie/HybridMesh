@@ -258,9 +258,16 @@ per-rank token 数（Grain）与 global batch + 行切片（synthetic）是两�
 
 ## 12. 尚未走查（下一批）
 
-1. `llmtuner/config/`（九个 group 的字段级对齐与 `from_groups` graft 表）。
+1. ~~`llmtuner/config/`（九个 group 的字段级对齐与 `from_groups` graft 表）~~ ——
+   已完成（2026-09-27 五次增量：字段级复核 + `cli.py` 视图 + CP 默认值对齐）。
 2. `llmtuner/parallel/`（`stages.py` 的 stage 表 vs 上游 `parallelize` 顺序；`matrix.py`
-   守卫 vs 上游配置校验；TP 的 SP 布局 vs 上游 `enable_sp`，即 D14 的根治方案）。
+   守卫 vs 上游配置校验；TP 的 SP 布局 vs 上游 `enable_sp`，即 D14 的根治方案）——
+   进行中：stage 表/守卫已复核（2026-09-27 六次增量，`activation_checkpoint.py` 对齐），
+   `parallel_dims.py` 已复核（2026-09-28 七次增量）、`fully_shard/fsdp.py` 已复核
+   （八次增量）、`context_parallel/` 的输入分片面已复核（九次增量）；
+   `context_parallel/cp_kernel.py` ↔ 上游 `models/common/cp_attention.py` 与
+   `accelerator/dist_utils.py`（上游 `distributed/utils.py`）仍待走；TP/SP 布局的根治
+   （D14）需要多卡。
 3. `llmtuner/components/`（checkpointer/metrics/profiler/optimizer）。
 4. `llmtuner/datasets/`、`llmtuner/models/common/*` 的数值等价性。
 5. D18 的实现（PP×校验），以及任何运行期/数值等价性验证——都需要 torch≥2.12 + 多卡，

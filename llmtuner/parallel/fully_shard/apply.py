@@ -28,8 +28,8 @@ from llmtuner.config import ParallelConfig
 from ...accelerator import dist_utils
 from ..parallel_dims import ParallelDims
 from .fsdp import (
-    _iter_fsdp_modules,
     apply_fsdp_to_decoder,
+    iter_fsdp_modules,
     resolve_fsdp_mesh,
     resolve_sparse_fsdp_mesh,
 )
@@ -45,7 +45,7 @@ def _force_sum_grad_reduction(model: torch.nn.Module) -> None:
     implements it, so every other backend raises. Forcing plain SUM gives up
     that optimization, which is why the caller only turns it on off-NCCL.
     """
-    for module in _iter_fsdp_modules(model):
+    for module in iter_fsdp_modules(model):
         module.set_force_sum_reduction_for_comms(True)
 
 

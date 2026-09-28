@@ -91,8 +91,10 @@ class AuxLoss(nn.Module):
         coeff: scales the loss's gradient contribution.
         reduce_mesh: mesh the per-step metric is summed over -- ``"batch"``
             (dp) for cp-identical losses like the microbatch-wise load-balance
-            loss, ``"loss"`` (dp+cp) for per-token-additive losses whose
-            rank-local values add up across coordinates.
+            loss, ``"loss"`` (dp, cp and tp: llmtuner's TP is sequence-parallel,
+            so a rank's loss covers only its ``T / tp`` token shard) for
+            per-token-additive losses whose rank-local values add up across
+            coordinates.
 
     Normalization: ``denominator`` is the step's global valid-token count, set
     by the trainer via ``set_step_denominator`` before the first forward.

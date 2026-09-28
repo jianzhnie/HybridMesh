@@ -114,7 +114,7 @@ CLI 用 `HfArgumentParser` 把九个配置组摊平成扁平旗标（`--tensor_p
 | TP         | `--tensor_parallel_size`         | `parallel/tensor_parallel/`   | 已落地；TP 天然 sequence-parallel（`enable_sequence_parallel=false` 直接拒绝）；头数须整除 `tp`，装配期即拒绝 |
 | CP         | `--context_parallel_size`        | `parallel/context_parallel/`  | 已落地：kv_allgather / ulysses，varlen 与 packed 支持，headtail 负载均衡       |
 | EP         | `--expert_parallel_size`         | `parallel/expert_parallel/`   | 已落地：Qwen3Moe / OLMoE / Mixtral / DeepSeek-V2/V3 / GLM4 的可表示布局        |
-| PP         | `--pipeline_parallel_size`       | `parallel/pipeline_parallel/` | 1F1B / Interleaved1F1B 闭环 + DCP 续训；数值等价性有未闭合项，见下             |
+| PP         | `--pipeline_parallel_size`       | `parallel/pipeline_parallel/` | 1F1B / Interleaved1F1B 闭环 + DCP 续训，AC 逐 chunk 折层（同上游）；数值等价性有未闭合项，见下 |
 
 被**明确拒绝**的组合（全部 loud-raise，逐行对应 `parallel/matrix.py` 的表）：
 
@@ -124,7 +124,7 @@ CLI 用 `HfArgumentParser` 把九个配置组摊平成扁平旗标（`--tensor_p
 | `pp > 1` × (`cp > 1` 或 `ep > 1`)                               | 拒绝；CP 切的是 schedule 消费的 batch，EP 按 chunk 换 MoE 块，两条路径都没穿过 PP                                  |
 | `pp > 1` × 真实语料                                             | 拒绝；打包语料的逐 token positions 没有穿过 schedule                                                               |
 | `pp > 1` × 权重绑定                                             | 拒绝；embedding 在第一 stage、head 在最后 stage，各自深拷贝会训练出两份共享权重                                    |
-| `pp > 1` × chunked loss / activation checkpointing / validation | 拒绝；三者的接缝都在 PP 训练驱动器之外                                                                             |
+| `pp > 1` × chunked loss / validation                            | 拒绝；两者的接缝都在 PP 训练驱动器之外                                                                             |
 | shared-expert 块 × `tp > 1`                                     | 拒绝；dense colwise/rowwise realizer 与 MoE 序列边界 collective 的组合未验证（`ep > 1` 时由 EP swap 负责共享专家） |
 | `ulysses` × 负载均衡器                                          | 拒绝；每个 rank 按 all-to-all 到达顺序注意力，重排会让语料变成置换后的序列（静默训错，因此必须拒绝）               |
 | `ptrr` 负载均衡器                                               | 未实现（依赖 BlockMask，CP kernel 不消费）                                                                         |

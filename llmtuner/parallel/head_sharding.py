@@ -53,21 +53,21 @@ def head_counts(model: nn.Module) -> list[tuple[str, int]]:
 def require_heads_divisible_by(
     model: nn.Module,
     *,
-    degree: int,
-    divisor: str,
+    size: int,
+    axis: str,
     why: str,
 ) -> None:
-    """Raise unless every attention head count divides ``degree``.
+    """Raise unless every attention head count divides ``size``.
 
-    ``divisor`` names the degree in the message (``"tp"``, ``"tp*cp"``) and
-    ``why`` gives the one-line reason that degree divides heads, so each call
-    site carries its own argument rather than sharing a vague one. A degree of 1
-    is the disabled axis and is never checked.
+    ``axis`` names the parallelism whose size this is (``"tp"``, ``"tp*cp"``)
+    and ``why`` gives the one-line reason that axis divides heads, so each call
+    site carries its own argument rather than sharing a vague one. A size of 1 is
+    the disabled axis and is never checked.
     """
-    if degree <= 1:
+    if size <= 1:
         return
     for field, count in head_counts(model):
-        if count % degree:
+        if count % size:
             raise ValueError(
-                f"{field} ({count}) must be divisible by {divisor} ({degree}): {why}"
+                f"{field} ({count}) must be divisible by {axis} ({size}): {why}"
             )

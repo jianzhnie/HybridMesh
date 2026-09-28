@@ -12,6 +12,7 @@ ALL_NAMES = [
     "fx_regional_inductor",
     "symm_mem",
     "functorch_activation_memory_budget",
+    "dynamo_lru_cache",
     "torch_grouped_mm",
 ]
 

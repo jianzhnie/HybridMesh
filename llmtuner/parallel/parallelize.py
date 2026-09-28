@@ -10,7 +10,7 @@ same call runs from a single device up to a full hybrid mesh.
 
 PP is the exception to "one model in, one model out": with ``pp > 1`` the model
 is cut into per-stage chunks first (``pipeline_parallel.apply_pp``), each chunk
-then goes through TP / compile / FSDP here in the same relative order as the
+then goes through TP / AC / compile / FSDP here in the same relative order as the
 unsplit path, and the caller gets back a ``PipelineParallelSetup`` (stages,
 chunks, schedule) instead of a model.
 
@@ -48,7 +48,6 @@ from llmtuner.config import (
 )
 
 from ..utils.logger_utils import get_logger
-from . import matrix
 from .activation_checkpoint import apply_ac
 from .compile import apply_compile
 from .context_parallel import apply_cp
@@ -90,15 +89,34 @@ def parallelize_hf_transformers(
     ``selective_ac`` / ``memory_budget_ac`` are read only when
     ``activation_checkpoint`` names their mode (``'selective'`` /
     ``'memory_budget'``; the latter also requires ``compile=True``).
+    Those AC arguments reach both paths through the one ``_apply_ac`` below,
+    so the split path cannot checkpoint with a different policy than the
+    unsplit one.
 
     Returns the (possibly wrapped) model -- or, with ``pp > 1``, a
     ``PipelineParallelSetup``: pipeline parallelism cuts the model into
     per-stage chunks, so there is no single module left to return. The two
     return shapes are how the caller learns which case it is in.
     """
+
+    def _apply_ac(m: nn.Module) -> nn.Module:
+        """The ``ac`` stage, shared by the unsplit and PP paths.
+
+        One definition because both paths must checkpoint identically: the
+        split path's chunks are the same layers, wrapped on whatever stage
+        they landed on (upstream hands ``ac_config`` to each model part's own
+        ``parallelize`` call the same way). ``apply_ac`` is a no-op at mode
+        ``'none'``, so no caller needs to check the mode first.
+        """
+        return apply_ac(
+            m,
+            activation_checkpoint,
+            selective=selective_ac,
+            memory_budget=memory_budget_ac,
+            compile_enabled=compile,
+        )
+
     if parallel_dims is not None and parallel_dims.pp_enabled:
-        if activation_checkpoint != "none":
-            matrix.pp_activation_checkpoint()
         if global_batch_size is None:
             raise ValueError(
                 "pp > 1 needs global_batch_size for microbatch validation; "
@@ -107,7 +125,7 @@ def parallelize_hf_transformers(
         # apply_pp is PP-only: stage count, split, and the per-stage views.
         # The per-chunk application of the other dimensions lives here, so
         # this file is the single owner of the assembly order on both paths:
-        # each stage's chunk goes through tp/(compile)/fsdp in the same
+        # each stage's chunk goes through tp/ac/(compile)/fsdp in the same
         # relative order as the unsplit path below. The dense (dp, cp, tp)
         # view excludes the pp axis, so it covers exactly this stage's
         # coordinates -- the mesh the per-part apply_* functions would have
@@ -124,6 +142,7 @@ def parallelize_hf_transformers(
         tp_mesh = parallel_dims.get_optional_mesh("tp")
         pp_runners = {
             "tp": lambda m: apply_tp(m, dense_mesh, cfg),
+            "ac": _apply_ac,
             "compile": lambda m: apply_compile(
                 m, compile_config=compile_config, tp_mesh=tp_mesh
             ),
@@ -176,13 +195,7 @@ def parallelize_hf_transformers(
         "tp": lambda m: apply_tp(m, mesh, cfg),
         "ep": lambda m: apply_ep(m, cfg, ep_group=ep_group),
         "cp": lambda m: apply_cp(m, mesh, cfg),
-        "ac": lambda m: apply_ac(
-            m,
-            activation_checkpoint,
-            selective=selective_ac,
-            memory_budget=memory_budget_ac,
-            compile_enabled=compile,
-        ),
+        "ac": _apply_ac,
         # ``parallel/compile.py``: whole-model compile by default (the
         # historical behavior), per-block compile and the three compile-side
         # toggles (async TP, regional_inductor, capture_scalar_outputs)

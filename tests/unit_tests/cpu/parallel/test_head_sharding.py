@@ -38,8 +38,8 @@ def _model(num_attention_heads=None, num_key_value_heads=None) -> torch.nn.Modul
     return model
 
 
-def _check(model, degree: int, divisor: str = "tp") -> None:
-    require_heads_divisible_by(model, degree=degree, divisor=divisor, why="because")
+def _check(model, size: int, axis: str = "tp") -> None:
+    require_heads_divisible_by(model, size=size, axis=axis, why="because")
 
 
 def test_division_is_the_whole_rule() -> None:
@@ -89,7 +89,7 @@ def test_a_model_with_no_attention_config_is_skipped() -> None:
     _check(config_less, 16)
 
 
-def test_the_degree_one_axis_is_never_checked() -> None:
+def test_the_size_one_axis_is_never_checked() -> None:
     """tp=1 / cp=1 is the disabled axis: an odd head count is legal there, and
     a '2 heads do not divide 1' style message would be nonsense."""
     _check(_model(3, 1), 1)
@@ -97,6 +97,6 @@ def test_the_degree_one_axis_is_never_checked() -> None:
 
 def test_both_counts_are_reported_independently() -> None:
     """One bad count must not mask the other, and the message carries the
-    divisor the caller named -- 'tp*cp' for the ulysses call site."""
+    axis the caller named -- 'tp*cp' for the ulysses call site."""
     with pytest.raises(ValueError, match=r"must be divisible by tp\*cp \(4\)"):
-        _check(_model(4, 2), 4, divisor="tp*cp")
+        _check(_model(4, 2), 4, axis="tp*cp")

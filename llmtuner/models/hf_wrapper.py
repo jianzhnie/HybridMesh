@@ -59,7 +59,7 @@ from .common.masks import (
     get_causal_mask_mod,
     get_document_mask_mod,
 )
-from .common.moe import _iter_moe_layers
+from .common.moe import iter_moe_layers
 from .hf_factory import _ATTN_IMPLEMENTATION, resolve_model_class, unwrap_text_config
 
 logger = get_logger(__name__)
@@ -764,7 +764,7 @@ class HFTransformerModel(nn.Module):
         # Stage the padding mask on every MoE block -- including ``None``, so
         # a mask from a previous microbatch can never survive into this one.
         # Each block consumes its staged mask on its forward, once.
-        for moe in _iter_moe_layers(self):
+        for moe in iter_moe_layers(self):
             moe.set_padding_mask(padding_mask)
 
         # A HF decoder expects a batch dim; the wrapper's contract is flat.

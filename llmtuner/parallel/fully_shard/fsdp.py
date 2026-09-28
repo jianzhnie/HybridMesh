@@ -14,6 +14,18 @@ from ..parallel_dims import ParallelDims
 
 logger = get_logger(__name__)
 
+__all__ = [
+    "apply_fsdp_to_decoder",
+    "disable_fsdp_gradient_division",
+    "enable_fsdp_symm_mem",
+    "fsdp_shard_size",
+    "get_fsdp_reshard_after_forward_policy",
+    "iter_fsdp_modules",
+    "iter_transformer_layers",
+    "resolve_fsdp_mesh",
+    "resolve_sparse_fsdp_mesh",
+]
+
 
 def iter_transformer_layers(layers: nn.Module) -> Iterator[tuple[Any, nn.Module]]:
     """Yield ``(index, block)`` for the transformer block container.
@@ -101,7 +113,7 @@ def resolve_sparse_fsdp_mesh(parallel_dims: ParallelDims) -> DeviceMesh | None:
     return submesh
 
 
-def _iter_fsdp_modules(model: nn.Module) -> Iterator[FSDPModule]:
+def iter_fsdp_modules(model: nn.Module) -> Iterator[FSDPModule]:
     """Yield every ``FSDPModule`` under ``model`` (``ReplicateModule`` included)."""
     for module in model.modules():
         if isinstance(module, FSDPModule):
@@ -120,12 +132,12 @@ def disable_fsdp_gradient_division(model: nn.Module) -> None:
     Args:
         model: The model containing FSDP-wrapped or Replicate-wrapped modules
     """
-    for module in _iter_fsdp_modules(model):
+    for module in iter_fsdp_modules(model):
         module.set_gradient_divide_factor(1.0)
 
 
-def _fsdp_shard_degree(dp_mesh: DeviceMesh) -> int:
-    """The degree by which FSDP shards dim 0 over ``dp_mesh``.
+def fsdp_shard_size(dp_mesh: DeviceMesh) -> int:
+    """How many ranks FSDP shards a parameter's dim 0 over, on ``dp_mesh``.
 
     FSDP cuts a parameter's dim 0 only over its shard axes: ``dp_shard``,
     plus ``cp`` when CP is on (``resolve_fsdp_mesh`` folds the two into
@@ -156,7 +168,7 @@ def enable_fsdp_symm_mem(model: nn.Module, scope: str | None = "all") -> None:
             f"enable_fsdp_symm_mem scope must be one of 'all', 'dense', None; "
             f"got {scope!r}"
         )
-    for module in _iter_fsdp_modules(model):
+    for module in iter_fsdp_modules(model):
         if scope == "dense" and getattr(module, "moe_enabled", False):
             continue
         module.set_force_sum_reduction_for_comms(True)
@@ -234,9 +246,14 @@ def apply_fsdp_to_decoder(
             ``enable_fsdp_symm_mem``: ``None`` disables it, ``"all"`` covers
             every FSDP module, ``"dense"`` skips MoE (sparse) blocks.
 
-    The ``dp_mesh_dims``/``edp_mesh_dims`` explicit-declaration entry points
-    from the spmd_types era were never wired to a caller and are removed;
-    dedicated FSDP submeshes are passed instead.
+    Upstream additionally takes ``dp_mesh_dims``/``edp_mesh_dims``: the
+    explicit declaration of which axes of a multi-dimensional SPMD mesh are
+    data-parallel. llmtuner does not carry them. ``resolve_fsdp_mesh`` /
+    ``resolve_sparse_fsdp_mesh`` hand FSDP a dedicated 1-D/2-D submesh, which
+    torch's default shape-based reading resolves to exactly those axes; and
+    since llmtuner's parameters are plain tensors rather than DTensors on the
+    full SPMD mesh, the explicit form is not available here anyway (see
+    ``resolve_fsdp_mesh``).
     """
     mp_policy = MixedPrecisionPolicy(
         param_dtype=param_dtype,
@@ -286,6 +303,11 @@ def apply_fsdp_to_decoder(
         # - When EP > 1: routed experts use edp_mesh, other params use dp_mesh
         # - When EP = 1: all params use the same FSDP mesh, but experts may
         #   use Shard(1) when FSDP degree > num_experts to avoid padding
+        #
+        # Upstream also overrides the placement of stacked linear weights in
+        # this block (``linear_param_shard_placements``); llmtuner's blocks hold
+        # only plain 2-D nn.Linear weights, whose default Shard(0) already is
+        # the output dim, so there is nothing to override.
         # Dense blocks (no ``moe_enabled``) fall through to a plain fully_shard.
         if getattr(transformer_block, "moe_enabled", False):
             assert hasattr(transformer_block, "moe")
@@ -308,7 +330,7 @@ def apply_fsdp_to_decoder(
                 assert edp_mesh is not None
                 efsdp_ep_size = edp_mesh["efsdp"].size() * ep_size
             else:
-                efsdp_ep_size = _fsdp_shard_degree(dp_mesh)
+                efsdp_ep_size = fsdp_shard_size(dp_mesh)
 
             if efsdp_ep_size > num_experts:
                 expert_shard_placement = Shard(1)
@@ -324,7 +346,11 @@ def apply_fsdp_to_decoder(
                     reshard_after_forward=reshard_after_forward,
                 )
             elif ep_size == 1:
-                # ep_size == 1 but need Shard(1) for experts to avoid padding
+                # ep_size == 1, but sharding the expert axis would pad, so
+                # place the expert weights on their output-feature dim instead.
+                # ``Shard(1)`` is that dim for every packed weight here --
+                # ``w1``/``w3`` are (E, F, D) and ``w2`` is (E, D, F) -- i.e.
+                # the same segment upstream's ``Shard(weight.ndim - 2)`` cuts.
                 def _experts_shard_placement_fn(
                     param: nn.Parameter,
                     _expert_params: set = expert_params,

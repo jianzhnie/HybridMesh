@@ -60,6 +60,24 @@ def _importable(module: str, attr: str | None = None) -> Callable[[], bool]:
     return probe
 
 
+def _dynamo_lru_cache_knob() -> bool:
+    """Whether dynamo exposes ``eval_frame._set_lru_cache``.
+
+    The knob is private, so it is looked up on the import's own attribute
+    chain (``import torch._dynamo``, then ``torch._C._dynamo.eval_frame``)
+    rather than by importing the submodule by name -- which is how upstream
+    reaches it, and the only spelling that can succeed. ``torch._C._dynamo``
+    and ``eval_frame`` both exist in torch 2.2.2; the *function* on it does
+    not, which is exactly the distinction this probe has to make.
+    """
+    try:
+        importlib.import_module("torch._dynamo")
+    except ImportError:
+        return False
+    eval_frame = getattr(getattr(torch._C, "_dynamo", None), "eval_frame", None)
+    return getattr(eval_frame, "_set_lru_cache", None) is not None
+
+
 def _grouped_mm_runs() -> bool:
     """Whether ``torch._grouped_mm`` can run here.
 
@@ -146,6 +164,15 @@ CAPABILITIES: dict[str, _Capability] = {
         since="torch 2.6 (functorch partitioner budget knob)",
         hint="Upgrade torch, or use activation_checkpoint_mode='full'/'selective'.",
         consumers="parallel/activation_checkpoint.py (mode='memory_budget')",
+    ),
+    "dynamo_lru_cache": _Capability(
+        _dynamo_lru_cache_knob,
+        what="torch._C._dynamo.eval_frame._set_lru_cache",
+        since="private dynamo knob; absent from torch 2.2.2, present in the "
+        "builds upstream targets",
+        hint="Upgrade torch; without the knob, activation checkpointing runs "
+        "without upstream's SAC + pipeline-parallel cache workaround.",
+        consumers="parallel/activation_checkpoint.py (_disable_dynamo_lru_cache)",
     ),
     # -- model kernels (consumer: models/common/grouped_experts.py) ------------
     "torch_grouped_mm": _Capability(

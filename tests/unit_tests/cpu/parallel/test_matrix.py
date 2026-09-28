@@ -58,7 +58,6 @@ def test_rows_reject_with_their_entry_type() -> None:
         pass
 
     cases = [
-        (matrix.pp_activation_checkpoint, (), "pp > 1 path"),
         (matrix.pp_validation, (), "pipeline parallelism"),
         (matrix.validation_once_requires_dp1, (4,), "data-parallel"),
         (matrix.validation_once_requires_finite_corpus, (), "infinite synthetic"),

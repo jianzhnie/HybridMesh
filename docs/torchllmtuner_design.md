@@ -249,6 +249,7 @@ torch 版本/环境探测（`hasattr` 私有 knob、守卫 import）集中于单
 | `fx_regional_inductor` | import `torch.fx.passes.regional_inductor` | torch 2.10 | compile.py（aot_eager×flex） |
 | `symm_mem` | import `torch.distributed._symmetric_memory` | torch 2.8（CUDA） | compile.py、tp.py、linear.py |
 | `functorch_activation_memory_budget` | hasattr `torch._functorch.config` | torch 2.6 | activation_checkpoint.py（memory_budget） |
+| `dynamo_lru_cache` | `torch._C._dynamo.eval_frame._set_lru_cache` | 私有 knob（2.2.2 缺失） | activation_checkpoint.py（SAC+PP workaround） |
 | `torch_grouped_mm` | 实跑探测（bf16 哑调用） | torch 2.7 | grouped_experts.py |
 
 不纳入的：可选**包**（renderers/torchao/torchvision）保持本站 `ImportError`

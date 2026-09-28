@@ -7,8 +7,14 @@ field becomes a clean flat CLI flag (--steps, --data_parallel_shard_size,
 --learning_rate, --dump_folder, ...) and each group runs its own __post_init__
 validation. The nine groups live in ``llmtuner.config`` and are composed into the
 single LLMTunerConfig by ``LLMTunerConfig.from_groups``, which owns the
-graft table (which nested group lands on which top-level group). A YAML/JSON
-file can also be passed positionally.
+graft table (which nested group lands on which top-level group).
+
+Flags are the whole input: this entry point takes no config file.
+``HfArgumentParser`` does expose ``parse_json_file`` / ``parse_yaml_file``, but
+as methods that replace argv rather than as something an argv path can select,
+so wiring them would be a second input channel with its own precedence rules
+(upstream instead names a config-registry function, ``--module`` /
+``--config``). Until that exists, the flags are it.
 
 Grafting happens after parsing, so a nested config's fields still reach the user
 as bare flags: --enable, --interval, --log_freq, --dataset, --profile_freq.

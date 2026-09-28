@@ -242,16 +242,16 @@ def test_capture_scalar_outputs_set_only_for_token_choice_moe(monkeypatch) -> No
 
     A real swapped MoE cannot be built in this environment (the installed
     transformers' Qwen3Moe layout predates the swap's probe), so the
-    detection seam itself is stubbed; ``_iter_moe_layers`` is pinned by the
+    detection seam itself is stubbed; ``iter_moe_layers`` is pinned by the
     EP tests.
     """
     with _preserve_dynamo_flag("capture_scalar_outputs"):
         torch._dynamo.config.capture_scalar_outputs = False
-        monkeypatch.setattr(compile_mod, "_iter_moe_layers", lambda m: [object()])
+        monkeypatch.setattr(compile_mod, "iter_moe_layers", lambda m: [object()])
         apply_compile(_model(), compile_config=CompileConfig())
         assert torch._dynamo.config.capture_scalar_outputs is True
 
-    monkeypatch.undo()  # restore the real _iter_moe_layers for the dense case
+    monkeypatch.undo()  # restore the real iter_moe_layers for the dense case
 
     with _preserve_dynamo_flag("capture_scalar_outputs"):
         torch._dynamo.config.capture_scalar_outputs = False

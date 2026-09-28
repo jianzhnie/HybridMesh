@@ -1,9 +1,11 @@
 """The assembly stage list: the order contract, pinned.
 
 ``parallelize_hf_transformers``'s correctness is its call order (TP before EP
-before CP, AC before compile, FSDP last). That used to live in a docstring;
-it is now the ``STAGES`` table, and this test is what keeps the table -- not
-the prose -- as the contract.
+before CP, AC before compile, FSDP last), and which of those stages the PP
+path runs (a chunk is checkpointed on its own layers, so AC is on both paths
+-- upstream hands ``ac_config`` to each model part's own ``parallelize``).
+That used to live in a docstring; it is now the ``STAGES`` table, and this
+test is what keeps the table -- not the prose -- as the contract.
 """
 
 from llmtuner.parallel.stages import (
@@ -30,7 +32,7 @@ def test_sharding_wrappers_come_before_ac_and_compile() -> None:
 
 
 def test_the_pp_order_is_a_subsequence_of_the_full_order() -> None:
-    assert PP_STAGE_ORDER == ("tp", "compile", "fsdp")
+    assert PP_STAGE_ORDER == ("tp", "ac", "compile", "fsdp")
     positions = [STAGE_ORDER.index(name) for name in PP_STAGE_ORDER]
     assert positions == sorted(positions)
 

@@ -47,7 +47,7 @@ from llmtuner.config import CompileConfig
 from llmtuner.errors import EnvironmentUnsupportedError
 
 from ..accelerator.capabilities import has
-from ..models.common.moe import _iter_moe_layers
+from ..models.common.moe import iter_moe_layers
 from ..utils.logger_utils import get_logger
 
 logger = get_logger(__name__)
@@ -89,7 +89,7 @@ def apply_compile(
 
     _maybe_enable_async_tp(compile_config, tp_mesh)
 
-    if _iter_moe_layers(model):
+    if iter_moe_layers(model):
         # Token-choice dispatch sizes its expert splits from the routing,
         # so the compiled graph has data-dependent shapes. Dense models
         # never touch the flag, keeping their trace bitwise unchanged.

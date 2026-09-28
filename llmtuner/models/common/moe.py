@@ -78,6 +78,7 @@ from .token_dispatcher import LocalTokenDispatcher
 
 __all__ = [
     "MOE_LAYER_ATTRS",
+    "iter_moe_layers",
     "MoE",
     "MicrobatchWiseLoadBalanceLoss",
     "QuantileBalancedTopKRouter",
@@ -342,7 +343,7 @@ class MoE(nn.Module):
         return out_TD
 
 
-def _iter_moe_layers(model_part: nn.Module) -> list[MoE]:
+def iter_moe_layers(model_part: nn.Module) -> list[MoE]:
     """The MoE blocks of one model part, in a stable order.
 
     Every model part is a ``HFTransformerModel``, whose ``layers`` is a
@@ -426,9 +427,10 @@ class MicrobatchWiseLoadBalanceLoss(AuxLoss):
     """
 
     def __init__(self, *, coeff: float) -> None:
-        # "batch" (dp) rather than "loss" (dp+cp): the value is already the
-        # same on every CP coordinate by construction, so summing over cp too
-        # would count it more than once per layer.
+        # "batch" (dp) rather than "loss" (dp, cp and tp): the value is already
+        # the same on every CP coordinate by construction -- and on every TP
+        # one, since llmtuner's TP is sequence-parallel -- so summing over
+        # either would count it more than once per layer.
         super().__init__(coeff=coeff, reduce_mesh="batch")
 
     def _reduce_token_partials(
@@ -522,7 +524,7 @@ _BALANCING_EXPORTS = {
 
 def __getattr__(name: str):
     # Lazy re-export: balancing.py imports this module back for
-    # ``_iter_moe_layers`` / ``MoE``, so an eager import here would cycle.
+    # ``iter_moe_layers`` / ``MoE``, so an eager import here would cycle.
     if name in _BALANCING_EXPORTS:
         from . import balancing
 

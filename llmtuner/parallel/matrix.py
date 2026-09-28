@@ -102,18 +102,6 @@ class Row:
 # == assembly phase: verdicts called from the guard sites =================
 
 
-def pp_activation_checkpoint() -> None:
-    """AC belongs between apply_tp and compile in the per-chunk pipeline, which does not
-    accept it yet.
-    """
-    raise UnsupportedCombinationError(
-        "activation checkpointing is not wired through the pp > 1 path: "
-        "it belongs between apply_tp and compile in the per-chunk "
-        "pipeline below, which does not accept it yet."
-    )
-
-
-
 def pp_validation() -> None:
     """llmtuner wires only the pipeline schedule's training driver, so a validation pass
     has no driver of its own to run on.
@@ -391,8 +379,6 @@ def shared_expert_tp_ep(block: object) -> None:
 
 
 ENTRIES: tuple[Row, ...] = (
-    Row(pp_activation_checkpoint, "assembly", UnsupportedCombinationError,
-        'parallel/parallelize.py::parallelize_hf_transformers'),
     Row(pp_validation, "assembly", UnsupportedCombinationError,
         'trainer/validate.py::check_validation_feasibility'),
     Row(validation_once_requires_dp1, "assembly", ConfigError,

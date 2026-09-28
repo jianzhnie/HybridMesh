@@ -79,7 +79,7 @@ def _moe(**kwargs) -> MoE:
 
 
 class _Holder(torch.nn.Module):
-    """Stands in for a model part: ``_iter_moe_layers`` walks ``.layers``."""
+    """Stands in for a model part: ``iter_moe_layers`` walks ``.layers``."""
 
     def __init__(self, moes: list[MoE | None]) -> None:
         super().__init__()
