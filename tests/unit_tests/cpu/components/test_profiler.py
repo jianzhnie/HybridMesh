@@ -434,6 +434,51 @@ def test_profiling_is_off_by_default_and_builds_nothing(tmp_path) -> None:
     assert profiler.build_torch_profiler() is None
 
 
+@_NO_WARMUP
+def test_the_trace_activity_follows_the_resolved_device(tmp_path, monkeypatch) -> None:
+    """The device layer resolves one of five accelerators, so the activity list
+    has to follow it. A trace that offers CPU work only on a CUDA/XPU run -- or
+    that asks for a device activity on a CPU run -- describes a different
+    machine than the one that produced it."""
+    built: list[dict] = []
+
+    class _RecordingProfile:
+        """Stands in for ``torch.profiler.profile``: this test is about the
+        arguments, and asking a CPU-only machine for XPU activity is not
+        something the real object tolerates."""
+
+        def __init__(self, **kwargs) -> None:
+            built.append(kwargs)
+            self.step_num = 0
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc) -> bool:
+            return False
+
+    monkeypatch.setattr(torch.profiler, "profile", _RecordingProfile)
+
+    def activities_for(device: str) -> list:
+        monkeypatch.setattr(profiler_module, "device_type", device)
+        Profiler(
+            Config(enable_profiling=True, profile_freq=1, profiler_warmup=0),
+            base_folder=str(tmp_path),
+        ).build_torch_profiler()
+        return built[-1]["activities"]
+
+    cpu_activity = torch.profiler.ProfilerActivity.CPU
+    assert activities_for("cpu") == [cpu_activity]
+    assert activities_for("cuda") == [
+        cpu_activity,
+        torch.profiler.ProfilerActivity.CUDA,
+    ]
+    assert activities_for("xpu") == [
+        cpu_activity,
+        torch.profiler.ProfilerActivity.XPU,
+    ]
+
+
 # -- the exported format ------------------------------------------------------
 
 

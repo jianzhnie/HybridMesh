@@ -229,10 +229,11 @@ step 1 恢复 optimizer、scheduler、dataloader 和 train state 后完成并保
 |---|---|---|
 | `ModelWrapper` | `components/checkpointer/base.py` | 合并 PP parts，缓存稳定 storage 供 async staging，**通过** |
 | `CheckpointStorage` | 上游 backend storage seam | llmtuner Protocol，不依赖 Configurable，**通过（适配）** |
-| `BaseCheckpointManager` 生命周期方法 | 同名基类 | load/save/close、异步 drain、retention 集中在基类。2026-09-23 起 resume 优先于 initial_load_* 时记 info 日志（上游 810e62786），**通过** |
+| `BaseCheckpointManager` 生命周期方法 | 同名基类 | load/save/close、异步 drain、retention 集中在基类。2026-09-23 起 resume 优先于 initial_load_* 时记 info 日志（上游 810e62786）。2026-09-28 十一次增量复核：策略方法与上游逐行同构，两处适配登记——新增 `_initialized` 门（上游靠各类自己的 `hasattr`/`getattr` 容错部分构造，见 `dcp.CheckpointManager.__init__` 的 HF 选项拒绝）与 `enable` 短路（上游的 manager 只在配置了 checkpointer 时才构造）；`_should_purge` 的 rank 判定换 `dist_utils.is_main_process()`（非分布式下 `dist.get_rank()` 会 raise），**通过（适配）** |
 | `_parse_step/_find_load_step/_purge_stale_checkpoints` | 同名策略 | exact `step-N`、清理 staged/abandoned、保留豁免，**通过** |
-| `dcp.CheckpointManager` | `components/checkpointer/dcp.py` | 本地/remote DCP、HF export guard。2026-09-23 起异步写总时长经 `save_future` done-callback 记 info 日志（上游 d9ca9e55a，以 info 行替代 structured scalar），**通过（适配）** |
-| `TorchCheckpointingManager` | 同名 backend | optional dependency 延迟导入，保存统一经过 backend，**通过（适配）** |
+| `dcp.CheckpointManager` | `components/checkpointer/dcp.py` | 本地/remote DCP、HF export guard。2026-09-23 起异步写总时长经 `save_future` done-callback 记 info 日志（上游 d9ca9e55a，以 info 行替代 structured scalar）。2026-09-28 十一次增量复核：`_save`/`_load_checkpoint`/`dcp_save`/`_save_last_step`/`_flattened_model_states_sd` 与上游逐行同构，4 处 `assert` 改显式 `raise`、HF 选项的拒绝信息更具体（llmtuner 不随包发布 `sd_adapter`）；配置校验 13 条逐条搬到 `config/checkpoint.py`（另收上游 `dcp.Config.async_mode` 与 `training_engine.create_seed_checkpoint`），`initial_load_model_only` 无 `initial_load_path` 的上游告警故意不移植；上游 `SaveDone` 是零引用死类、不移植；`EXPORT_DTYPE_MAP` 与 `models/common/cast_linear.TORCH_DTYPE_MAP` 是同表两次书写（上游只有 config 一份），登记为已知重复，**通过（适配）** |
+| `TorchCheckpointingManager` | 同名 backend | optional dependency 延迟导入，保存统一经过 backend。2026-09-28 十一次增量：删除死成员 `staging_future`（只被 `__init__` 置 None、`_close` 读一次，全仓无赋值点；上游该类无此成员），HF 导出路径（`sharded/` + barrier + consolidate）与上游同构；后端未安装故仍属静态复核，**通过（适配）** |
+| `FilesystemCheckpointStorage`、`async_save_config` | 上游 `_FilesystemCheckpointStorage`、`_async_save_config` | 去私有化：测试需要这两个 seam（storage 契约/本地 IO、异步配置分支），符合"非必需不加 `_`"的取向，**通过（适配）** |
 | `canonical_fqn` | `components/checkpointer/utils.py` | A1，移除 checkpoint wrapper segment，**通过** |
 
 ### 7.3 Observability、profiler、tokenizer
@@ -243,7 +244,7 @@ step 1 恢复 optimizer、scheduler、dataloader 和 train state 后完成并保
 | logger 类与 `LoggerContainer` | 同文件 | optional TensorBoard/W&B 延迟导入，**通过**；镜像需安装对应包。2026-09-23 起 `WandBLogger.log` 带 `commit=True`（上游 e0e35fe5a），防显式 step 被合并 |
 | `MetricsProcessor` | 同名上游类 | 去 Configurable；按真实 step window 算吞吐/MFU，log frequency 构造时校验，**通过（适配）** |
 | `get_metrics_rank`, `ensure_pp_loss_visible` | 上游 metrics rank/PP warning | llmtuner 明确 PP schedule 可见性，**通过** |
-| `Profiler`, `MemoryProfiler` | `observability/profiler.py` | 去 Configurable，schedule 与 OOM 处理保留；`caused_by_oom` 与上游 773e16e75 语义等价（含防环与隐式链），**通过** |
+| `Profiler`, `MemoryProfiler` | `observability/profiler.py` | 去 Configurable，schedule 与 OOM 处理保留；`caused_by_oom` 与上游 773e16e75 语义等价（含防环与隐式链）。2026-09-28 十一次增量：修一处设备面缺口——上游 activity 列表是「CUDA 可用加 CUDA，否则 XPU 可用加 XPU」，llmtuner 原先只加 CUDA 且 docstring 误称设备只有 cuda/cpu，而 `accelerator/device.py` 的 `DEVICE_PRIORITY` 含 xpu（可达），XPU 运行的 trace 会退化成 CPU-only；现按 resolved device 补 `xpu` 分支（其余设备仍 CPU-only，与上游一致），用例 `test_the_trace_activity_follows_the_resolved_device` 钉住 cpu/cuda/xpu 三态。裁剪登记：`leaf_folder`（只服务上游 torchft 的 per-replica 子目录）、CUDA-graph annotations（随 D10 无图路径）、`structured_logger` span、`active()` builder；memory history 经 `accelerator/monitoring` 的 device 探针（上游非 CUDA 分支调不存在的 `torch.memory`），**通过（适配）** |
 | `BaseTokenizer`, `HuggingFaceTokenizer` | `components/tokenizer.py` | A1；encode 强制 `add_special_tokens=False` 后自行处理 BOS/EOS。2026-09-23 起 `apply_chat_template` 接受 `Sequence[Mapping]`（上游 4a0d8dab3 多轮 SFT 配套），**通过**。2026-09-24 起 `apply_chat_template` 自动注入 `bos_token`/`eos_token` kwargs 与默认 `add_generation_prompt=True`（上游 backend tokenizer 同源）；SFT 全量渲染在 `datasets/text/text.py` 显式传 `add_generation_prompt=False` |
 | `MultiModalTokenizer` | 同文件多模态 tokenizer | 组合 text/vision token 契约，**通过** |
 

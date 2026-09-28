@@ -349,7 +349,6 @@ class TorchCheckpointingManager(BaseCheckpointManager):
         self._backend = backend
 
         self.save_future: Future[Any] | None = None
-        self.staging_future: Future[Any] | None = None
         self.purge_thread: threading.Thread | None = None
 
         self.folder = filesystem.join(folder, config.folder)
@@ -577,9 +576,6 @@ class TorchCheckpointingManager(BaseCheckpointManager):
         save_future.result(timeout=self._manager_config.save.wait_timeout_secs)
 
     def _close(self) -> None:
-        if self.staging_future is not None:
-            self.staging_future.result()
-            self.staging_future = None
         try:
             self.maybe_wait_for_saving()
         finally:

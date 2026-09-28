@@ -755,6 +755,58 @@ llmtuner 侧是 `datasets/multimodal/mm_image.py`），本表的 llmtuner 列是
   `parallel_dims.py`/`fully_shard/fsdp.py`/`context_parallel/`/`cp_kernel.py`/
   `accelerator/dist_utils.py`）全部走完，余下只有需要多卡的 TP/SP 布局根治（D14）与
   D18 的 PP×校验实现。
+- 2026-09-28 十一次增量（`components/` 批次开篇：checkpointer + profiler 走查）：
+  (a) **checkpointer（`components/checkpointer/`）逐文件对照，语义已对齐，改动只一处死代码。**
+  对照方式：AST 归一化（剥 docstring/注释后 `ast.unparse`）逐文件 diff，再人工核对语义。
+  `base.py`：策略方法（`_parse_step`/`_find_load_step`/`_purge_stale_checkpoints`/
+  `_states_to_load`/`_create_checkpoint_id`/`ModelWrapper`/`purge_thread`/`_shares_storage`）
+  与上游逐行同构；`dcp.py`：`_save`/`_load_checkpoint`/`dcp_save`/`_save_last_step`/
+  `_flattened_model_states_sd` 与上游逐行同构（含 async 三段模式、`exclude_from_loading`
+  与 staged 目录保留）；`torch_checkpointing.py`：策略与 `_save_last_step` 的 HF 导出
+  路径（`sharded/` 子目录 + `pre_finalize_callback` 里的 barrier+consolidate）同构；
+  `filesystem.py` 与上游 `tools/filesystem.py` 1:1（ratio 1.000），`utils.py::canonical_fqn`
+  同构。**登记的有意差异（均为适配而非缺口）**：
+  (1) `BaseCheckpointManager` 新增 `_initialized` 门（上游无）：上游靠各类自己的
+  `hasattr(self, "staging_future"/"_manager")` + `getattr(self, "save_future", None)` 容错
+  部分构造；llmtuner 的 `dcp.CheckpointManager.__init__` 会在 HF 选项上 raise，为此用一个
+  显式标志统一挡住 `load`/`save`/`close`/`maybe_wait_for_*`，语义等价、形状不同；
+  (2) 新增 `enable`（配置驱动）：上游的 manager 只在配置了 checkpointer 时才构造，llmtuner
+  总是构造一个 `CheckpointConfig`，所以 `__init__`、`_should_save`、`_should_prewarm`
+  三处按 `enable` 短路；
+  (3) dcp 的 4 处 `assert` 改显式 `raise`（ValueError/TypeError）——同上游语义，但 `-O`
+  下不会消失；HF 选项在无 `sd_adapter` 时报的错误更具体（llmtuner 不随包发布 adapter，
+  三个 HF 选项都是登记缺口而非可用开关）；
+  (4) `base._should_purge` 的 `dist.get_rank() == 0` → `dist_utils.is_main_process()`
+  （非分布式下前者会 raise）；
+  (5) 配置校验全量搬到 `config/checkpoint.py::__post_init__`（13 条逐条对齐），额外把
+  上游 `dcp.Config.async_mode` 与 `training_engine` 的 `create_seed_checkpoint` 收进同一
+  dataclass；上游那条 `initial_load_model_only` 无 `initial_load_path` 的告警**故意不移植**
+  （llmtuner 每次运行都会构造默认 config，含 `--help`，该告警会无端触发）；
+  (6) 命名：`_FilesystemCheckpointStorage`/`_async_save_config` 去私有化为
+  `FilesystemCheckpointStorage`/`async_save_config`（测试需要这两个 seam），符合本仓
+  "非必需不加 `_`" 的取向；`EXPORT_DTYPE_MAP` 与 `models/common/cast_linear.py` 的
+  `TORCH_DTYPE_MAP` 是同一张 3 键表的两次书写（上游只有 `config/__init__.py` 一份），
+  登记为已知重复，不为此把 components 反向依赖 models；
+  (7) 上游 `dcp.py` 的 `SaveDone` 是**零引用死类**，不移植。
+  **该模块本次唯一的代码改动**：`TorchCheckpointingManager` 的 `staging_future` 是死成员
+  （`__init__` 置 None、`_close` 读一次，全仓无任何赋值点；上游该类根本没有这个成员，
+  它在 dcp 里才有对应物），连同 `_close` 里那段空转一起删除。
+  `torch_checkpointing` 后端仍未装、未跑（可达性说明见该文件 docstring），故只做静态复核。
+  (b) **profiler（`components/profiler.py` ↔ `observability/profiler.py`）：对齐，并修一处
+  设备面缺口。** 策略、目录布局、OOM 处理（`caused_by_oom` 防环 + 隐式链）、
+  `MemoryProfiler` 的频率/命名/协议 4 全部同构。**发现的缺口**：上游的 activity 列表是
+  "CUDA 可用加 CUDA、否则 XPU 可用加 XPU"，llmtuner 只加了 CUDA 分支，且 docstring 写了
+  "设备只有 cuda/cpu 两种"——但 `accelerator/device.py` 的 `DEVICE_PRIORITY` 是
+  npu/cuda/musa/mlu/xpu 五值，`xpu` 可达，于是 XPU 运行的 trace 会退化成 CPU-only。已按
+  resolved device 补 `xpu` 分支（其余设备仍 CPU-only，与上游一致），并改正该 docstring；
+  新增用例 `test_the_trace_activity_follows_the_resolved_device`（cpu/cuda/xpu 三态钉住）。
+  登记的有意裁剪：`leaf_folder`（只服务上游 torchft 的 per-replica 子目录，llmtuner 无副本
+  概念）、CUDA-graph annotations（随 D10 无图路径）、`structured_logger` span、`active()`
+  builder（llmtuner 构造处已知道 step 与 folder）；memory history 改经
+  `accelerator/monitoring` 的 device 探针（上游非 CUDA 分支调 `torch.memory`，不存在）。
+  (c) 测试/文档：`test_profiler.py` +1 例；`llmtuner_torchtitan_symbol_guide.md` §7.2/§7.3
+  与 `llmtuner_trainer_walkthrough.md` §12 同步。`components/` 批次余下 metrics 与 optimizer
+  两个模块。
 - 检查后续漂移：`git -C <torchtitan> log f35966713..HEAD -- torchtitan/`。
 - 2026-09-23 映射修订：上游 `distributed/linear.py` 已删除、内容迁入
   `models/common/dist_gemm.py`（改名 `AsyncAllGatherLinear`/`AsyncLinearReduceScatter`，

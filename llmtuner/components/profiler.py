@@ -28,8 +28,13 @@ Departures from torchtitan, each a subtraction or a device-portability fix:
   and the version probe around ``export_chrome_trace`` guards a branch that
   cannot be taken.
 
-* **No XPU activity.** The device is resolved once in ``accelerator/device.py`` as
-  ``cuda`` or ``cpu``; there is no third case to ask about.
+* **The trace activities follow the resolved device.** ``cuda`` adds
+  ``ProfilerActivity.CUDA`` and ``xpu`` adds ``ProfilerActivity.XPU``, which is
+  upstream's branch pair; every other resolved device (``npu``, ``mlu``,
+  ``musa``, ``cpu``) traces CPU work only, exactly as upstream does. This reads
+  the device from ``accelerator/device.py`` rather than probing
+  ``torch.cuda.is_available()``/``torch.xpu.is_available()``, so the trace
+  describes the device the run is actually on.
 
 * **Memory history is recorded through the device module, not ``torch``.** See
   ``accelerator/monitoring.record_memory_history`` -- torchtitan's non-CUDA
@@ -260,6 +265,12 @@ class Profiler:
         activities = [torch.profiler.ProfilerActivity.CPU]
         if device_type == "cuda":
             activities.append(torch.profiler.ProfilerActivity.CUDA)
+        elif device_type == "xpu":
+            # Upstream's second branch. The device is resolved once in
+            # ``accelerator/device.py``, where ``xpu`` is one of five
+            # accelerators, so following the resolved device is what keeps a
+            # trace from being CPU-only on a device the run actually uses.
+            activities.append(torch.profiler.ProfilerActivity.XPU)
 
         torch_profiler = torch.profiler.profile(
             activities=activities,

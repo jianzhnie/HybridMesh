@@ -269,7 +269,10 @@ per-rank token 数（Grain）与 global batch + 行切片（synthetic）是两�
    `distributed/utils.py` 十次增量（2026-09-28，连带补上 `PYTHONHASHSEED` 与
    `detect_anomaly`）。余下只有 TP/SP 布局的根治（D14）与 PP×校验（D18），两者都需要
    多卡或新 torch，见第 5 条。
-3. `llmtuner/components/`（checkpointer/metrics/profiler/optimizer）。
+3. `llmtuner/components/`（checkpointer/metrics/profiler/optimizer）—— 进行中：
+   checkpointer 与 profiler 已复核（2026-09-28 十一次增量，前者 AST 归一化逐文件对照、
+   并删掉 `TorchCheckpointingManager` 的死成员 `staging_future`；后者补上 XPU activity
+   分支）；metrics 与 optimizer 仍待走。
 4. `llmtuner/datasets/`、`llmtuner/models/common/*` 的数值等价性。
 5. D18 的实现（PP×校验），以及任何运行期/数值等价性验证——都需要 torch≥2.12 + 多卡，
    本机不可达（§0 的"验证边界"）。
