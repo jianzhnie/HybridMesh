@@ -11,7 +11,7 @@
 ## 0. 结论
 
 llmtuner 拿掉了 TorchTitan 的 `Configurable` 与 `Module` 两个抽象层，换来一个明显更短
-的框架：114 个 Python 模块（94 个实现模块 + 19 个 `__init__.py` + `__main__.py`）、
+的框架：122 个 Python 模块（98 个实现模块 + 23 个 `__init__.py` + `__main__.py`）、
 约 28.7k 行，覆盖 TP / FSDP2 / CP / EP / PP 五条并行路径的装配、训练循环、checkpoint
 与等价性测试。
 
@@ -176,7 +176,7 @@ import trainer 或读取全局 run config；跨 models/parallel 的依赖必须�
 引擎层（TP/CP fused kernel、FSDP、`spmd_context`、checkpoint 的 PG 生命周期）直连
 `torch.distributed` 与 `_functional_collectives` 等私有 API。
 
-目录结构（114 个 Python 模块，约 28.7k 行；2026-09-27 实测）：
+目录结构（122 个 Python 模块，约 29.6k 行；2026-09-28 实测）：
 
 ```
 llmtuner/
@@ -189,9 +189,13 @@ llmtuner/
   trainer/      8 模块          trainer.py / train.py / builder.py（装配段，
                                 顺序契约见模块 docstring）/ validate.py /
                                 pp_steps.py / batch.py / seed.py
-  models/      22 模块          hf_wrapper.py + hf_factory.py（config 构建/类解析/
-                                meta materialize/FLOPs）+ common/{rope,masks,qkv,
-                                moe/routers/balancing,...}
+  models/      26 模块          hf/{wrapper,factory,state_dict_adapter}.py（HF 适配：
+                                包装/构造/FLOPs/checkpoint 键）
+                                + common/{rope,activation,linear,feed_forward,
+                                embedding,cast_linear,multimodal,scatter_add,
+                                aux_loss,async_linear}.py + attention/（qkv+masks）
+                                + moe/（block/router/experts/dispatcher/
+                                load_balance/balancing，见十七次增量）
   parallel/    26 模块          tensor_parallel/(tp+apply+linear)
                                 fully_shard/ pipeline_parallel/ context_parallel/
                                 expert_parallel/(swap+probe+convert)
@@ -232,7 +236,7 @@ fail-fast 按类型分三类，全部继承 `LLMTunerError`，并各自双继承
 
 两条边界规则：可选**包**缺失保持 `ImportError`（Python 惯例：renderers、
 torchao、torchvision，安装指引放文案）；模块内部的抽象方法/未知枚举值
-（`routers.py` 的 score_func、`rope.py` 的变体拒绝等）保持原生
+（`moe/router.py` 的 score_func、`rope.py` 的变体拒绝等）保持原生
 `NotImplementedError`，不进层级——它们不是给运维看的三类决策。
 
 ## 3.2 能力注册表（accelerator/capabilities.py）
@@ -250,7 +254,7 @@ torch 版本/环境探测（`hasattr` 私有 knob、守卫 import）集中于单
 | `symm_mem` | import `torch.distributed._symmetric_memory` | torch 2.8（CUDA） | compile.py、tp.py、linear.py |
 | `functorch_activation_memory_budget` | hasattr `torch._functorch.config` | torch 2.6 | activation_checkpoint.py（memory_budget） |
 | `dynamo_lru_cache` | `torch._C._dynamo.eval_frame._set_lru_cache` | 私有 knob（2.2.2 缺失） | activation_checkpoint.py（SAC+PP workaround） |
-| `torch_grouped_mm` | 实跑探测（bf16 哑调用） | torch 2.7 | grouped_experts.py |
+| `torch_grouped_mm` | 实跑探测（bf16 哑调用） | torch 2.7 | moe/experts.py |
 
 不纳入的：可选**包**（renderers/torchao/torchvision）保持本站 `ImportError`
 惯例；`device.py` 的设备发现是"缺席即静默"的可用性探测（另一种语义，且
@@ -462,7 +466,7 @@ tp 在两条路径都 loud-raise（ep=1 的边界 collective 未组合验证，t
 
 ### 5.4 CP / EP（context_parallel/ + expert_parallel/）
 
-**CP 已接线**。拦截点是 `hf_wrapper.flex_attention_hf` 读取的 `_titan_flex_kernel`：
+**CP 已接线**。拦截点是 `hf/wrapper.py` 的 `flex_attention_hf` 读取的 `_titan_flex_kernel`：
 `apply_cp`（cp>1）walk 每层 attention module 并 attach `CPFlexKernel`
 （`context_parallel/cp_kernel.py`），支持两条真实路径：默认 KV all-gather（K/V 收成
 全长，Q 保持 token 分片），以及 Ulysses（token↔head all-to-all）。Ulysses 要求 heads

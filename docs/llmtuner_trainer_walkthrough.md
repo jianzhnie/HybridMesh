@@ -287,8 +287,12 @@ per-rank token 数（Grain）与 global batch + 行切片（synthetic）是两�
    （`param_init.py` / `lora.py` / `config_utils.py`）定性登记；`token_dispatcher.py` 的
    `_local_reorder`/`_permute`/`_unpermute`/`combine` 索引数学逐行核对通过（并修掉
    `BaseEPTokenDispatcher.num_experts` 的一处文档错误）；同轮把 `num_flops_per_token`
-   重写为 MoE/MLA/sliding 感知（唯一实现变更，测试迁到不受门禁影响的
-   `tests/unit_tests/cpu/models/test_flops.py`）。**该批的运行期证据仍缺**：`tests/unit_tests/cpu/datasets/`
+   重写为 MoE/MLA/sliding 感知（测试迁到不受门禁影响的
+   `tests/unit_tests/cpu/models/test_flops.py`）。随后同日做十七次增量：`models/` 的目录与文件
+   组织重构——分成 `hf/`（适配层）与 `common/`（词汇表），`common/` 里的 MoE 栈与 attention 拆成
+   子包（`moe/{block,router,experts,dispatcher,load_balance,balancing}.py`、
+   `attention/{qkv,masks}.py`），子包索引只做导航不 re-export，旧路径逐条映射见 upstream map；
+   纯搬家不改行为，且有「57 个顶层定义、0 个函数体变化」的机械证明。**该批的运行期证据仍缺**：`tests/unit_tests/cpu/datasets/`
    整体被 `require_env('grain')` 门控，本机未装 grain（pyproject 钉 `0.2.18`，本机镜像只有
    `0.2.3`，版本不符故不装），57 例全 skip。
 5. D18 的实现（PP×校验），以及任何运行期/数值等价性验证——都需要 torch≥2.12 + 多卡，

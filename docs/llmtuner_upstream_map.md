@@ -1,7 +1,7 @@
 # llmtuner → torchtitan 对应关系表
 
 [llmtuner](../llmtuner) 拿掉了 TorchTitan 的 `Configurable` 与 `Module` 两个抽象层，换来一个
-明显更短的框架：114 个 Python 模块（94 个实现模块）、约 28.7k 行，覆盖 TP / FSDP2 /
+明显更短的框架：122 个 Python 模块（98 个实现模块）、约 29.6k 行，覆盖 TP / FSDP2 /
 CP / EP / PP 五条并行路径的装配、训练循环、checkpoint 与等价性测试。本文是这些模块与
 torchtitan 之间对应关系的**唯一权威**。
 
@@ -218,7 +218,7 @@ baff3c681）——上游形态是把 Ulysses 的 token↔head resharding 提为
 分片（`cp_shard` 把 `attention_masks` 摘出再原样放回），因为 all-to-all 后每个 rank
 都持有全长 token 流。llmtuner 按 B 类语义适配、不复制类层次：packed 语料的"varlen
 元数据"在 HF/flex 集成里是烘进 BlockMask 的文档结构，因此
-`hf_wrapper.preprocess_inputs` 在 `ulysses` 策略下把全长文档 mask **不 Q 分片**透传
+`hf/wrapper.py` 的 `preprocess_inputs` 在 `ulysses` 策略下把全长文档 mask **不 Q 分片**透传
 （`set_cp_mesh` 新增 `strategy` 闩锁），`CPFlexKernel._forward_ulysses` 按 mask 的 Q
 长度 == 全长序列 分派：全长即用传入 mask，否则照旧重建全长 causal mask。决策全部
 config/shape 驱动、rank 对称。`apply_cp` 对 ulysses×`block_causal` 的 fail-fast 移除，
@@ -250,7 +250,7 @@ Ulysses 拒绝（per-head sinks 只走 TP 分片）不适用：llmtuner 尚无 G
 * **regional_inductor**：flex 只有 inductor lowering，故非 inductor backend 下
   flex 模型必须 scoop。`backend="aot_eager"` 且模型走 flex（wrapper 新 property
   `uses_flex_attention`）时用 `torch.fx.passes.regional_inductor` 包
-  `aot_autograd`；annotation 落 `hf_wrapper.flex_attention_hf` 的
+  `aot_autograd`；annotation 落 `hf/wrapper.py` 的 `flex_attention_hf` 的
   `maybe_regional_inductor({})`（默认 nullcontext，inductor/eager 路径零开销）。
   flex 模型配其他非 inductor backend → `ValueError`；torch 无 regional_inductor
   → `NotImplementedError`；sdpa 模型 backend 原样透传。inductor_configs 传空
@@ -406,7 +406,7 @@ llmtuner 侧是 `datasets/multimodal/image.py`），本表的 llmtuner 列是唯
 | rowwise | `RowParallelLinear`：weight 切 dim 1，融合 reduce-scatter 出（回到序列分片） | `hf_sharding.py:71 _hf_rowwise_config`：weight `S(1)`、bias `R`、out_src `P`、out_dst → SP placement | **等价**（上游 `P`→SP 的重分布正是 llmtuner 融合 RS 的位置） |
 | 注意力边界 | `GatherSequenceFirst` + `ColwiseLinearNoGather`：父模块持有 gather，q/k/v 退化为 plain feature-sharded GEMM | `decoder_sharding.py:218 set_gqa_attention_sharding` + `_attach_flex_kernel`（SP 输入在注意力内部 gather 回 Replicate） | **等价** |
 | 序列并行语义 | TP 即 SP：batch 先按 CP、再按 TP 切；`parallelism.enable_sequence_parallel=false` 直接 config-raise | `sp_enabled = tp_enabled and enable_sequence_parallel`（`parallel_dims.py:550`） | **有意分歧**：llmtuner 没有"激活全复制"的退化路径 |
-| 序列切分顺序 | 先 CP（`models/hf_wrapper.py:591`）后 TP（`:623`），TP 切在 CP 分片内 | `hf_sharding.py:52 _hf_sequence_parallel_placement()` = `PartitionSpec(DP, (CP, TP), None)` | **等价**：CP 外、TP 内的联合切分 |
+| 序列切分顺序 | 先 CP（`models/hf/wrapper.py:591`）后 TP（`:623`），TP 切在 CP 分片内 | `hf_sharding.py:52 _hf_sequence_parallel_placement()` = `PartitionSpec(DP, (CP, TP), None)` | **等价**：CP 外、TP 内的联合切分 |
 | norm 权重 | q/k norm 保持复制（HF 4.57 起 plan 已不声明它们），梯度由 `Trainer._allreduce_replicated_tp_grads`（`trainer/trainer.py:470`）汇总 | `decoder_sharding.py:177 norm_config`：SP 时权重 `R`，"BWD AR 交给 FSDP" | **等价**（同 D14：上游归 FSDP、llmtuner 归 trainer，数值一致） |
 | token 计数 / loss mesh | `trainer/batch.py:221` 计 `labels.numel() // (cp*tp)`；loss mesh 含 tp（`parallel/parallel_dims.py:220`） | loss mesh 只含 dp×cp（`parallel_dims.py:260`） | **耦合差异**：上游把 tp 的归约放进 vocab-parallel CE，llmtuner 的 head 是复制的、必须跨 tp 求和。两侧各自自洽，随 lm_head 缺口一同处理 |
 | lm_head 与 loss | HF 的 `colwise_gather_output` 解析为 None → head 保持复制（全 vocab）+ 普通 CE；loss 侧参数已接线（按形状分派，复制下 no-op） | head `S(0)`/`S(-1)` vocab 分片 + core `cross_entropy_loss` 检测分片走 vocab-parallel CE | **D 类缺口，两步走的第二步未做**：loss 侧接线 2026-09-27 完成，head 真分片与"未接线即 loud-raise"待做，见上"D —— 真正缺失"表 |
@@ -672,7 +672,7 @@ llmtuner 侧是 `datasets/multimodal/image.py`），本表的 llmtuner 列是唯
      `require_heads_divisible_by(degree=, divisor=)` 改为 `(size=, axis=)`（两个调用点
      `apply_tp` / ulysses CP 同步）；其余 prose 里的 "degree" 只作概念词保留。
   2. **私有面收敛**：把 4 个其实被跨模块生产代码使用的 `_` 符号转正 ——
-     `iter_moe_layers`（`balancing.py` / `hf_wrapper.py` / `compile.py` 三处）、
+     `iter_moe_layers`（`moe/balancing.py` / `hf/wrapper.py` / `compile.py` 三处）、
      `iter_fsdp_modules`（`fully_shard/apply.py`）、`resolve_top_k` /
      `resolve_score_func`（`expert_parallel/convert.py`），并给 `fully_shard/fsdp.py` 与
      `expert_parallel/probe.py` 补 `__all__` 明确公共面（fsdp.py 的表面 = 上游 `__all__`
@@ -1012,12 +1012,12 @@ llmtuner 侧是 `datasets/multimodal/image.py`），本表的 llmtuner 列是唯
   (b) **上游独有三文件定性**：`param_init.py`（已删死代码）、`lora.py`（裁剪面：LoRA 由 HF/peft 提供）、
   `config_utils.py`（**新增登记**：上游 config 工厂层，llmtuner 无 config tree，其判定分别落在
   `expert_parallel/probe.py` / `parallel/matrix.py` / `models/hf/factory.py` /
-  `hf_wrapper._flex_supported`，逐函数映射见 symbol guide §10）。
+  `models/hf/wrapper.py` 的 `_flex_supported`，逐函数映射见 symbol guide §10）。
   同轮定性上游实验目录里三个此前未登记的文件：`module_conversion.py`（把 HF 模块 `__class__`
   换成 `Module` 协议子类，好让 Module registry 的 `parallelize()` 生效）—— llmtuner 无
   `Module` 协议层，故无对应物，同类 `__class__` swap 技术用于
   `GatherSequenceFirst`/`TPMoeSequenceBoundary`/TP realizer；`config_registry.py`（实验用家族
-  config 注册表）—— llmtuner 用 HF `AutoConfig` + `config/` 门面 + `hf_factory`；`__init__.py`
+  config 注册表）—— llmtuner 用 HF `AutoConfig` + `config/` 门面 + `hf/factory.py`；`__init__.py`
   的模型注册表 —— HF auto mapping（`resolve_model_class`）。
   (c) **代码改动：`num_flops_per_token` 重写为结构感知**（本轮唯一实现变更；原"统一近似"对
   MoE 系统性偏低——Qwen3-MoE 约 2×、DeepSeek-V3 约 1.8×，MLA 的 `head_dim` 还是 rope 切片）。
@@ -1032,13 +1032,63 @@ llmtuner 侧是 `datasets/multimodal/image.py`），本表的 llmtuner 列是唯
   相同；20 个新用例在 `tests/unit_tests/cpu/models/test_flops.py`（**不依赖 pipelining/wandb/flex
   门禁**，真实 HF config 驱动）全绿。
   (d) 顺带修掉两个**从未运行过**的坏用例：原 `test_metrics.py` 的 FLOPs 用例 monkeypatch
-  `hf_wrapper.build_model_config_for` 并调 `hf_wrapper.num_flops_per_token`，而 `hf_wrapper`
+  `hf/wrapper.py` 里从未导出的 `build_model_config_for` 并调 `num_flops_per_token`（两者都在
+  `hf/factory.py`），而包装模块
   从不导出这两个名字；该模块又被 `require_env('wandb','pipelining','flex_attention')` 整体
   skip，故一直未暴露。FLOPs 用例已迁至新模块，`test_metrics.py` 删去该段与三个失去用途的 import。
   (e) 验证：`tests/unit_tests` = 172 passed / 59 skipped / 9 failed（失败集与上轮完全一致：
   7 例 profiler-OOM + 2 例 optimizer_config 缺 `torch.distributed.pipelining`）；`ruff check`
   通过。**未覆盖**：真多卡 EP/CP/PP 数值等价、CUDA/XPU fused kernel、`torch_checkpointing`
   后端、renderer 真库路径（环境不可达，见 §12 验证边界）。
+- 2026-09-28 十七次增量（`models/` 目录与文件组织重构；**只搬家，不改行为**）：
+  (a) **新布局**：`models/` 分成两半——`hf/`（HF 适配层，B 类）与 `common/`（模型词汇表）。`common/`
+  里两个「文件家族」升级为子包，其余仍是一文件一节点：
+  ```
+  models/
+    __init__.py            两半的导览（不 re-export）
+    hf/                    __init__.py + factory.py + wrapper.py + state_dict_adapter.py
+    common/
+      __init__.py          发现面索引（re-export，仍是 `from .models.common import MoE` 的入口）
+      activation.py  async_linear.py  aux_loss.py  cast_linear.py  embedding.py
+      feed_forward.py  linear.py  multimodal.py  rope.py  scatter_add.py
+      attention/           __init__.py（纯文档，见下）+ qkv.py + masks.py
+      moe/                 __init__.py（纯文档）+ block.py + router.py + experts.py
+                           + dispatcher.py + load_balance.py + balancing.py
+  ```
+  旧→新逐条映射（代码、文档、用例同轮改完）：
+  | 旧 | 新 |
+  |---|---|
+  | `models/hf_wrapper.py` | `models/hf/wrapper.py` |
+  | `models/hf_factory.py` | `models/hf/factory.py` |
+  | `models/hf_state_dict_adapter.py` | `models/hf/state_dict_adapter.py` |
+  | `models/common/moe.py`（MoE 本体） | `models/common/moe/block.py` |
+  | `models/common/moe.py`（`RoutedExperts`） | `models/common/moe/experts.py` |
+  | `models/common/grouped_experts.py` | `models/common/moe/experts.py` |
+  | `models/common/routers.py` | `models/common/moe/router.py` |
+  | `models/common/token_dispatcher.py` | `models/common/moe/dispatcher.py` |
+  | `models/common/moe.py`（`MicrobatchWiseLoadBalanceLoss`） | `models/common/moe/load_balance.py` |
+  | `models/common/balancing.py` | `models/common/moe/balancing.py` |
+  | `models/common/qkv.py` | `models/common/attention/qkv.py` |
+  | `models/common/masks.py` | `models/common/attention/masks.py` |
+  (b) **三条组织约定**（写进各包 docstring）：① 子包索引只做导航，不 re-export——导入一个节点不得
+  拖进它的兄弟（`dispatcher` 需要 EP collectives、`load_balance` 需要 SPMD mesh 上下文；
+  `attention/__init__.py` 更必须保持惰性，因为 `masks.py` 在模块层 import
+  `torch.nn.attention.flex_attention`，否则 `models.common` 在 CPU/无 flex 的 torch 上直接不可导入）；
+  ② 发现面索引只有 `models/common/__init__.py` 一个（平名字可从那里取）；
+  ③ `moe/block.py` 里的 `__getattr__` 懒导出 hack 删除（拆包后循环依赖消失，改为调用方直接
+  import 叶子）。
+  (c) **机械等价性证明**：写脚本把 `git show HEAD:<旧路径>` 的每一个顶层 `def`/`class` 去 docstring
+  归一化后与它在新区里的位置逐一定比——**57 个顶层定义、0 个函数体变化**；唯二的「缺失」是
+  `RoutedExperts`（已证 byte-identical，落在 `moe/experts.py`）与被删除的 `__getattr__`。
+  行为不变的其余证据：`ruff check`（含 F821/I001）通过；用 `spmd_types`/flex 垫片把 26 个
+  models 模块 + `parallel/*`/`components/metrics` 逐个 import，28/30 成功（两个失败是环境既有限制：
+  `trainer.trainer` 缺 grain.experimental、`trainer.builder` 触发 transformers 5.9 在 torch 2.2.2
+  下的内部 `NameError`，与本轮无关）；`tests/unit_tests` = 172 passed / 59 skipped / 9 failed
+  （失败集与上一轮完全一致）。
+  (d) **有意不动**：类名/函数名一个没改（它们与上游符号一一对应，是映射表的锚点）；测试模块
+  文件名保持原样（`test_hf_wrapper.py` 等仍测同一模块，只是模块路径变了）；`models/hf/wrapper.py`
+  的 import 段行数不变，故文档里 `wrapper.py:591/639` 这类行号引用仍指向原语义。
+
 - 检查后续漂移：`git -C <torchtitan> log f35966713..HEAD -- torchtitan/`。
 - 2026-09-23 映射修订：上游 `distributed/linear.py` 已删除、内容迁入
   `models/common/dist_gemm.py`（改名 `AsyncAllGatherLinear`/`AsyncLinearReduceScatter`，

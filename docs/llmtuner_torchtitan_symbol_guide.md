@@ -379,8 +379,8 @@ step 1 恢复 optimizer、scheduler、dataloader 和 train state 后完成并保
 
 ## 10. 全模块符号索引
 
-下表是快速查找入口，覆盖当前 94 个非 `__init__.py` / `__main__.py` 实现模块（截至
-2026-09-27：`llmtuner/` 下 114 个 `.py`）。列出的为顶层类/函数和重要公共方法；私有
+下表是快速查找入口，覆盖当前 98 个非 `__init__.py` / `__main__.py` 实现模块（截至
+2026-09-28：`llmtuner/` 下 122 个 `.py`）。列出的为顶层类/函数和重要公共方法；私有
 helper 在前文涉及关键算法时单列。成组条目（`config/`、`trainer/trainer.py` 等）在行内
 一并列出同组子模块。"同文件"指本文前述路径变换后的 TorchTitan 文件。
 

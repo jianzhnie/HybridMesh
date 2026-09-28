@@ -47,8 +47,8 @@ from llmtuner.accelerator.device import device_type
 if TYPE_CHECKING:
     # Annotation-only: ``ParallelDims`` appears in two signatures below and
     # nowhere at runtime. Importing it eagerly would form a cycle --
-    # ``parallel/__init__`` -> ``expert_parallel.apply`` -> ``models.common.moe``
-    # -> here -- which is entered whenever a model module is imported before
+    # ``parallel/__init__`` -> ``expert_parallel`` -> ``moe/load_balance`` ->
+    # here -- which is entered whenever a model module is imported before
     # ``llmtuner.parallel``.
     from llmtuner.parallel.parallel_dims import ParallelDims
 
