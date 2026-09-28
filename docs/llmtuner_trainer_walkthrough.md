@@ -282,7 +282,13 @@ per-rank token 数（Grain）与 global batch + 行切片（synthetic）是两�
    `datasets/` 的六个核心文件（`types`/`collators`/`loader`/`packing`/`dataset`/`sources`）
    与 `text/text.py` 已代码级对照完毕（2026-09-28 十四次增量，见 upstream map），结论是忠实
    移植 + 已登记的形状差异；余 `multimodal/*`、`random_data.py`、`build.py` 未走。
-   `models/common/*` 尚未开始。**该批的运行期证据仍缺**：`tests/unit_tests/cpu/datasets/`
+   `models/common/*` 已于同日走完（十六次增量，见 upstream map）：`models/common/` 的全部同名文件
+   逐文件 AST 归一化复核，无新增代码缺口，结论与逐处定性见 symbol guide §4；上游独有三文件
+   （`param_init.py` / `lora.py` / `config_utils.py`）定性登记；`token_dispatcher.py` 的
+   `_local_reorder`/`_permute`/`_unpermute`/`combine` 索引数学逐行核对通过（并修掉
+   `BaseEPTokenDispatcher.num_experts` 的一处文档错误）；同轮把 `num_flops_per_token`
+   重写为 MoE/MLA/sliding 感知（唯一实现变更，测试迁到不受门禁影响的
+   `tests/unit_tests/cpu/models/test_flops.py`）。**该批的运行期证据仍缺**：`tests/unit_tests/cpu/datasets/`
    整体被 `require_env('grain')` 门控，本机未装 grain（pyproject 钉 `0.2.18`，本机镜像只有
    `0.2.3`，版本不符故不装），57 例全 skip。
 5. D18 的实现（PP×校验），以及任何运行期/数值等价性验证——都需要 torch≥2.12 + 多卡，

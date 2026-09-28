@@ -240,8 +240,9 @@ class BaseEPTokenDispatcher(LocalTokenDispatcher, ABC):
     """Base for EP dispatchers: owns the EP group and its wiring.
 
     Args:
-        num_experts: experts *per rank* (E / ep_size); this is the "local"
-            count, since each rank holds only a slice of the expert set.
+        num_experts: total expert count (E). Each rank holds only a slice of
+            them: the count is narrowed to the local experts by the all-to-all,
+            and by the weight layout the EP swap installs.
         top_k: experts each token is routed to.
     """
 

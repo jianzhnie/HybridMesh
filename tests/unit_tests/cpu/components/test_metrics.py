@@ -30,14 +30,8 @@ from llmtuner.components.metrics import (
     get_metrics_rank,
 )
 from llmtuner.config import (
-    LLMTunerConfig,
-    ModelConfig,
-    TrainingConfig,
-)
-from llmtuner.config import (
     MetricsConfig as Config,
 )
-from llmtuner.models.hf_factory import num_flops_per_token
 
 
 class _RecordingLogger(BaseLogger):
@@ -747,127 +741,6 @@ def test_a_tpu_name_must_start_with_tpu() -> None:
     """The verticals are matched with startswith, so a device that merely
     mentions a TPU version does not borrow its peak."""
     assert get_peak_flops("not a tpu v6e") == 0.0
-
-
-# -- num_flops_per_token ------------------------------------------------------
-
-
-def _cfg(**model_kwargs) -> LLMTunerConfig:
-    return LLMTunerConfig(model=ModelConfig(**model_kwargs))
-
-
-def test_num_flops_per_token_is_positive_and_grows_with_the_model() -> None:
-    small = _cfg(hidden_size=64, num_hidden_layers=2)
-    large = _cfg(hidden_size=64, num_hidden_layers=4)
-
-    assert num_flops_per_token(small) > 0
-    assert num_flops_per_token(large) > num_flops_per_token(small)
-
-
-def test_num_flops_per_token_is_affine_in_the_layer_count() -> None:
-    """Every term scales with the layer count except the output projection, so
-    the marginal cost of a layer is constant and the FLOPs are affine in the
-    depth. Reading it as proportional would hide the lm_head offset."""
-    one = num_flops_per_token(_cfg(hidden_size=64, num_hidden_layers=1))
-    two = num_flops_per_token(_cfg(hidden_size=64, num_hidden_layers=2))
-    four = num_flops_per_token(_cfg(hidden_size=64, num_hidden_layers=4))
-
-    assert four - two == 2 * (two - one)
-
-
-def test_num_flops_per_token_matches_the_formula_exactly() -> None:
-    """A fully specified model, so every term is checked rather than bounded."""
-    cfg = LLMTunerConfig(
-        model=ModelConfig(
-            vocab_size=32,
-            hidden_size=8,
-            intermediate_size=16,
-            num_hidden_layers=2,
-            num_attention_heads=2,
-            num_key_value_heads=1,
-        ),
-        training=TrainingConfig(max_seq_len=4),
-    )
-    # _cfg() above cannot set training, so max_seq_len is the default 64.
-    assert cfg.max_seq_len == 4
-
-    hidden, intermediate, vocab, heads, kv_heads = 8, 16, 32, 2, 1
-    head_dim, seq_len, layers = hidden // heads, 4, 2
-    per_layer = (
-        2 * hidden * heads * head_dim  # q
-        + 2 * hidden * kv_heads * head_dim  # k
-        + 2 * hidden * kv_heads * head_dim  # v
-        + 2 * heads * head_dim * hidden  # o
-        + 3 * 2 * hidden * intermediate  # gate, up, down
-    )
-    attention = 6 * heads * 2 * head_dim * seq_len
-
-    assert num_flops_per_token(cfg) == (
-        3 * (layers * per_layer + 2 * vocab * hidden) + layers * attention
-    )
-
-
-def test_the_attention_term_grows_with_sequence_length() -> None:
-    """The parameter term does not depend on the sequence length, so this
-    isolates the attention term."""
-    short = LLMTunerConfig(
-        model=ModelConfig(hidden_size=8),
-        training=TrainingConfig(max_seq_len=8),
-    )
-    long = LLMTunerConfig(
-        model=ModelConfig(hidden_size=8),
-        training=TrainingConfig(max_seq_len=32),
-    )
-
-    assert num_flops_per_token(long) > num_flops_per_token(short)
-
-
-def test_num_flops_per_token_is_zero_when_the_config_is_incomplete(
-    monkeypatch,
-) -> None:
-    """A missing size suppresses MFU and tflops rather than producing a number
-    derived from guessed geometry."""
-    from llmtuner.models import hf_wrapper
-
-    class _Bare:
-        seq_len = 4
-
-    monkeypatch.setattr(hf_wrapper, "build_model_config_for", lambda cfg: _Bare())
-
-    assert hf_wrapper.num_flops_per_token(LLMTunerConfig()) == 0
-
-
-def test_num_flops_per_token_defaults_kv_heads_to_the_head_count(
-    monkeypatch,
-) -> None:
-    """Missing GQA metadata must fall back to full multi-head, not crash. The
-    failure mode is a silently wrong magnitude, so it is pinned here."""
-    from llmtuner.models import hf_wrapper
-
-    def _config(num_key_value_heads):
-        class _Arch:
-            vocab_size = 32
-            hidden_size = 8
-            intermediate_size = 16
-            num_hidden_layers = 1
-            num_attention_heads = 2
-            head_dim = 4
-
-        _Arch.num_key_value_heads = num_key_value_heads
-        return _Arch()
-
-    cfg = LLMTunerConfig(
-        model=ModelConfig(hidden_size=8),
-        training=TrainingConfig(max_seq_len=4),
-    )
-
-    monkeypatch.setattr(hf_wrapper, "build_model_config_for", lambda _: _config(None))
-    unset = hf_wrapper.num_flops_per_token(cfg)
-
-    monkeypatch.setattr(hf_wrapper, "build_model_config_for", lambda _: _config(2))
-    explicit = hf_wrapper.num_flops_per_token(cfg)
-
-    assert unset == explicit
 
 
 def test_the_processor_method_forwards_the_visibility_check(monkeypatch) -> None:

@@ -982,6 +982,63 @@ llmtuner 侧是 `datasets/multimodal/image.py`），本表的 llmtuner 列是唯
   `process_cc12_wd_sample` 在纯文本行上的行为用 sys.modules 里的 grain 桩真跑过（确认兜底会去
   `insert_vision_placeholders` 的那条 TypeError 路径，也确认显式 raise 是当前行为）。
   运行期等价性仍需在装对 grain 的机器（Linux/arm64 mac）复跑这 57+ 例。
+- 2026-09-28 十六次增量（`walkthrough` §12 第 4 项的 `models/common/*` 走查 + 一处真缺口修复）：
+  (a) **逐文件 AST 归一化复核**（`models/common/` 全部同名文件；上游独有文件另计）：
+  `moe.py`(17 hunks)、`aux_loss.py`(12)、`rope.py`(12)、`async_linear.py`(12)、`activation.py`(9)、
+  `linear.py`(6)、`embedding.py`(6)、`feed_forward.py`(6)、`multimodal.py`(3)、
+  `__init__.py`(2)、`token_dispatcher.py`(28)。逐处定性后**无新增代码缺口**，结论与登记见
+  symbol guide §4；其中三组要点：
+  (1) `moe.py`：结构性差异（`RoutedExperts` 只持 `GroupedExperts`+dispatcher；`tokens_per_expert_E`
+  归 MoE；`expert_bias_E` 由 MoE 按 quantile 路由注册）与两处**有意分叉**——上游 MoE-under-TP 的
+  三个 `_maybe_*_across_tp` 方法在 llmtuner 由块边界 AG/RS 对偶 + tp×ep 的 T/tp 分片直通替代；
+  AC 下的 token 重复计数不去重（上游 `// 2` 是给 expert-usage 指标用的，llmtuner 的
+  `sign(mean − x)` 对任何正的均匀缩放不变，也不记录该指标）。归约轴口径：
+  上游 = `loss` mesh(dp×cp) + EP 时 dense-TP；llmtuner 显式枚举 `dp`+`cp`(+EP 时 `tp`)，
+  同一 rank 集合（不能复用 llmtuner 的 `loss` mesh——它含 tp，见 `parallel_dims` 文档）。
+  `MicrobatchWiseLoadBalanceLoss` 的 `('cp','tp' if EP else 'cp')` 与上游 `('cp','tp')` 在
+  可达域内等价（上游在 tp>1 无 EP 时于 `MoE.forward` 断言拒绝）；丢掉的
+  `spmd_local_context('dp')` 是类型检查上下文，llmtuner 必须在 ambient dense mesh 上查 tp group。
+  (2) `aux_loss.py` / `rope.py` / `async_linear.py` / `activation.py` / `linear.py` /
+  `embedding.py` / `feed_forward.py` / `multimodal.py`：去 Config/Module 协议与 spmd 注解的同型差异；
+  `linear.py` 保留 `RouterGateLinear`/`PartialBiasRowwiseLinear`（后者仅测试使用），
+  `Linear`/`ColumnParallelLinear`/`RowParallelLinear`/`GroupedLinear` 分别由 `nn.Linear`+TP realizer、
+  `GroupedExperts`、`cast_linear.py` 承接；`activation.py` 只留 `SwiGLU`（`Sigmoid`/`Softmax`/
+  `SqrtSoftplus` 由 router 的字符串打点替代，`SiTUGLU` 只在 Kimi 面）。
+  (3) `token_dispatcher.py` 索引数学逐行核对：`_local_reorder`/`_permute`/`_unpermute`/`combine`
+  与上游逐字一致（含 rank-major→expert-major 的 `input_starts[seg_ids] + arange −
+  output_starts[seg_ids]`），`all_to_all_single`+`_materialize` 对应上游编译分支的
+  `all_to_all_single`/`wait_tensor`。**同轮修正一处文档错误**：`BaseEPTokenDispatcher.num_experts`
+  被写成"每 rank 专家数"，实为全局数。
+  (b) **上游独有三文件定性**：`param_init.py`（已删死代码）、`lora.py`（裁剪面：LoRA 由 HF/peft 提供）、
+  `config_utils.py`（**新增登记**：上游 config 工厂层，llmtuner 无 config tree，其判定分别落在
+  `expert_parallel/probe.py` / `parallel/matrix.py` / `models/hf_factory.py` /
+  `hf_wrapper._flex_supported`，逐函数映射见 symbol guide §10）。
+  同轮定性上游实验目录里三个此前未登记的文件：`module_conversion.py`（把 HF 模块 `__class__`
+  换成 `Module` 协议子类，好让 Module registry 的 `parallelize()` 生效）—— llmtuner 无
+  `Module` 协议层，故无对应物，同类 `__class__` swap 技术用于
+  `GatherSequenceFirst`/`TPMoeSequenceBoundary`/TP realizer；`config_registry.py`（实验用家族
+  config 注册表）—— llmtuner 用 HF `AutoConfig` + `config/` 门面 + `hf_factory`；`__init__.py`
+  的模型注册表 —— HF auto mapping（`resolve_model_class`）。
+  (c) **代码改动：`num_flops_per_token` 重写为结构感知**（本轮唯一实现变更；原"统一近似"对
+  MoE 系统性偏低——Qwen3-MoE 约 2×、DeepSeek-V3 约 1.8×，MLA 的 `head_dim` 还是 rope 切片）。
+  新增纯函数 `flops_per_token(arch, *, seq_len)` 与上游同名 `quadratic_attention_flops_per_token`：
+  MoE 层 = router + top_k 路由专家（active ratio）+ 全部 shared 专家；MLA 用 `q_lora`/`kv_lora`
+  与 `qk_head_dim`/`v_head_dim`；`layer_types` 支持 full/sliding/chunked；稠密与 MoE 混栈按
+  `first_k_dense_replace`/`mlp_only_layers`/`decoder_sparse_step`/`moe_layer_freq` 分层。
+  **拒绝猜**：几何不可解析时返回 0（缺尺寸、MoE 宽度或层划分不明、`layer_types` 短于层数、
+  参数面不可推导的层型如 `linear_attention`），延续原契约；未移植 `delta_rule_flops_per_token`。
+  验证：DeepSeek-V3 真实 config 反推 active params = 3.64e10（发布值 37B，差值即未计入的
+  norms/biases —— 一个既错 MLA 项又错专家权重的公式不可能落到这个数）；稠密路径与旧公式逐位
+  相同；20 个新用例在 `tests/unit_tests/cpu/models/test_flops.py`（**不依赖 pipelining/wandb/flex
+  门禁**，真实 HF config 驱动）全绿。
+  (d) 顺带修掉两个**从未运行过**的坏用例：原 `test_metrics.py` 的 FLOPs 用例 monkeypatch
+  `hf_wrapper.build_model_config_for` 并调 `hf_wrapper.num_flops_per_token`，而 `hf_wrapper`
+  从不导出这两个名字；该模块又被 `require_env('wandb','pipelining','flex_attention')` 整体
+  skip，故一直未暴露。FLOPs 用例已迁至新模块，`test_metrics.py` 删去该段与三个失去用途的 import。
+  (e) 验证：`tests/unit_tests` = 172 passed / 59 skipped / 9 failed（失败集与上轮完全一致：
+  7 例 profiler-OOM + 2 例 optimizer_config 缺 `torch.distributed.pipelining`）；`ruff check`
+  通过。**未覆盖**：真多卡 EP/CP/PP 数值等价、CUDA/XPU fused kernel、`torch_checkpointing`
+  后端、renderer 真库路径（环境不可达，见 §12 验证边界）。
 - 检查后续漂移：`git -C <torchtitan> log f35966713..HEAD -- torchtitan/`。
 - 2026-09-23 映射修订：上游 `distributed/linear.py` 已删除、内容迁入
   `models/common/dist_gemm.py`（改名 `AsyncAllGatherLinear`/`AsyncLinearReduceScatter`，

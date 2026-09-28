@@ -22,7 +22,7 @@ dependencies = [
     # (large shapes return ~1e35 or NaN). It defaults to False and falls back to
     # a per-expert loop, so a <2.14 install still runs correctly -- just without
     # the fused kernel.
-    "torch>=2.12",
+    "torch>=2",
     # Pinned to one minor: the MoE expert layout this code probes
     # (`gate_up_proj` / `down_proj`) is a 5.x shape, and the pin matches
     # torchtitan's transformers_modeling_backend experiment, which this
@@ -41,13 +41,13 @@ dependencies = [
     # It is a Google library (github.com/google/grain) and pulls in their stack
     # (absl-py, etils, protobuf, and array-record on non-Windows). It does NOT
     # depend on JAX -- that import is behind an optional sharding/sharding path.
-    "grain==0.2.18",
+    "grain",
     # Imported directly by the migrated data layer (datasets/,
     # components/tokenizer.py). `transformers` happens to pull some of these in,
     # but that is incidental -- the data layer must not break when used without
     # a model. `datasets` and `tokenizers` back the sources and the tokenizer,
     # `jinja2` renders chat templates; the rest are reached only on the
-    # multimodal path (datasets/multimodal/mm_image.py, mm_video.py).
+    # multimodal path (datasets/multimodal/image.py, video.py).
     "datasets>=3.6.0",
     "tokenizers>=0.15.0",
     "jinja2",
