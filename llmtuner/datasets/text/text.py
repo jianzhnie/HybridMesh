@@ -155,6 +155,39 @@ class ChatProcessor(SampleProcessor):
                 f"Second message must be 'assistant', got '{messages[1]['role']}'"
             )
 
+    def _is_too_long(self, num_tokens: int) -> bool:
+        """Whether a rendered sample has to be dropped, logging the reason.
+
+        The count is the render's token count; the sequence keeps one token
+        fewer as labels, hence the ``- 1``.
+
+        TODO(data-sft-overflow): Consider truncating oversized examples
+        instead. Causal loss remains valid for the retained response prefix.
+        """
+        if num_tokens - 1 <= self._max_context_length:
+            return False
+        logger.debug(
+            "Dropping sample: token count exceeds max_context_length=%d",
+            self._max_context_length,
+        )
+        return True
+
+    def _log_first_sample(self, text: str) -> None:
+        """Print the first full render once, so a template can be eyeballed.
+
+        Nothing else in the loop shows what the tokenizer was actually fed.
+        """
+        if self._logged_first_sample:
+            return
+        logger.info(f"[ChatProcessor] First sample full:\n{text}")
+        self._logged_first_sample = True
+
+    @staticmethod
+    def _shift_to_next_token(full_tokens) -> tuple[np.ndarray, np.ndarray]:
+        """Split one token stream into next-token-aligned input and labels."""
+        tokens = np.asarray(full_tokens, dtype=np.int64)
+        return tokens[:-1], tokens[1:].copy()
+
     def _tokenize_sample(self, sample: dict[str, Any]) -> TextSequence | None:
         """Tokenize a single-turn sample and mask prompt labels.
 
@@ -178,18 +211,8 @@ class ChatProcessor(SampleProcessor):
         if full_tokens[-1] != self._eos_id:
             full_tokens.append(self._eos_id)
 
-        if not self._logged_first_sample:
-            logger.info(f"[ChatProcessor] First sample full:\n{full_text}")
-            self._logged_first_sample = True
-
-        # TODO(data-sft-overflow): Consider truncating oversized examples instead.
-        # Causal loss remains valid for the retained response prefix.
-        # Drop oversized examples rather than truncating.
-        if len(full_tokens) - 1 > self._max_context_length:
-            logger.debug(
-                "Dropping sample: token count exceeds "
-                f"max_context_length={self._max_context_length}"
-            )
+        self._log_first_sample(full_text)
+        if self._is_too_long(len(full_tokens)):
             return None
 
         # Find prompt/response boundary by tokenizing just the user message
@@ -199,12 +222,9 @@ class ChatProcessor(SampleProcessor):
         )
         prompt_tokens = self._tokenizer.encode(prompt_text, add_bos=True, add_eos=False)
         _require_token_prefix(full_tokens, prompt_tokens)
-        prompt_len = len(prompt_tokens)
 
-        tokens = np.asarray(full_tokens, dtype=np.int64)
-        input_ids = tokens[:-1]
-        labels = tokens[1:].copy()
-        labels[: max(prompt_len - 1, 0)] = IGNORE_INDEX
+        input_ids, labels = self._shift_to_next_token(full_tokens)
+        labels[: max(len(prompt_tokens) - 1, 0)] = IGNORE_INDEX
         return TextSequence(
             input_ids=input_ids,
             labels=labels,
@@ -231,28 +251,20 @@ class ChatProcessor(SampleProcessor):
         if rendered.multi_modal_data is not None:
             raise ValueError("ChatProcessor supports text-only samples.")
 
+        # Decoded only when it will be printed: the render is per sample.
         if not self._logged_first_sample:
-            full_text = self._tokenizer.decode(
-                list(rendered.token_ids), skip_special_tokens=False
+            self._log_first_sample(
+                self._tokenizer.decode(
+                    list(rendered.token_ids), skip_special_tokens=False
+                )
             )
-            logger.info(f"[ChatProcessor] First sample full:\n{full_text}")
-            self._logged_first_sample = True
-
-        # TODO(data-sft-overflow): Consider truncating oversized examples instead.
-        # Causal loss remains valid for the retained response prefix.
-        # Drop oversized examples rather than truncating.
-        if len(rendered.token_ids) - 1 > self._max_context_length:
-            logger.debug(
-                "Dropping sample: token count exceeds "
-                f"max_context_length={self._max_context_length}"
-            )
+        if self._is_too_long(len(rendered.token_ids)):
             return None
 
-        tokens = np.asarray(rendered.token_ids, dtype=np.int64)
-        labels = tokens[1:].copy()
+        input_ids, labels = self._shift_to_next_token(rendered.token_ids)
         labels[~np.asarray(rendered.loss_mask[1:], dtype=bool)] = IGNORE_INDEX
         return TextSequence(
-            input_ids=tokens[:-1],
+            input_ids=input_ids,
             labels=labels,
         )
 

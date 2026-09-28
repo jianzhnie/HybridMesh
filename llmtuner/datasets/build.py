@@ -45,6 +45,80 @@ if TYPE_CHECKING:
 __all__ = ["build_dataloader"]
 
 
+def _multimodal_registry(dataset_name: str):
+    """The multimodal recipe table, collator and packer, imported lazily.
+
+    The import stays inside the call: the multimodal subtree pulls in
+    torchvision (and a video backend behind it), and a text-only run must not
+    have to install them. Unknown recipe names are rejected here, at build
+    time, rather than in ``DataloaderConfig.__post_init__`` -- the registries
+    live in this package and the config layer must not import them.
+    """
+    try:
+        from .multimodal.mm_collator import MultiModalCollator
+        from .multimodal.mm_datasets import MM_DATASETS, build_mm_sample_packing
+    except ImportError as exc:
+        raise ImportError(
+            f"dataset {dataset_name!r} is not one of the text "
+            f"recipes {sorted(DATASETS)}, so it was looked up in the "
+            "multimodal registry -- which failed to import. Multimodal "
+            "recipes need the optional dependencies torchvision and Pillow "
+            "(and av for video): install them with `pip install torchvision "
+            "pillow av`, or name a text recipe instead."
+        ) from exc
+    if dataset_name not in MM_DATASETS:
+        raise ValueError(
+            f"unknown dataset {dataset_name!r}. Expected 'random', "
+            f"'local_jsonl', a text recipe {sorted(DATASETS)}, or a "
+            f"multimodal recipe {sorted(MM_DATASETS)}"
+        )
+    return MM_DATASETS, MultiModalCollator, build_mm_sample_packing
+
+
+def _text_recipe(dataloader_config, *, dataset_name: str, tokenizer):
+    """The text recipe plus how to pack and collate it.
+
+    Both recipes are built the same way and differ only in kind: the
+    discriminating work is in the packing node, never in the collator, which is
+    why the trainer needs no way to tell them apart.
+    """
+    if dataset_name == "local_jsonl":
+        recipe = make_local_jsonl(path=dataloader_config.dataset_path)
+    elif dataset_name == "local_jsonl_sft":
+        if dataloader_config.chat_renderer is not None:
+            # Imported here, not at module scope: the renderers package is an
+            # optional dependency, and a run that leaves chat_renderer unset
+            # must not have to install it.
+            from llmtuner.datasets.text.renderer import build_chat_renderer
+
+            recipe = make_local_jsonl_sft_multiturn(
+                path=dataloader_config.dataset_path,
+                messages_field=dataloader_config.messages_field,
+                renderer=build_chat_renderer(
+                    tokenizer=tokenizer,
+                    renderer_name=dataloader_config.chat_renderer,
+                ),
+            )
+        else:
+            recipe = make_local_jsonl_sft(
+                path=dataloader_config.dataset_path,
+                prompt_field=dataloader_config.prompt_field,
+                response_field=dataloader_config.response_field,
+            )
+    else:
+        recipe = DATASETS[dataset_name]
+    if dataloader_config.packing == "first_fit":
+        # Always passed, at its default when unset: forwarding it only for
+        # first_fit would make it a field whose value is silently dropped.
+        return (
+            recipe,
+            build_first_fit_packing,
+            {"num_packing_bins": dataloader_config.num_packing_bins},
+            TextCollator,
+        )
+    return recipe, build_concat_then_split_packing, {}, TextCollator
+
+
 def build_dataloader(
     config: LLMTunerConfig,
     *,
@@ -88,40 +162,15 @@ def build_dataloader(
             dp_world_size=dp_world_size,
         )
 
-    # A name that is neither a text recipe nor ``local_jsonl`` is tried
-    # against the multimodal registry. That import stays inside the branch:
-    # the multimodal subtree pulls in torchvision (and a video backend behind
-    # it), and a text-only run must not have to install them. Unknown recipe
-    # names are rejected here, at build time, rather than in
-    # ``DataloaderConfig.__post_init__``: the registries live in this package,
-    # and the config layer must not import them. Checked before the tokenizer
-    # is built so a bad name fails fast without loading tokenizer assets.
+    # A name that is neither a text recipe nor ``local_jsonl`` is tried against
+    # the multimodal registry -- resolved before the tokenizer is built, so a
+    # bad name fails fast without loading tokenizer assets.
     is_multimodal = (
         dataset_name not in {"local_jsonl", "local_jsonl_sft"}
         and dataset_name not in DATASETS
     )
     if is_multimodal:
-        try:
-            from .multimodal.mm_collator import MultiModalCollator
-            from .multimodal.mm_datasets import (
-                MM_DATASETS,
-                build_mm_sample_packing,
-            )
-        except ImportError as exc:
-            raise ImportError(
-                f"dataset {dataset_name!r} is not one of the text "
-                f"recipes {sorted(DATASETS)}, so it was looked up in the "
-                "multimodal registry -- which failed to import. Multimodal "
-                "recipes need the optional dependencies torchvision and Pillow "
-                "(and av for video): install them with `pip install torchvision "
-                "pillow av`, or name a text recipe instead."
-            ) from exc
-        if dataset_name not in MM_DATASETS:
-            raise ValueError(
-                f"unknown dataset {dataset_name!r}. Expected 'random', "
-                f"'local_jsonl', a text recipe {sorted(DATASETS)}, or a "
-                f"multimodal recipe {sorted(MM_DATASETS)}"
-            )
+        MM_DATASETS, collator, build_packing = _multimodal_registry(dataset_name)
 
     # Imported here, not at module scope: building the tokenizer pulls in
     # ``tokenizers``/``jinja2``, and a random-token run should not have to
@@ -145,50 +194,14 @@ def build_dataloader(
         # split, and the collator reshapes the media into patches. This is not
         # ``--packing``: that selector names a text recipe, and the media path
         # ignores it.
-        build_packing = build_mm_sample_packing
         packing_kwargs: dict[str, int] = {}
-        collator = MultiModalCollator
     else:
         tokenizer = HuggingFaceTokenizer(
             tokenizer_path=dataloader_config.tokenizer_path
         )
-        if dataset_name == "local_jsonl":
-            recipe = make_local_jsonl(path=dataloader_config.dataset_path)
-        elif dataset_name == "local_jsonl_sft":
-            if dataloader_config.chat_renderer is not None:
-                # Imported here, not at module scope: the renderers package is
-                # an optional dependency, and a run that leaves chat_renderer
-                # unset must not have to install it.
-                from llmtuner.datasets.text.renderer import build_chat_renderer
-
-                recipe = make_local_jsonl_sft_multiturn(
-                    path=dataloader_config.dataset_path,
-                    messages_field=dataloader_config.messages_field,
-                    renderer=build_chat_renderer(
-                        tokenizer=tokenizer,
-                        renderer_name=dataloader_config.chat_renderer,
-                    ),
-                )
-            else:
-                recipe = make_local_jsonl_sft(
-                    path=dataloader_config.dataset_path,
-                    prompt_field=dataloader_config.prompt_field,
-                    response_field=dataloader_config.response_field,
-                )
-        else:
-            recipe = DATASETS[dataset_name]
-        # Both recipes are built the same way and differ only in kind: the
-        # discriminating work is in the packing node, never in the collator,
-        # which is why the trainer needs no way to tell them apart.
-        if dataloader_config.packing == "first_fit":
-            build_packing = build_first_fit_packing
-            # Always passed, at its default when unset: forwarding it only for
-            # first_fit would make it a field whose value is silently dropped.
-            packing_kwargs = {"num_packing_bins": dataloader_config.num_packing_bins}
-        else:
-            build_packing = build_concat_then_split_packing
-            packing_kwargs = {}
-        collator = TextCollator
+        recipe, build_packing, packing_kwargs, collator = _text_recipe(
+            dataloader_config, dataset_name=dataset_name, tokenizer=tokenizer
+        )
     context = DatasetBuildContext(
         tokenizer=tokenizer,
         max_context_length=max_context_length,
