@@ -20,6 +20,7 @@ import torch
 import torch.nn as nn
 
 from llmtuner.components.optimizer import OptimizersContainer
+from llmtuner.components.optimizer import optimizer as optimizer_module
 from llmtuner.config import OptimizerConfig, ParamGroupConfig
 
 
@@ -146,13 +147,51 @@ def test_each_model_part_gets_its_own_inner_optimizer() -> None:
 @pytest.mark.parametrize("implementation", ["for-loop", "foreach", "fused"])
 def test_the_implementation_flag_reaches_the_inner_optimizer(
     implementation: str,
+    monkeypatch,
 ) -> None:
+    """On a device with the fused kernel the flag is passed through verbatim."""
+    monkeypatch.setattr(optimizer_module, "device_type", "cuda")
     container = OptimizersContainer(
         _cfg(_catch_all(), implementation=implementation), model_parts=[_model()]
     )
     group = container.optimizers[0].param_groups[0]
     assert group["fused"] is (implementation == "fused")
     assert group["foreach"] is (implementation == "foreach")
+
+
+def test_fused_downshifts_where_torch_ships_no_fused_kernel(monkeypatch) -> None:
+    """``fused`` is the default, so a device without the kernel has to get the
+    for-loop one. torch checks the device only for the ``fused=`` *argument*;
+    the flag rides in the param group here, so the bare flag used to survive
+    construction and kill the first ``step()`` with a NotImplementedError."""
+    monkeypatch.setattr(optimizer_module, "device_type", "cpu")
+
+    container = OptimizersContainer(
+        _cfg(_catch_all(), implementation="fused"), model_parts=[_model()]
+    )
+
+    assert container.optimizers[0].param_groups[0]["fused"] is False
+    assert container.optimizers[0].param_groups[0]["foreach"] is False
+
+
+def test_the_default_implementation_steps_on_a_device_without_a_fused_kernel() -> None:
+    """The regression itself: the default config must survive a real step.
+
+    No monkeypatching -- this is the CPU the suite runs on, and the default
+    ``implementation="fused"`` is what a laptop run gets.
+    """
+    model = _model()
+    container = OptimizersContainer(
+        OptimizerConfig(learning_rate=0.1), model_parts=[model]
+    )
+    for param in model.parameters():
+        param.grad = torch.ones_like(param)
+
+    container.step()
+
+    # A step that ran leaves ``step`` behind in every state dict entry.
+    states = container.optimizers[0].state
+    assert states and all(state["step"] > 0 for state in states.values())
 
 
 def test_an_unknown_optimizer_name_is_rejected() -> None:

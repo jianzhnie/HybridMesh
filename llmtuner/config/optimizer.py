@@ -134,9 +134,11 @@ class OptimizerConfig:
     implementation: Literal["fused", "foreach", "for-loop"] = field(
         default="fused",
         metadata={
-            "help": "Optimizer kernel. 'fused' is CUDA-only and falls back to "
-            "the for-loop kernel elsewhere; on CPU all three are bit-identical. "
-            "torchtitan's default."
+            "help": "Optimizer kernel: 'fused' | 'foreach' | 'for-loop'. "
+            "'fused' needs a device torch ships a fused Adam kernel for "
+            "(CUDA/XPU); on any other device the request is honoured as the "
+            "for-loop kernel, which computes the same update. torchtitan's "
+            "default."
         },
     )
     param_groups: list[ParamGroupConfig] = field(

@@ -421,14 +421,6 @@ class MetricsProcessor:
         self.step_last_log: int | None = None
         self.device_memory_monitor.reset_peak_stats()
 
-    def set_num_flops_per_token(self, num_flops_per_token: int) -> None:
-        """Set the FLOPs-per-token figure once the model is built.
-
-        Separate from ``__init__`` because the metrics processor is built before
-        the model, and the number cannot be known until it exists.
-        """
-        self.num_flops_per_token = num_flops_per_token
-
     def ensure_pp_loss_visible(self) -> None:
         """Run :func:`ensure_pp_loss_visible` with this processor's settings.
 

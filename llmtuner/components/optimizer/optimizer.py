@@ -24,7 +24,7 @@ to the checkpointer.
   ``exp_avg`` to write into and silently restart from a cold optimizer under
   warm weights.
 
-Departures from upstream, all subtractive:
+Departures from upstream, subtractive except where noted:
 
 * **No ``Configurable``.** torchtitan configs build themselves. llmtuner keeps
   every config in ``llmtuner.config``, so the container takes an
@@ -35,6 +35,15 @@ Departures from upstream, all subtractive:
 * **No bf16 optimizer states.** ``fused_opt_states_bf16`` and the
   materialize-in-bf16 pre-hook it needs are not ported; the implementation
   setting stops at ``fused`` / ``foreach`` / ``for-loop``.
+* **``fused`` is resolved against the device.** torchtitan hands the flag
+  straight to every param group; torch validates the device only for the
+  ``fused=`` *argument*, so a per-group ``fused=True`` on a device with no fused
+  Adam kernel is accepted at construction and dies on the first ``step()``
+  (``NotImplementedError: aten::_fused_adamw_ ... 'CPU'``). Since ``fused`` is
+  the config's default, that would make the default CPU run unusable. llmtuner
+  asks torch which devices it ships the kernel for and falls back to the
+  for-loop implementation elsewhere -- the flag is a kernel preference, and the
+  two runnable kernels are bit-identical on CPU.
 * **No ``optimizer_factory_kwargs_by_name``.** That hook exists for per-parameter
   compute metadata and communication bucket specs; nothing in llmtuner passes it.
 * **``_validate_params`` raises ``ValueError``, not ``AssertionError``, and
@@ -57,6 +66,7 @@ import torch.nn as nn
 from torch.distributed.checkpoint.stateful import Stateful
 from torch.optim import Optimizer
 
+from ...accelerator.device import device_type
 from ...utils.logger_utils import get_logger
 from ..checkpointer.utils import canonical_fqn
 from .utils import (
@@ -74,6 +84,21 @@ if TYPE_CHECKING:
 logger = get_logger(__name__)
 
 __all__ = ["OptimizersContainer"]
+
+
+def _fused_kernel_device_types() -> frozenset[str]:
+    """Device types torch ships fused Adam/AdamW kernels for.
+
+    torch keeps this list internally (``torch.optim.adam``); asking it beats
+    hard-coding, so a build without an XPU kernel, or a vendor build that adds
+    its own, is described correctly. The fallback is the pair those kernels
+    have always covered, for the day the private helper moves.
+    """
+    try:
+        from torch.optim.adam import _get_fused_kernels_supported_devices
+    except ImportError:  # pragma: no cover - private helper moved
+        return frozenset({"cuda", "xpu"})
+    return frozenset(_get_fused_kernels_supported_devices())
 
 
 class OptimizersContainer(Optimizer, Stateful):
@@ -161,6 +186,16 @@ class OptimizersContainer(Optimizer, Stateful):
                 f"Unknown optimizer implementation {implementation!r}; expected "
                 "one of 'fused', 'foreach', 'for-loop'."
             )
+        has_fused_kernel = device_type in _fused_kernel_device_types()
+        if implementation == "fused" and not has_fused_kernel:
+            # See the module docstring: the flag is a preference, and the
+            # default one has to leave a CPU run working.
+            logger.info(
+                "optimizer.implementation='fused' has no kernel on %s; using "
+                "the for-loop implementation instead.",
+                device_type,
+            )
+            implementation = "for-loop"
         return {
             "fused": implementation == "fused",
             "foreach": implementation == "foreach",
