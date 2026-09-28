@@ -29,7 +29,7 @@ import torch.nn as nn
 from torch.nn import ModuleDict, ModuleList
 
 from llmtuner.models.hf.factory import build_model_config
-from llmtuner.models.hf.wrapper import HFTransformerModel
+from llmtuner.models.hf.model import HFTransformerModel
 from llmtuner.parallel.fully_shard import apply
 from llmtuner.parallel.fully_shard.fsdp import iter_transformer_layers
 

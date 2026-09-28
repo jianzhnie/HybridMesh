@@ -35,7 +35,7 @@ from llmtuner.models.common.moe.block import MoE, iter_moe_layers
 from llmtuner.models.common.moe.dispatcher import LocalTokenDispatcher
 from llmtuner.models.common.moe.experts import GroupedExperts, RoutedExperts
 from llmtuner.models.common.moe.router import TokenChoiceTopKRouter
-from llmtuner.models.hf.wrapper import HFTransformerModel
+from llmtuner.models.hf.model import HFTransformerModel
 from llmtuner.parallel.expert_parallel import swap_hf_moe_blocks
 
 try:

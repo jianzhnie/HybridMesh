@@ -51,7 +51,7 @@ from llmtuner.config import (
     TrainingConfig,
 )
 from llmtuner.models.hf.factory import build_model_config
-from llmtuner.models.hf.wrapper import HFTransformerModel
+from llmtuner.models.hf.model import HFTransformerModel
 from llmtuner.parallel import activation_checkpoint as ac_mod
 from llmtuner.parallel.activation_checkpoint import (
     VALID_AC_MODES,

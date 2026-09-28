@@ -213,7 +213,7 @@ llmtuner 全部内联在一个函数里（`llmtuner/trainer/trainer.py:528-830`�
 | D16 | PP 微批切分点 | 上游从 dataloader 直接读 PP 微批（`torchtitan/trainer.py:341-350`）；llmtuner 每 accumulation 组读 1 个 batch 再切（`llmtuner/trainer/pp_steps.py:22`） | 等价但落点不同 | 无 |
 | D17 | PP 损失函数的双驱动接线 | 两个驱动器送 `global_valid_tokens` 的通道不同：公开 `step` 经 `loss_kwargs` 转发进 `loss_fn(output, target, **loss_kwargs)`（上游正是这么接的），私有 `_step_microbatches` 没有该参数、只能读 `schedule._llmtuner_global_valid_tokens`。原实现在 `build_pipeline_schedule` 里把 schedule 的 `_loss_fn` 换成只收 `(pred, labels)` 的 lambda，于是公开路径一被走到就 `TypeError`（torch 会多传 `global_valid_tokens` 关键字）；单元测试用的假 schedule 自己读 `loss_kwargs`，掩盖了这条通路 | 真实差异（潜伏 bug） | 已修：抽出 `make_schedule_loss_fn`（`llmtuner/parallel/pipeline_parallel/apply.py:93`），kwarg 优先、属性兜底；两条通路都在调用前置好属性（`llmtuner/trainer/pp_steps.py:117`）；新增受 `pipelining` 门禁的用例钉住两侧一致（`tests/unit_tests/cpu/parallel/test_pipeline.py:413`） |
 | D18 | PP×校验 | 上游校验器有完整 PP 分支，用 `pp_schedule.eval(arg_mbs=, kwarg_mbs=, target_mbs=, losses=)` 前向（`torchtitan/components/validate.py:164` 取微批数、`:234` 驱动 eval）；llmtuner 在装配期直接拒绝该组合（`llmtuner/parallel/matrix.py:117`，由 `llmtuner/trainer/validate.py:53` 调用），`llmtuner/trainer/validate.py` 体里没有任何 PP 分支 | 真实差异（功能缺失，loud-raise） | 未实现。理由经复核后**部分更正**：`matrix.pp_validation` 原写"没有 eval-only 管线通路"，但 torch 的 schedule 有 `eval`（上游正在用）；准确的原因是 llmtuner 的 PP 接缝只接了训练驱动器（行切微批 + D17 那套分母注入），eval 驱动器要另配一套。在补齐之前保持 loud-raise（不得静默跳过） |
-| D19 | `max_num_documents` 未穿透到 `preprocess_inputs` | 上游把 `max_num_documents` 传给 `preprocess_inputs`（`torchtitan/training_engine.py:530`、`:569`）用于 CUDA graph 的定长 varlen 元数据（`torchtitan/config/validation.py:49` 在开启图且未设时 loud-raise）；llmtuner 无图通路（D10），走 flex `BlockMask`（`llmtuner/models/hf/wrapper.py:639`） | 有意裁剪（本轮已核实理由成立） | 无。`max_num_documents` 仍在打包面生效（`llmtuner/datasets/packing/build.py:55`）；`create_varlen_metadata_for_document` 存在但训练通路无调用方（只有 `tests/unit_tests/cpu/models/test_masks.py` 引用），即"传进去只会被丢弃"属实 |
+| D19 | `max_num_documents` 未穿透到 `preprocess_inputs` | 上游把 `max_num_documents` 传给 `preprocess_inputs`（`torchtitan/training_engine.py:530`、`:569`）用于 CUDA graph 的定长 varlen 元数据（`torchtitan/config/validation.py:49` 在开启图且未设时 loud-raise）；llmtuner 无图通路（D10），走 flex `BlockMask`（`llmtuner/models/hf/model.py:639`） | 有意裁剪（本轮已核实理由成立） | 无。`max_num_documents` 仍在打包面生效（`llmtuner/datasets/packing/build.py:55`）；`create_varlen_metadata_for_document` 存在但训练通路无调用方（只有 `tests/unit_tests/cpu/models/test_masks.py` 引用），即"传进去只会被丢弃"属实 |
 
 **仍未闭合的一条**：D15 里的 DTensor RNG tracker。判定为"不适用"，理由写在上表，
 但**没有运行期证据**（本机无 torch≥2.12 多卡环境）。若后续要严格对齐种子生成，
@@ -292,7 +292,9 @@ per-rank token 数（Grain）与 global batch + 行切片（synthetic）是两�
    组织重构——分成 `hf/`（适配层）与 `common/`（词汇表），`common/` 里的 MoE 栈与 attention 拆成
    子包（`moe/{block,router,experts,dispatcher,load_balance,balancing}.py`、
    `attention/{qkv,masks}.py`），子包索引只做导航不 re-export，旧路径逐条映射见 upstream map；
-   纯搬家不改行为，且有「57 个顶层定义、0 个函数体变化」的机械证明。**该批的运行期证据仍缺**：`tests/unit_tests/cpu/datasets/`
+   纯搬家不改行为，且有「57 个顶层定义、0 个函数体变化」的机械证明。同日十八次增量收尾 `hf/`：
+   `factory.py` 的纯算术拆成 `flops.py`、`wrapper.py` 按上游命名改为 `model.py`（23 个顶层定义
+   0 变化）。**该批的运行期证据仍缺**：`tests/unit_tests/cpu/datasets/`
    整体被 `require_env('grain')` 门控，本机未装 grain（pyproject 钉 `0.2.18`，本机镜像只有
    `0.2.3`，版本不符故不装），57 例全 skip。
 5. D18 的实现（PP×校验），以及任何运行期/数值等价性验证——都需要 torch≥2.12 + 多卡，

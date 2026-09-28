@@ -46,8 +46,8 @@ from ..models.hf.factory import (
     materialize_meta_model,
     num_flops_per_token,
 )
+from ..models.hf.model import HFTransformerModel
 from ..models.hf.state_dict_adapter import HFTransformerStateDictAdapter
-from ..models.hf.wrapper import HFTransformerModel
 from ..parallel import matrix
 from ..parallel.parallel_dims import build_mesh, build_parallel_dims
 from ..parallel.pipeline_parallel import PipelineParallelSetup

@@ -48,7 +48,7 @@ from torch.nn.attention.flex_attention import create_block_mask
 
 from llmtuner.models.common.attention.masks import get_causal_mask_mod
 from llmtuner.models.hf.factory import build_model_config_for
-from llmtuner.models.hf.wrapper import HFTransformerModel
+from llmtuner.models.hf.model import HFTransformerModel
 from llmtuner.parallel.context_parallel import (
     apply_cp,
     shard_attention_mask_for_cp,

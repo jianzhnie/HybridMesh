@@ -5,7 +5,7 @@ scored in a configured dtype regardless of the dtype the rest of the model
 runs in, because bf16 logits lose the precision the loss (and RL logprob/KL
 math downstream of it) needs. Upstream swaps the lm_head's config node inside
 its model-config tree; llmtuner has no config tree, so the swap happens at model
-build time in ``models/hf/wrapper.py`` and this file carries only the module
+build time in ``models/hf/model.py`` and this file carries only the module
 and the in-place swap helper.
 
 The class is an ``nn.Linear`` subclass rather than a wrapper around one on

@@ -38,7 +38,7 @@ from transformers import AutoConfig
 from llmtuner.models.common.aux_loss import AuxLoss
 from llmtuner.models.common.moe.block import MoE
 from llmtuner.models.common.moe.experts import RoutedExperts
-from llmtuner.models.hf.wrapper import HFTransformerModel
+from llmtuner.models.hf.model import HFTransformerModel
 from llmtuner.parallel.expert_parallel import swap_hf_moe_blocks
 from llmtuner.parallel.expert_parallel.swap import restore_fp32_state_buffers
 

@@ -49,7 +49,7 @@ import torch.nn.functional as F
 from torch.distributed.device_mesh import init_device_mesh
 
 from llmtuner.models.hf.factory import build_model_config_for
-from llmtuner.models.hf.wrapper import HFTransformerModel
+from llmtuner.models.hf.model import HFTransformerModel
 from llmtuner.parallel.context_parallel import (
     apply_cp,
     shard_attention_mask_for_cp,
@@ -339,7 +339,7 @@ def _check_preprocess_inputs_matches(mesh, failures: list[str]) -> float:
             return mesh["cp"] if name == "cp" else None
 
     with mock.patch(
-        "llmtuner.models.hf.wrapper.create_attention_mask",
+        "llmtuner.models.hf.model.create_attention_mask",
         _uncompiled_create_attention_mask,
     ):
         inputs, out_labels, extra = model.preprocess_inputs(

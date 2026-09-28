@@ -47,7 +47,7 @@ from llmtuner.components.metrics import get_metrics_rank
 from llmtuner.config import MetricsConfig
 from llmtuner.datasets.random_data import RandomTokenSource, batch_iterator
 from llmtuner.models.hf.factory import build_model_config_for
-from llmtuner.models.hf.wrapper import HFTransformerModel
+from llmtuner.models.hf.model import HFTransformerModel
 from llmtuner.trainer import (
     LLMTunerConfig,
     ModelConfig,

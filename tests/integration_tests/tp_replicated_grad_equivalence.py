@@ -34,7 +34,7 @@ import torch.nn.functional as F
 
 from llmtuner.config import ParallelConfig
 from llmtuner.models.hf.factory import build_model_config
-from llmtuner.models.hf.wrapper import HFTransformerModel
+from llmtuner.models.hf.model import HFTransformerModel
 from llmtuner.parallel.parallel_dims import ParallelDims, build_mesh
 from llmtuner.parallel.tensor_parallel import apply_tp
 from llmtuner.parallel.tensor_parallel.tp import (

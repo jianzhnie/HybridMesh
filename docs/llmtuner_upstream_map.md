@@ -1,7 +1,7 @@
 # llmtuner → torchtitan 对应关系表
 
 [llmtuner](../llmtuner) 拿掉了 TorchTitan 的 `Configurable` 与 `Module` 两个抽象层，换来一个
-明显更短的框架：122 个 Python 模块（98 个实现模块）、约 29.6k 行，覆盖 TP / FSDP2 /
+明显更短的框架：123 个 Python 模块（99 个实现模块）、约 29.7k 行，覆盖 TP / FSDP2 /
 CP / EP / PP 五条并行路径的装配、训练循环、checkpoint 与等价性测试。本文是这些模块与
 torchtitan 之间对应关系的**唯一权威**。
 
@@ -110,7 +110,7 @@ C 类上会把项目**故意删掉**的抽象又拽回来。
 
 | llmtuner | 替代掉的上游 | ratio |
 | --- | --- | --- |
-| `models/hf/wrapper.py`（+ `models/hf/factory.py` 构建侧） | `experiments/transformers_modeling_backend/model.py` 的包装层；上游另有 `models/*/model.py` 各一份 | 0.059 |
+| `models/hf/model.py`（2026-09-28 十八次增量随上游命名；+ `models/hf/factory.py` 构建侧、`models/hf/flops.py` 算术侧） | `experiments/transformers_modeling_backend/model.py` 的包装层；上游另有 `models/*/model.py` 各一份 | 0.059 |
 | `models/hf/state_dict_adapter.py` | `experiments/transformers_modeling_backend/state_dict_adapter.py`；llmtuner 更强：读 safetensors index 做 missing/unexpected 严格校验；上游的 `hf_to_titan_moe_state_dict` 转换对因 llmtuner EP swap 直接搬运 HF 权重（无第二 key 布局）而不需要 | — |
 | `parallel/parallelize.py`（2026-09-26 文件名对齐上游，原 parallelize_hf.py） | `experiments/transformers_modeling_backend/parallelize.py` + 各 `models/*/parallelize.py` | 0.089 |
 | `parallel/tensor_parallel/tp.py`（+ `apply.py` 入口） | 各模型 TP plan；上游的 TP 声明层已随 DTensor 后端迁到 `protocols/sharding.py` + 各模型 `*_sharding.py`，旧的 `distributed/tensor_parallel.py` 于 `7e7f271e0` 删除。llmtuner 是**手写 plan realizer**，对应上游的声明式 `_sharding_config` 面（逐项对应见本文「TP/SP 对齐结论」） | 0.056 |
@@ -218,7 +218,7 @@ baff3c681）——上游形态是把 Ulysses 的 token↔head resharding 提为
 分片（`cp_shard` 把 `attention_masks` 摘出再原样放回），因为 all-to-all 后每个 rank
 都持有全长 token 流。llmtuner 按 B 类语义适配、不复制类层次：packed 语料的"varlen
 元数据"在 HF/flex 集成里是烘进 BlockMask 的文档结构，因此
-`hf/wrapper.py` 的 `preprocess_inputs` 在 `ulysses` 策略下把全长文档 mask **不 Q 分片**透传
+`hf/model.py` 的 `preprocess_inputs` 在 `ulysses` 策略下把全长文档 mask **不 Q 分片**透传
 （`set_cp_mesh` 新增 `strategy` 闩锁），`CPFlexKernel._forward_ulysses` 按 mask 的 Q
 长度 == 全长序列 分派：全长即用传入 mask，否则照旧重建全长 causal mask。决策全部
 config/shape 驱动、rank 对称。`apply_cp` 对 ulysses×`block_causal` 的 fail-fast 移除，
@@ -250,7 +250,7 @@ Ulysses 拒绝（per-head sinks 只走 TP 分片）不适用：llmtuner 尚无 G
 * **regional_inductor**：flex 只有 inductor lowering，故非 inductor backend 下
   flex 模型必须 scoop。`backend="aot_eager"` 且模型走 flex（wrapper 新 property
   `uses_flex_attention`）时用 `torch.fx.passes.regional_inductor` 包
-  `aot_autograd`；annotation 落 `hf/wrapper.py` 的 `flex_attention_hf` 的
+  `aot_autograd`；annotation 落 `hf/model.py` 的 `flex_attention_hf` 的
   `maybe_regional_inductor({})`（默认 nullcontext，inductor/eager 路径零开销）。
   flex 模型配其他非 inductor backend → `ValueError`；torch 无 regional_inductor
   → `NotImplementedError`；sdpa 模型 backend 原样透传。inductor_configs 传空
@@ -406,7 +406,7 @@ llmtuner 侧是 `datasets/multimodal/image.py`），本表的 llmtuner 列是唯
 | rowwise | `RowParallelLinear`：weight 切 dim 1，融合 reduce-scatter 出（回到序列分片） | `hf_sharding.py:71 _hf_rowwise_config`：weight `S(1)`、bias `R`、out_src `P`、out_dst → SP placement | **等价**（上游 `P`→SP 的重分布正是 llmtuner 融合 RS 的位置） |
 | 注意力边界 | `GatherSequenceFirst` + `ColwiseLinearNoGather`：父模块持有 gather，q/k/v 退化为 plain feature-sharded GEMM | `decoder_sharding.py:218 set_gqa_attention_sharding` + `_attach_flex_kernel`（SP 输入在注意力内部 gather 回 Replicate） | **等价** |
 | 序列并行语义 | TP 即 SP：batch 先按 CP、再按 TP 切；`parallelism.enable_sequence_parallel=false` 直接 config-raise | `sp_enabled = tp_enabled and enable_sequence_parallel`（`parallel_dims.py:550`） | **有意分歧**：llmtuner 没有"激活全复制"的退化路径 |
-| 序列切分顺序 | 先 CP（`models/hf/wrapper.py:591`）后 TP（`:623`），TP 切在 CP 分片内 | `hf_sharding.py:52 _hf_sequence_parallel_placement()` = `PartitionSpec(DP, (CP, TP), None)` | **等价**：CP 外、TP 内的联合切分 |
+| 序列切分顺序 | 先 CP（`models/hf/model.py:591`）后 TP（`:623`），TP 切在 CP 分片内 | `hf_sharding.py:52 _hf_sequence_parallel_placement()` = `PartitionSpec(DP, (CP, TP), None)` | **等价**：CP 外、TP 内的联合切分 |
 | norm 权重 | q/k norm 保持复制（HF 4.57 起 plan 已不声明它们），梯度由 `Trainer._allreduce_replicated_tp_grads`（`trainer/trainer.py:470`）汇总 | `decoder_sharding.py:177 norm_config`：SP 时权重 `R`，"BWD AR 交给 FSDP" | **等价**（同 D14：上游归 FSDP、llmtuner 归 trainer，数值一致） |
 | token 计数 / loss mesh | `trainer/batch.py:221` 计 `labels.numel() // (cp*tp)`；loss mesh 含 tp（`parallel/parallel_dims.py:220`） | loss mesh 只含 dp×cp（`parallel_dims.py:260`） | **耦合差异**：上游把 tp 的归约放进 vocab-parallel CE，llmtuner 的 head 是复制的、必须跨 tp 求和。两侧各自自洽，随 lm_head 缺口一同处理 |
 | lm_head 与 loss | HF 的 `colwise_gather_output` 解析为 None → head 保持复制（全 vocab）+ 普通 CE；loss 侧参数已接线（按形状分派，复制下 no-op） | head `S(0)`/`S(-1)` vocab 分片 + core `cross_entropy_loss` 检测分片走 vocab-parallel CE | **D 类缺口，两步走的第二步未做**：loss 侧接线 2026-09-27 完成，head 真分片与"未接线即 loud-raise"待做，见上"D —— 真正缺失"表 |
@@ -672,7 +672,7 @@ llmtuner 侧是 `datasets/multimodal/image.py`），本表的 llmtuner 列是唯
      `require_heads_divisible_by(degree=, divisor=)` 改为 `(size=, axis=)`（两个调用点
      `apply_tp` / ulysses CP 同步）；其余 prose 里的 "degree" 只作概念词保留。
   2. **私有面收敛**：把 4 个其实被跨模块生产代码使用的 `_` 符号转正 ——
-     `iter_moe_layers`（`moe/balancing.py` / `hf/wrapper.py` / `compile.py` 三处）、
+     `iter_moe_layers`（`moe/balancing.py` / `hf/model.py` / `compile.py` 三处）、
      `iter_fsdp_modules`（`fully_shard/apply.py`）、`resolve_top_k` /
      `resolve_score_func`（`expert_parallel/convert.py`），并给 `fully_shard/fsdp.py` 与
      `expert_parallel/probe.py` 补 `__all__` 明确公共面（fsdp.py 的表面 = 上游 `__all__`
@@ -1012,7 +1012,7 @@ llmtuner 侧是 `datasets/multimodal/image.py`），本表的 llmtuner 列是唯
   (b) **上游独有三文件定性**：`param_init.py`（已删死代码）、`lora.py`（裁剪面：LoRA 由 HF/peft 提供）、
   `config_utils.py`（**新增登记**：上游 config 工厂层，llmtuner 无 config tree，其判定分别落在
   `expert_parallel/probe.py` / `parallel/matrix.py` / `models/hf/factory.py` /
-  `models/hf/wrapper.py` 的 `_flex_supported`，逐函数映射见 symbol guide §10）。
+  `models/hf/model.py` 的 `_flex_supported`，逐函数映射见 symbol guide §10）。
   同轮定性上游实验目录里三个此前未登记的文件：`module_conversion.py`（把 HF 模块 `__class__`
   换成 `Module` 协议子类，好让 Module registry 的 `parallelize()` 生效）—— llmtuner 无
   `Module` 协议层，故无对应物，同类 `__class__` swap 技术用于
@@ -1032,7 +1032,7 @@ llmtuner 侧是 `datasets/multimodal/image.py`），本表的 llmtuner 列是唯
   相同；20 个新用例在 `tests/unit_tests/cpu/models/test_flops.py`（**不依赖 pipelining/wandb/flex
   门禁**，真实 HF config 驱动）全绿。
   (d) 顺带修掉两个**从未运行过**的坏用例：原 `test_metrics.py` 的 FLOPs 用例 monkeypatch
-  `hf/wrapper.py` 里从未导出的 `build_model_config_for` 并调 `num_flops_per_token`（两者都在
+  `hf/model.py` 里从未导出的 `build_model_config_for` 并调 `num_flops_per_token`（两者都在
   `hf/factory.py`），而包装模块
   从不导出这两个名字；该模块又被 `require_env('wandb','pipelining','flex_attention')` 整体
   skip，故一直未暴露。FLOPs 用例已迁至新模块，`test_metrics.py` 删去该段与三个失去用途的 import。
@@ -1046,7 +1046,8 @@ llmtuner 侧是 `datasets/multimodal/image.py`），本表的 llmtuner 列是唯
   ```
   models/
     __init__.py            两半的导览（不 re-export）
-    hf/                    __init__.py + factory.py + wrapper.py + state_dict_adapter.py
+    hf/                    __init__.py + factory.py + model.py + flops.py
+                           + state_dict_adapter.py
     common/
       __init__.py          发现面索引（re-export，仍是 `from .models.common import MoE` 的入口）
       activation.py  async_linear.py  aux_loss.py  cast_linear.py  embedding.py
@@ -1058,7 +1059,7 @@ llmtuner 侧是 `datasets/multimodal/image.py`），本表的 llmtuner 列是唯
   旧→新逐条映射（代码、文档、用例同轮改完）：
   | 旧 | 新 |
   |---|---|
-  | `models/hf_wrapper.py` | `models/hf/wrapper.py` |
+  | `models/hf_wrapper.py` | `models/hf/wrapper.py`（十八次增量再改名 `models/hf/model.py`） |
   | `models/hf_factory.py` | `models/hf/factory.py` |
   | `models/hf_state_dict_adapter.py` | `models/hf/state_dict_adapter.py` |
   | `models/common/moe.py`（MoE 本体） | `models/common/moe/block.py` |
@@ -1086,8 +1087,24 @@ llmtuner 侧是 `datasets/multimodal/image.py`），本表的 llmtuner 列是唯
   下的内部 `NameError`，与本轮无关）；`tests/unit_tests` = 172 passed / 59 skipped / 9 failed
   （失败集与上一轮完全一致）。
   (d) **有意不动**：类名/函数名一个没改（它们与上游符号一一对应，是映射表的锚点）；测试模块
-  文件名保持原样（`test_hf_wrapper.py` 等仍测同一模块，只是模块路径变了）；`models/hf/wrapper.py`
+  文件名保持原样（`test_hf_wrapper.py` 等仍测同一模块，只是模块路径变了）；`models/hf/model.py`pper.py`
   的 import 段行数不变，故文档里 `wrapper.py:591/639` 这类行号引用仍指向原语义。
+
+- 2026-09-28 十八次增量（`models/hf/` 收尾：按职责拆算术、按上游改名）：
+  (a) **`factory.py` 拆出 `flops.py`**：前者 581 行里混着四件事（HF config 构造 / 类解析 /
+  meta materialize / FLOPs 计算），后者的纯算术（`flops_per_token` +
+  `quadratic_attention_flops_per_token` + 六个私有 helper，322 行）没有构建语义，独立成节点后
+  `factory.py` 回到 259 行、职责单一。入口 `num_flops_per_token(cfg)` 仍留在 `factory.py`——它
+  需要先解析出 config，再委托 `flops.flops_per_token`；`flops.py` 只依赖
+  `transformers.configuration_utils`，不依赖 torch。
+  (b) **`hf/wrapper.py` → `hf/model.py`**：上游对应文件就叫
+  `experiments/transformers_modeling_backend/model.py`，改名后映射 1:1、类名不变
+  （仍是 `HFTransformerModel`）。纯 rename，行号不变，故文档里 `model.py:591/639` 的引用语义不动。
+  (c) 验证：以十七次增量提交为基线做「按定义」比对——`factory.py`+`flops.py` 16 个顶层定义、
+  `wrapper.py`→`model.py` 7 个顶层定义，**0 个函数体变化**（纯搬家）；`ruff check` 通过；
+  垫片环境下 9/9 目标模块可导入（含新 `flops.py`，且同一 Qwen3-MoE config 的 FLOPs 与拆分前
+  逐位相同：1151827968）；`tests/unit_tests` 172 passed / 59 skipped / 9 failed（失败集不变）。
+  `models/` 模块数 26→27，全仓 122→123 个 `.py`（99 实现模块）。
 
 - 检查后续漂移：`git -C <torchtitan> log f35966713..HEAD -- torchtitan/`。
 - 2026-09-23 映射修订：上游 `distributed/linear.py` 已删除、内容迁入

@@ -2,10 +2,11 @@
 
 Two halves, and the split is the one that matters when reading code:
 
-* ``hf/`` -- the adaptation layer. ``wrapper.py`` holds the
-  ``HFTransformerModel`` the trainer drives, ``factory.py`` builds the HF config
-  and resolves the model class, ``state_dict_adapter.py`` maps the checkpoint
-  FQNs. Only this half knows about Hugging Face.
+* ``hf/`` -- the adaptation layer: ``factory.py`` builds the HF config and
+  resolves the model class, ``model.py`` holds the ``HFTransformerModel`` the
+  trainer drives, ``flops.py`` counts the MFU denominator, and
+  ``state_dict_adapter.py`` maps the checkpoint FQNs. Only this half knows about
+  Hugging Face.
 * ``common/`` -- the model vocabulary, vendored from torchtitan
   ``models/common/``: attention pieces (``attention/``), MoE (``moe/``),
   feed-forward, linear, embedding, RoPE, activations, the aux-loss carrier and

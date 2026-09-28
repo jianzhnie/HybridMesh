@@ -28,7 +28,7 @@ from llmtuner.models.hf.factory import (
     build_model_config_for,
     materialize_meta_model,
 )
-from llmtuner.models.hf.wrapper import HFTransformerModel
+from llmtuner.models.hf.model import HFTransformerModel
 from llmtuner.trainer import LLMTunerConfig, TrainingConfig
 
 _HIDDEN = 32

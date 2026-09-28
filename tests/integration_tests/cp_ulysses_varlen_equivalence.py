@@ -45,7 +45,7 @@ import torch.nn.functional as F
 from torch.distributed.device_mesh import init_device_mesh
 
 from llmtuner.models.hf.factory import build_model_config_for
-from llmtuner.models.hf.wrapper import HFTransformerModel
+from llmtuner.models.hf.model import HFTransformerModel
 from llmtuner.parallel.context_parallel import apply_cp
 from llmtuner.parallel.context_parallel.cp_kernel import HeadToSeq, SeqToHead
 from llmtuner.trainer import (
@@ -155,7 +155,7 @@ def _run_ulysses_packed(mesh, failures: list[str]) -> dict[str, float]:
 
     ids, labels, positions = _packed_data()
     with mock.patch(
-        "llmtuner.models.hf.wrapper.create_attention_mask",
+        "llmtuner.models.hf.model.create_attention_mask",
         _uncompiled_create_attention_mask,
     ):
         inputs, out_labels, extra = model.preprocess_inputs(

@@ -79,7 +79,7 @@ step 1 恢复 optimizer、scheduler、dataloader 和 train state 后完成并保
 | `preprocess_inputs` | 上游 post-dataloading process | 合并 batch、构造 mask、先 CP 后 TP 切序列 | 通过；CP×TP 等价测试覆盖 |
 | `get_attention_masks`, `_apply_attention` | `models/common/attention.py` 及 transformers backend | llmtuner 对 packed corpus 构造 BlockMask，对 CPU SDPA 明确拒绝错误语义 | 通过（适配） |
 | `forward` | transformers backend wrapper forward | 首 stage 接 token，后续 PP stage 接 hidden states；统一 logits 输出 | 通过；PP stage chaining 测试覆盖 |
-| `num_flops_per_token` / `flops_per_token` / `quadratic_attention_flops_per_token` | 各模型 FLOPs 估算（`models/utils.py` 的 attention helper + HF backend `get_nparams_and_flops`）+ observability | llmtuner 从 HF config 推导（不做参数遍历——EP/TP/FSDP 之后每 rank 只有分片）；**2026-09-28 重写为结构感知**：MoE 层 = router + top_k 路由专家（active ratio）+ 全部 shared 专家，MLA 用 `q_lora`/`kv_lora` 与 `qk_head_dim`/`v_head_dim`（不是 MLA config 里那个等于 rope 切片的 `head_dim`），`layer_types` 支持 full/sliding/chunked，稠密与 MoE 混栈按 `first_k_dense_replace`/`mlp_only_layers`/`decoder_sparse_step`/`moe_layer_freq` 分层 | 通过（适配）。几何不可解析时返回 **0**（缺尺寸、MoE 宽度/层划分不明、`layer_types` 短于层数、`linear_attention` 等参数面不可推导的层型），延续"0 优于猜"契约；未移植：上游 `delta_rule_flops_per_token`（Qwen3-Next 线性注意力）。验证：DeepSeek-V3 真实 config 反推 active params = 3.64e10（发布值 37B，差值即未计入的 norms/biases）；稠密路径与旧公式逐位相同 |
+| `num_flops_per_token` / `flops_per_token` / `quadratic_attention_flops_per_token` | 各模型 FLOPs 估算（`models/utils.py` 的 attention helper + HF backend `get_nparams_and_flops`）+ observability | llmtuner 从 HF config 推导（不做参数遍历——EP/TP/FSDP 之后每 rank 只有分片），算术在 `models/hf/flops.py`、入口 `num_flops_per_token` 在 `models/hf/factory.py`；**2026-09-28 重写为结构感知**：MoE 层 = router + top_k 路由专家（active ratio）+ 全部 shared 专家，MLA 用 `q_lora`/`kv_lora` 与 `qk_head_dim`/`v_head_dim`（不是 MLA config 里那个等于 rope 切片的 `head_dim`），`layer_types` 支持 full/sliding/chunked，稠密与 MoE 混栈按 `first_k_dense_replace`/`mlp_only_layers`/`decoder_sparse_step`/`moe_layer_freq` 分层 | 通过（适配）。几何不可解析时返回 **0**（缺尺寸、MoE 宽度/层划分不明、`layer_types` 短于层数、`linear_attention` 等参数面不可推导的层型），延续"0 优于猜"契约；未移植：上游 `delta_rule_flops_per_token`（Qwen3-Next 线性注意力）。验证：DeepSeek-V3 真实 config 反推 active params = 3.64e10（发布值 37B，差值即未计入的 norms/biases）；稠密路径与旧公式逐位相同 |
 
 ## 4. models/common
 
@@ -379,8 +379,8 @@ step 1 恢复 optimizer、scheduler、dataloader 和 train state 后完成并保
 
 ## 10. 全模块符号索引
 
-下表是快速查找入口，覆盖当前 98 个非 `__init__.py` / `__main__.py` 实现模块（截至
-2026-09-28：`llmtuner/` 下 122 个 `.py`）。列出的为顶层类/函数和重要公共方法；私有
+下表是快速查找入口，覆盖当前 99 个非 `__init__.py` / `__main__.py` 实现模块（截至
+2026-09-28：`llmtuner/` 下 123 个 `.py`）。列出的为顶层类/函数和重要公共方法；私有
 helper 在前文涉及关键算法时单列。成组条目（`config/`、`trainer/trainer.py` 等）在行内
 一并列出同组子模块。"同文件"指本文前述路径变换后的 TorchTitan 文件。
 
@@ -427,12 +427,12 @@ helper 在前文涉及关键算法时单列。成组条目（`config/`、`traine
 | `models/common/multimodal.py` | vision/text fusion helpers | A2，同文件 |
 | ~~`models/common/param_init.py`~~ | init context/std helper | 已于 2026-09-25 删除（死代码） |
 | `models/common/attention/qkv.py` | fused QKV 与 state hooks | A2，`attention.py` 拆分 |
-| ~~`models/common/config_utils.py`~~ | 上游 config 工厂：`make_*_config`、`fused_*_param_init`、`get_attention_config`、`make_token_dispatcher_config` | 无对应物（2026-09-28 定性）：llmtuner 没有 config tree，`Module.Config` 那层整体不存在，其*判定*分别落在 `expert_parallel/probe.py`（top_k/score_func/route_norm/route_scale/expert groups）、`parallel/matrix.py`（组合裁决与 loud-raise）、`models/hf/factory.py`（HF config 构建）、`models/hf/wrapper.py` 的 `_flex_supported`（attention backend 选择） |
+| ~~`models/common/config_utils.py`~~ | 上游 config 工厂：`make_*_config`、`fused_*_param_init`、`get_attention_config`、`make_token_dispatcher_config` | 无对应物（2026-09-28 定性）：llmtuner 没有 config tree，`Module.Config` 那层整体不存在，其*判定*分别落在 `expert_parallel/probe.py`（top_k/score_func/route_norm/route_scale/expert groups）、`parallel/matrix.py`（组合裁决与 loud-raise）、`models/hf/factory.py`（HF config 构建）、`models/hf/model.py` 的 `_flex_supported`（attention backend 选择） |
 | ~~`models/common/lora.py`~~ | `get_lora_linear`/`get_lora_grouped_linear` | 无对应物（裁剪面）：LoRA 由 HF/peft 提供，llmtuner 不持有上游 `_linear()` seam 与量化轴，故不移植 |
 | `models/common/rope.py` | RoPE 全家族 | A2，同文件 |
 | `models/common/scatter_add.py` | deterministic scatter-add autograd | A2，`ops/scatter_add.py` |
 | `models/common/moe/dispatcher.py` | local/all-to-all dispatchers + TorchAO 可选导入适配层；DeepEP/HybridEP 登记缺口（config 期 loud-raise） | A2，同文件 |
-| `models/hf/wrapper.py` + `models/hf/factory.py` | wrapper/forward 与 config 构建/类解析/meta materialize/FLOPs | B，transformers backend model |
+| `models/hf/model.py` + `models/hf/factory.py` + `models/hf/flops.py` | wrapper/forward、config 构建/类解析/meta materialize、FLOPs | B，transformers backend model（`model.py` 与上游 `.../model.py` 同名） |
 | ~~`experiments/transformers_modeling_backend/` 的 `module_conversion.py` / `config_registry.py` / `__init__.py`~~ | HF 模块的 `Module` 协议转换 / 实验用家族 config 注册表 / 模型注册表 | 无对应物（2026-09-28 定性）：llmtuner 没有 `Module` 协议这一层（同类 `__class__` swap 技术用于 `GatherSequenceFirst`/`TPMoeSequenceBoundary`/TP realizer），config 由 HF `AutoConfig` + `config/` 门面构建，模型类由 HF auto mapping 解析（`resolve_model_class`） |
 | `models/hf/state_dict_adapter.py` | HF↔llmtuner state-dict 键转换与 safetensors index 严格校验 | B，`experiments/.../state_dict_adapter.py` |
 | `parallel/activation_checkpoint.py` | full/selective AC | A2，distributed AC |
@@ -536,7 +536,7 @@ helper 在前文涉及关键算法时单列。成组条目（`config/`、`traine
   5 failed，5 个失败**均属该文件既有漂移、与本轮改动无关**：2 个是自带 fake wandb 的
   `log()` 没有 `commit` 参数（`WandBLogger.log(..., commit=True)` 是 2026-09-23 的改动，
   因该文件常被跳过而没同步到 fake）、1 个 wandb 缺失路径的断言与实现不符、2 个引用已不存在
-  的 `hf/wrapper.py` 里从未导出的 `build_model_config_for`（2026-09-28 十七次增量已随
+  的 `hf/model.py` 里从未导出的 `build_model_config_for`（2026-09-28 十七/十八次增量已随
   FLOPs 用例迁移一并删除该断言）。登记待修，不在本轮范围内。
 - 2026-09-28 同轮的 optimizer 面：`tests/unit_tests/cpu/components/optimizer/
   test_optimizer_container.py` 整体被 `torch_param_names` 门控（该 cap 探测的是

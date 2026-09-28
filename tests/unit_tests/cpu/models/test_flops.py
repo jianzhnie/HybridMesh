@@ -24,8 +24,10 @@ from transformers.configuration_utils import PretrainedConfig
 
 from llmtuner.models.hf import factory
 from llmtuner.models.hf.factory import (
-    flops_per_token,
     num_flops_per_token,
+)
+from llmtuner.models.hf.flops import (
+    flops_per_token,
     quadratic_attention_flops_per_token,
 )
 

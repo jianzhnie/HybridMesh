@@ -66,7 +66,7 @@ from llmtuner.datasets.random_data import (
 )
 from llmtuner.datasets.types import Batch
 from llmtuner.models.hf.factory import build_model_config
-from llmtuner.models.hf.wrapper import HFTransformerModel
+from llmtuner.models.hf.model import HFTransformerModel
 from llmtuner.trainer.trainer import Trainer
 
 

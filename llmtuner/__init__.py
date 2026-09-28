@@ -5,7 +5,7 @@ distributed training (FSDP / TP / PP / CP / EP) by building them from scratch.
 
 Two abstractions only:
   * a grouped ``LLMTunerConfig``      (llmtuner.config)
-  * a ``HFTransformerModel``            (llmtuner.models.hf.wrapper)
+  * a ``HFTransformerModel``            (llmtuner.models.hf.model)
 
 Parallelism dimensions are added one at a time; each ``apply_*`` in
 ``llmtuner.parallel`` is a no-op when its degree is 1, so the same training loop

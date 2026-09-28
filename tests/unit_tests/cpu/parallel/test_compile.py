@@ -43,7 +43,7 @@ try:
     from torch._dynamo import OptimizedModule
 
     from llmtuner.models.hf.factory import build_model_config
-    from llmtuner.models.hf.wrapper import HFTransformerModel
+    from llmtuner.models.hf.model import HFTransformerModel
     from llmtuner.parallel import compile as compile_mod
     from llmtuner.parallel.compile import apply_compile, maybe_regional_inductor
 

@@ -11,7 +11,7 @@
 ## 0. 结论
 
 llmtuner 拿掉了 TorchTitan 的 `Configurable` 与 `Module` 两个抽象层，换来一个明显更短
-的框架：122 个 Python 模块（98 个实现模块 + 23 个 `__init__.py` + `__main__.py`）、
+的框架：123 个 Python 模块（99 个实现模块 + 23 个 `__init__.py` + `__main__.py`）、
 约 28.7k 行，覆盖 TP / FSDP2 / CP / EP / PP 五条并行路径的装配、训练循环、checkpoint
 与等价性测试。
 
@@ -132,7 +132,7 @@ G1 决定模型层只能依赖 HF 公共约定（`config.architectures`、常见
              [SEAM 1]  HF wrapper 契约 (§4.2)
                           |
 +---------------------------------------------------------------+
-|  models/hf/wrapper.py    唯一的 HF wrapper                       |
+|  models/hf/model.py     唯一的 HF wrapper                       |
 |    forward(input_ids, *, positions, attention_masks) -> logits|
 |    named_children() -> tok_embeddings/layers/norm/lm_head/... |
 |    tp_plan property    <- 重写 HF 模型自带的 _tp_plan          |
@@ -163,7 +163,7 @@ G1 决定模型层只能依赖 HF 公共约定（`config.architectures`、常见
 2. `models/common/embedding.py` -> `components.loss`（`vocab_shard_bounds`）：
    vocab 并行 embedding 的分片边界是 loss 层共用的纯函数词汇表，反向移动会让
    loss 依赖模型构件。
-3. `models/hf/wrapper.py` -> `parallel.compile` / `parallel.context_parallel` /
+3. `models/hf/model.py` -> `parallel.compile` / `parallel.context_parallel` /
    `parallel.parallel_dims`：wrapper 的全部职责就是把 HF 模型插进并行层
    （SEAM 1），CP 分片与 regional-inductor 标注是它契约的一部分。
 
@@ -176,7 +176,7 @@ import trainer 或读取全局 run config；跨 models/parallel 的依赖必须�
 引擎层（TP/CP fused kernel、FSDP、`spmd_context`、checkpoint 的 PG 生命周期）直连
 `torch.distributed` 与 `_functional_collectives` 等私有 API。
 
-目录结构（122 个 Python 模块，约 29.6k 行；2026-09-28 实测）：
+目录结构（123 个 Python 模块，约 29.7k 行；2026-09-28 实测）：
 
 ```
 llmtuner/
@@ -189,7 +189,7 @@ llmtuner/
   trainer/      8 模块          trainer.py / train.py / builder.py（装配段，
                                 顺序契约见模块 docstring）/ validate.py /
                                 pp_steps.py / batch.py / seed.py
-  models/      26 模块          hf/{wrapper,factory,state_dict_adapter}.py（HF 适配：
+  models/      27 模块          hf/{model,factory,flops,state_dict_adapter}.py（HF 适配：
                                 包装/构造/FLOPs/checkpoint 键）
                                 + common/{rope,activation,linear,feed_forward,
                                 embedding,cast_linear,multimodal,scatter_add,
@@ -336,7 +336,7 @@ cp 整除 seq_len、async_tp×{compile,tp}），与其余字段校验同处、�
 
 ### 4.2 SEAM 1：HF wrapper 契约
 
-`HFTransformerModel(nn.Module)`（models/hf/wrapper.py）是唯一 wrapper，
+`HFTransformerModel(nn.Module)`（models/hf/model.py）是唯一 wrapper，
 `__init__(config: PretrainedConfig)` 内按 `config.architectures` 解析 `ForCausalLM`
 类并直接 `model_cls(config=config)`——用 HF 自己的初始化，无 monkey-patch。对并行层
 暴露的契约只有三条：
@@ -466,7 +466,7 @@ tp 在两条路径都 loud-raise（ep=1 的边界 collective 未组合验证，t
 
 ### 5.4 CP / EP（context_parallel/ + expert_parallel/）
 
-**CP 已接线**。拦截点是 `hf/wrapper.py` 的 `flex_attention_hf` 读取的 `_titan_flex_kernel`：
+**CP 已接线**。拦截点是 `hf/model.py` 的 `flex_attention_hf` 读取的 `_titan_flex_kernel`：
 `apply_cp`（cp>1）walk 每层 attention module 并 attach `CPFlexKernel`
 （`context_parallel/cp_kernel.py`），支持两条真实路径：默认 KV all-gather（K/V 收成
 全长，Q 保持 token 分片），以及 Ulysses（token↔head all-to-all）。Ulysses 要求 heads
