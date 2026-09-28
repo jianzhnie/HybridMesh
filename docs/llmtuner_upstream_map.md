@@ -143,8 +143,8 @@ A2 分类（见上表），mesh 构建这一段记在该行的"改写点"里，�
 | `models/common/embedding.py` | 与上游同名但不同源；包含 llmtuner 的 vocab-shard 契约 |
 | `datasets/random_data.py` | 合成语料，上游无 |
 | `datasets/build.py` | 工厂；上游把 `build()` 放在 config 上 |
-| `accelerator/dist.py` + `accelerator/dist_utils.py` | 2026-09-24 加入：vendored 自 OpenMMLab `mmengine.dist`（**不是 torchtitan 来源**），已去 mmengine 化，设备谓词与后端表统一由同包的 `accelerator/device.py` 提供；不进 trainer 装配路径 |
-| `trainer/seed.py` | 2026-09-24 加入：上游 `distributed/utils.py::set_determinism` 的 distinct-seed 派生公式的纯函数提取（仅该项，非全文件移植）；DTensor RNG tracker 不移植 |
+| `accelerator/dist.py` + `accelerator/dist_utils.py` | 2026-09-24 加入：vendored 自 OpenMMLab `mmengine.dist`（**不是 torchtitan 来源**），已去 mmengine 化，设备谓词与后端表统一由同包的 `accelerator/device.py` 提供；不进 trainer 装配路径。2026-09-28 复核（十次增量）：只按「能力缺口」对照上游 `distributed/utils.py`，结论是**无缺口**——上游的 `dist_sum`/`dist_max`/`dist_mean`/`dist_sum_tensor` 在 llmtuner 侧是 `all_reduce`（调用点 clone + in-place），`set_pg_timeouts`/`clip_grad_norm_` 已迁入 `accelerator/collectives.py`，仅有的 `init_distributed`/fake 后端差异已单列于 D 表 |
+| `trainer/seed.py` | 2026-09-24 加入：上游 `distributed/utils.py::set_determinism` 的 distinct-seed 派生公式的纯函数提取（仅该项，非全文件移植）；DTensor RNG tracker 不移植。2026-09-28（十次增量）补齐该函数剩余的两个可移植件：`PYTHONHASHSEED = str(seed % 2**32)`（为后续 spawn 的 dataloader worker 而设）与 `detect_anomaly`（`torch.autograd.set_detect_anomaly(True, check_nan=False)` + 上游同文告警），落点为 `Trainer._seed_everything` 与 `TrainingConfig.detect_anomaly`；不移植的仍是只服务上游自有栈的两件（DTensor mesh-aware RNG tracker、flex-attention 确定性内核调优） |
 
 **已清理悬空链**：`parallel/sharding.py` 与 `parallel/spmd_shims.py` 没有运行时消费者，
 已在 2026-09-21 一并删除。`accelerator/spmd_context.py` 是独立活代码，不在删除组内。TP 的
@@ -714,6 +714,47 @@ llmtuner 侧是 `datasets/multimodal/mm_image.py`），本表的 llmtuner 列是
   本轮只做复核与登记、无代码改动（同日的命名/私有面调整为八次增量的一部分）：
   `cp_kernel.py` ↔ 上游 `models/common/cp_attention.py` 的逐项对照、
   `accelerator/dist_utils.py` ↔ 上游 `distributed/utils.py` 仍待走。
+- 2026-09-28 十次增量（`cp_kernel.py` 与 `accelerator/dist_utils.py` 复核，`parallel/`
+  批次第五项，收尾）：两项复核 + 一处补移植，结论全登记——
+  (a) **`context_parallel/cp_kernel.py` ↔ 上游 `models/common/cp_attention.py`：语义等价。**
+  kv_allgather 走的是**同一个** torch 自定义算子 `flex_cp_allgather`（上游 HF 后端的
+  `_wrap_flex_kernel_cp` 用的就是它，`(b, heads, seq, dim)` 的 dim 2、进程组名捕获、
+  backward 由算子自带 reduce-scatter），Q 保持 token 分片、mask 为 Q 分片/KV 全长；
+  ulysses 的 token↔head all-to-all 与上游 `UlyssesCPInnerAttention` 是同一置换（scatter
+  head、gather seq，反向互为转置），mask 分派（packed 全长 vs 单文档重建）与九次增量
+  记录的 wrapper 语义一致。**一处显式差异**：上游**原生**模型的
+  `KVAllGatherCPFlexInnerAttention.Config` 暴露 `reduce_dtype: float32|bfloat16`
+  （`backward_options={"op_dtype": ...}`，默认 fp32），llmtuner 委托 torch 算子因而没有该
+  旋钮——但上游 **HF 后端**（llmtuner 真正对应的那一支）同样没有，故属「与 HF 后端对齐、
+  与原生模型路径不同」，不是什么待补参数；`llmtuner_torchtitan_symbol_guide.md` 中
+  「dtype 可配（默认 fp32）」的旧措辞已在本次改正。
+  (b) **`accelerator/dist_utils.py` ↔ 上游 `distributed/utils.py`：无能力缺口。**
+  两者血缘不同（llmtuner 那支 vendored 自 OpenMMLab `mmengine.dist`，上游等价物在
+  `accelerator/collectives.py` 与调用点的 `accelerator/dist.all_reduce`），故本次按能力
+  而非形状对照，逐项终态：`dist_sum`/`dist_max`/`dist_mean`/`dist_sum_tensor` → llmtuner
+  用 `all_reduce` 在调用点（trainer/validator 的 loss·token 归约；`components/metrics.py`
+  完全不碰 `torch.distributed`），不重建命名薄封装（`collectives.py` 模块 docstring 同步
+  改写）；`set_pg_timeouts`/`clip_grad_norm_` → 已移植且已复核（EP 裁剪按物理本地 expert
+  参数分组并跨 EP 归约，免去上游「每个参数都是带 `"ep"` 轴的 DTensor」断言；dense-only
+  路径与上游逐行同构）；`init_distributed` + `DistributedTopology`（`fake` /
+  `real_pp_fake_spmd`）→ 唯一的真缺口，已挂 D 表（本机 torch 2.2.2 无 `backend="fake"`，
+  不可验证）。`batch_invariant`/`bf16x9` 属四次增量已删特性面，不重复。
+  (c) **补移植（唯一代码改动）**：上游 `set_determinism` 中两件可移植件落到
+  `Trainer._seed_everything` —— `PYTHONHASHSEED = str(seed % 2**32)`（本进程读不到，但
+  之后 spawn 的 dataloader worker 会读，故必须在此设置，与上游同拼写）与
+  `detect_anomaly`（`TrainingConfig.detect_anomaly`，默认 `False` 逐位不变；
+  `torch.autograd.set_detect_anomaly(True, check_nan=False)` + 上游同文告警，
+  `check_nan=False` 的理由同上游：NaN/Inf 梯度检查走 `aten._is_any_true`，无 DTensor
+  sharding 策略，分片参数上会崩，而记录栈这一半保留）。`collectives.py` 的 `__all__`
+  故意不再导出确定性符号——该模块的 docstring 声明「每个符号都源自上游」，而
+  `set_determinism` 在 llmtuner 无同名对应物，落点就是 seed 助手。
+  测试：`tests/unit_tests/cpu/test_trainer.py` 新增两条（`PYTHONHASHSEED` 导出、
+  `detect_anomaly` 的 `check_nan=False` 契约），取消 gate 后 33 passed（基线 31），
+  失败集不变。
+  本轮后 `parallel/` 批次的复核面（`stages.py`/`matrix.py`/`activation_checkpoint.py`/
+  `parallel_dims.py`/`fully_shard/fsdp.py`/`context_parallel/`/`cp_kernel.py`/
+  `accelerator/dist_utils.py`）全部走完，余下只有需要多卡的 TP/SP 布局根治（D14）与
+  D18 的 PP×校验实现。
 - 检查后续漂移：`git -C <torchtitan> log f35966713..HEAD -- torchtitan/`。
 - 2026-09-23 映射修订：上游 `distributed/linear.py` 已删除、内容迁入
   `models/common/dist_gemm.py`（改名 `AsyncAllGatherLinear`/`AsyncLinearReduceScatter`，

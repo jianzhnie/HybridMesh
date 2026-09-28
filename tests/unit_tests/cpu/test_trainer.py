@@ -22,6 +22,7 @@ from tests.caps import require_env
 require_env('dtensor', 'pipelining', 'spmd_types')
 
 
+import os
 import weakref
 from contextlib import nullcontext
 from types import SimpleNamespace
@@ -124,6 +125,41 @@ def test_pp_forward_backward_releases_consumed_loss_graphs() -> None:
     assert loss_containers == [[]]
     assert all(reference() is None for reference in loss_refs)
     assert all(reference() is None for reference in activation_refs)
+
+
+# -- setup helpers -------------------------------------------------------------
+
+
+def test_seeding_exports_the_hash_seed_for_spawned_workers(monkeypatch) -> None:
+    """``PYTHONHASHSEED`` only reaches processes started after it is set.
+
+    Dataloader workers are exactly that, so the value has to be in the
+    environment before the loader is built -- upstream sets it from
+    ``set_determinism`` for the same reason, and with the same ``% 2**32``
+    spelling.
+    """
+    monkeypatch.setenv("PYTHONHASHSEED", "0")
+    Trainer._seed_everything(7, deterministic=False)
+    assert os.environ["PYTHONHASHSEED"] == str(7 % 2**32)
+
+
+def test_detect_anomaly_watches_nans_but_skips_the_dtensor_hostile_check(
+    monkeypatch,
+) -> None:
+    """``check_nan=False`` is load-bearing once parameters are sharded: the
+    NaN/Inf gradient check runs ``aten._is_any_true``, which has no DTensor
+    sharding strategy and would crash. The stack-trace half stays on."""
+    calls: list[tuple[bool, bool]] = []
+    monkeypatch.setattr(
+        torch.autograd,
+        "set_detect_anomaly",
+        lambda mode, check_nan=True: calls.append((mode, check_nan)),
+    )
+
+    Trainer._seed_everything(1, deterministic=False)
+    assert calls == []
+    Trainer._seed_everything(1, deterministic=False, detect_anomaly=True)
+    assert calls == [(True, False)]
 
 
 # -- losses -------------------------------------------------------------------

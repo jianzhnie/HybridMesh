@@ -379,6 +379,14 @@ class TrainingConfig:
             "help": "Deterministic algorithms -- required for bit-exact comparison"
         },
     )
+    detect_anomaly: bool = field(
+        default=False,
+        metadata={
+            "help": "Enable autograd anomaly detection (debug only, significant "
+            "overhead). NaN/Inf gradient checks stay off because they need "
+            "aten._is_any_true, which has no DTensor sharding strategy."
+        },
+    )
     max_norm: float = field(
         default=1.0,
         metadata={

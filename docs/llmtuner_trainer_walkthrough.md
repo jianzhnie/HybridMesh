@@ -209,7 +209,7 @@ llmtuner 全部内联在一个函数里（`llmtuner/trainer/trainer.py:528-830`�
 | D12 | HSDP 复制组 all-reduce 延迟 | 上游只在最后一个 accumulation 组打开 `set_requires_all_reduce`（`torchtitan/training_engine.py:502`）；llmtuner 原先每个组都归约（正确但多通信） | 真实差异（性能面） | 已移植（`llmtuner/trainer/trainer.py:656-665`，配合 `enumerate` 的累加下标） |
 | D13 | 进程组销毁归属 | llmtuner 在 `llmtuner/trainer/trainer.py:1032/:1051` `close()` 内销毁；上游在 `torchtitan/train.py` 入口销毁 | 等价但落点不同 | 无 |
 | D14 | TP 复制参数梯度归约 | **两侧都需要这次求和，差别只在谁做。** 上游把 norm 权重在 SP 下标为 `R`，注释写明 backward all-reduce 交给 FSDP（`torchtitan/models/common/decoder_sharding.py:180`："Weight is unsharded@TP: R if SP (pending BWD AR handled by FSDP), else I."），激活布局由 `enable_sp` 决定（`torchtitan/models/llama3/sharding.py:51-53`）——即上游用**声明式放置**表达"每个 TP rank 只覆盖自己的序列分片、梯度需跨 TP 求和"；llmtuner 的 TP 端到端序列并行、norm 作用在分片序列上（`GatherSequenceFirst` 只装在 attention 模块，`llmtuner/parallel/tensor_parallel/apply.py:174-182`），同一份 token-局部梯度改在 trainer 里显式 all-reduce（`llmtuner/trainer/trainer.py:470`、调用点 `:684`，"求和不是平均"的理由在 `:485-486`） | 等价（同一求和，责任方不同） | 无（要取消只能给 llmtuner 引入等价的放置/自动归约机制，属 `parallel/tensor_parallel` 的 A/B 类改造，不是 trainer 层） |
-| D15 | 确定性面 | 上游 `set_determinism` 除种子外还设 `cudnn.deterministic/benchmark`、`fill_uninitialized_memory=False`、`CUBLAS_WORKSPACE_CONFIG`（`torchtitan/distributed/utils.py:141-156`）；llmtuner 原只有 `use_deterministic_algorithms` | 真实差异 | 已移植上述四项（`llmtuner/trainer/trainer.py:244-260`）；仍差 DTensor mesh-aware RNG tracker（上游用于分片初始化，llmtuner 走 HF 自身初始化，故不适用）与 `warn_only` 开关（llmtuner 固定 `False`，更严） |
+| D15 | 确定性面 | 上游 `set_determinism` 除种子外还设 `cudnn.deterministic/benchmark`、`fill_uninitialized_memory=False`、`CUBLAS_WORKSPACE_CONFIG`、`PYTHONHASHSEED`、`detect_anomaly`（`torchtitan/distributed/utils.py:141-156`、`:181-195`、`:244-245`）；llmtuner 原只有 `use_deterministic_algorithms` | 真实差异 | 已移植（`llmtuner/trainer/trainer.py:244-275`）：四项确定性开关、`PYTHONHASHSEED = str(seed % 2**32)`（为之后 spawn 的 loader worker）、`detect_anomaly`（`TrainingConfig.detect_anomaly`，`set_detect_anomaly(True, check_nan=False)`，理由同上游：NaN/Inf 检查走 `aten._is_any_true`，无 DTensor 策略）。仍差 DTensor mesh-aware RNG tracker（上游用于分片初始化，llmtuner 走 HF 自身初始化，故不适用）与 `warn_only` 开关（llmtuner 固定 `False`，更严） |
 | D16 | PP 微批切分点 | 上游从 dataloader 直接读 PP 微批（`torchtitan/trainer.py:341-350`）；llmtuner 每 accumulation 组读 1 个 batch 再切（`llmtuner/trainer/pp_steps.py:22`） | 等价但落点不同 | 无 |
 | D17 | PP 损失函数的双驱动接线 | 两个驱动器送 `global_valid_tokens` 的通道不同：公开 `step` 经 `loss_kwargs` 转发进 `loss_fn(output, target, **loss_kwargs)`（上游正是这么接的），私有 `_step_microbatches` 没有该参数、只能读 `schedule._llmtuner_global_valid_tokens`。原实现在 `build_pipeline_schedule` 里把 schedule 的 `_loss_fn` 换成只收 `(pred, labels)` 的 lambda，于是公开路径一被走到就 `TypeError`（torch 会多传 `global_valid_tokens` 关键字）；单元测试用的假 schedule 自己读 `loss_kwargs`，掩盖了这条通路 | 真实差异（潜伏 bug） | 已修：抽出 `make_schedule_loss_fn`（`llmtuner/parallel/pipeline_parallel/apply.py:93`），kwarg 优先、属性兜底；两条通路都在调用前置好属性（`llmtuner/trainer/pp_steps.py:117`）；新增受 `pipelining` 门禁的用例钉住两侧一致（`tests/unit_tests/cpu/parallel/test_pipeline.py:413`） |
 | D18 | PP×校验 | 上游校验器有完整 PP 分支，用 `pp_schedule.eval(arg_mbs=, kwarg_mbs=, target_mbs=, losses=)` 前向（`torchtitan/components/validate.py:164` 取微批数、`:234` 驱动 eval）；llmtuner 在装配期直接拒绝该组合（`llmtuner/parallel/matrix.py:117`，由 `llmtuner/trainer/validate.py:53` 调用），`llmtuner/trainer/validate.py` 体里没有任何 PP 分支 | 真实差异（功能缺失，loud-raise） | 未实现。理由经复核后**部分更正**：`matrix.pp_validation` 原写"没有 eval-only 管线通路"，但 torch 的 schedule 有 `eval`（上游正在用）；准确的原因是 llmtuner 的 PP 接缝只接了训练驱动器（行切微批 + D17 那套分母注入），eval 驱动器要另配一套。在补齐之前保持 loud-raise（不得静默跳过） |
@@ -262,12 +262,13 @@ per-rank token 数（Grain）与 global batch + 行切片（synthetic）是两�
    已完成（2026-09-27 五次增量：字段级复核 + `cli.py` 视图 + CP 默认值对齐）。
 2. `llmtuner/parallel/`（`stages.py` 的 stage 表 vs 上游 `parallelize` 顺序；`matrix.py`
    守卫 vs 上游配置校验；TP 的 SP 布局 vs 上游 `enable_sp`，即 D14 的根治方案）——
-   进行中：stage 表/守卫已复核（2026-09-27 六次增量，`activation_checkpoint.py` 对齐），
-   `parallel_dims.py` 已复核（2026-09-28 七次增量）、`fully_shard/fsdp.py` 已复核
-   （八次增量）、`context_parallel/` 的输入分片面已复核（九次增量）；
-   `context_parallel/cp_kernel.py` ↔ 上游 `models/common/cp_attention.py` 与
-   `accelerator/dist_utils.py`（上游 `distributed/utils.py`）仍待走；TP/SP 布局的根治
-   （D14）需要多卡。
+   **已走完**：stage 表/守卫已复核（2026-09-27 六次增量，`activation_checkpoint.py` 对齐），
+   `parallel_dims.py` 七次增量、`fully_shard/fsdp.py` 八次增量、`context_parallel/`
+   输入分片九次增量、`context_parallel/cp_kernel.py` ↔ 上游
+   `models/common/cp_attention.py` 与 `accelerator/dist_utils.py` ↔ 上游
+   `distributed/utils.py` 十次增量（2026-09-28，连带补上 `PYTHONHASHSEED` 与
+   `detect_anomaly`）。余下只有 TP/SP 布局的根治（D14）与 PP×校验（D18），两者都需要
+   多卡或新 torch，见第 5 条。
 3. `llmtuner/components/`（checkpointer/metrics/profiler/optimizer）。
 4. `llmtuner/datasets/`、`llmtuner/models/common/*` 的数值等价性。
 5. D18 的实现（PP×校验），以及任何运行期/数值等价性验证——都需要 torch≥2.12 + 多卡，

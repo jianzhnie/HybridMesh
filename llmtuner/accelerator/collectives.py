@@ -11,9 +11,16 @@ Vendored from torchtitan ``distributed/utils.py``. What changed:
   counted once, while the p-th powers of local expert norms are reduced across
   EP ranks. This avoids upstream's requirement that every parameter be a
   DTensor carrying an explicit ``"ep"`` mesh axis.
-* ``dist_mean``, ``all_gather_entries`` and friends are not ported: they exist
-  upstream for bucketed per-module metrics, none of which llmtuner reports. Port
-  them when there is a caller, not before.
+* ``dist_sum`` / ``dist_max`` / ``dist_mean`` / ``dist_sum_tensor`` are not
+  re-created. Upstream they are one-line ``funcol.all_reduce`` wrappers naming
+  a reduction and its mesh; llmtuner's counterpart is
+  ``accelerator/dist.all_reduce`` (clone + in-place c10d collective), called at
+  the site. ``trainer/trainer.py`` and ``trainer/validate.py`` reduce their
+  loss/token denominators over ``dp_mesh`` / ``loss_mesh`` there, and
+  ``components/metrics.py`` reduces nothing at all (see its docstring), so
+  there is no caller that would read better with a named helper. This also
+  covers upstream's ``all_gather_entries`` and friends, which exist for
+  bucketed per-module metrics llmtuner does not report.
 
 The single non-obvious line kept from upstream is the ``DTensor`` branch in
 ``clip_grad_norm_``; it carries a comment explaining why it exists.

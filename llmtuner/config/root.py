@@ -199,6 +199,10 @@ class LLMTunerConfig:
         return self.training.deterministic
 
     @property
+    def detect_anomaly(self) -> bool:
+        return self.training.detect_anomaly
+
+    @property
     def pipeline_parallel_schedule(self) -> str:
         return self.parallel.pipeline_parallel_schedule
 
