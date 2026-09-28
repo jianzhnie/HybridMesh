@@ -52,8 +52,8 @@ import torch
 import torch.distributed as dist
 from torch.distributed._functional_collectives import all_to_all_single
 
-from ...accelerator import dist_utils
-from .scatter_add import deterministic_scatter_add
+from ....accelerator import dist_utils
+from ..scatter_add import deterministic_scatter_add
 
 __all__ = [
     "EP_DISPATCHER_BACKENDS",

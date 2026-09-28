@@ -22,13 +22,13 @@ import pytest
 import torch
 
 from llmtuner.components.loss import IGNORE_INDEX, next_token_targets
-from llmtuner.models.hf_factory import (
+from llmtuner.models.hf.factory import (
     _ATTN_IMPLEMENTATION,
     build_model_config,
     build_model_config_for,
     materialize_meta_model,
 )
-from llmtuner.models.hf_wrapper import HFTransformerModel
+from llmtuner.models.hf.wrapper import HFTransformerModel
 from llmtuner.trainer import LLMTunerConfig, TrainingConfig
 
 _HIDDEN = 32
@@ -335,7 +335,7 @@ def test_a_composite_config_carries_the_mask_type_down_to_the_text_stack() -> No
     """
     from transformers import AutoConfig
 
-    from llmtuner.models.hf_factory import unwrap_text_config
+    from llmtuner.models.hf.factory import unwrap_text_config
 
     for name in ("llava", "gemma3"):
         top = AutoConfig.for_model(name)
@@ -363,7 +363,7 @@ def test_a_composite_without_the_flag_stays_unset() -> None:
     """
     from transformers import AutoConfig
 
-    from llmtuner.models.hf_factory import unwrap_text_config
+    from llmtuner.models.hf.factory import unwrap_text_config
 
     top = AutoConfig.for_model("llava")
     assert not hasattr(top, "attn_mask_type")

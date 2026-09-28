@@ -19,7 +19,7 @@ require_env('spmd_types')
 
 import torch
 
-from llmtuner.models.common.moe import TokenChoiceTopKRouter
+from llmtuner.models.common.moe.router import TokenChoiceTopKRouter
 
 _NUM_EXPERTS = 4
 _DIM = 8

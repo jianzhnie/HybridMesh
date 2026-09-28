@@ -9,7 +9,7 @@ GitHub 仓库名是 **TorchLLMTuner**，Python 包名是 **`llmtuner`**（`impor
 ## 设计立场
 
 - **只有两个抽象。** 分组配置 `LLMTunerConfig`（`llmtuner/config/`）与模型包装
-  `HFTransformerModel`（`llmtuner/models/hf_wrapper.py`）。模型本体用 `transformers`
+  `HFTransformerModel`（`llmtuner/models/hf/wrapper.py`）。模型本体用 `transformers`
   的 `AutoModelForCausalLM`，分布式复杂度全部集中在 `parallel/`，训练循环保持端到端可读。
 - **`apply_*` 在 degree == 1 时是 no-op。** 所以同一份 trainer 代码从单设备一直跑到
   全混合并行，调用点没有一处 `if degree > 1`；`parallelize_hf_transformers` 因此可以
@@ -87,9 +87,9 @@ CLI 用 `HfArgumentParser` 把九个配置组摊平成扁平旗标（`--tensor_p
 | `parallel/context_parallel/`                                                   | CP：kv_allgather 与 Ulysses 两种策略、flex kernel、输入分片与 load balancer                                                                                                             |
 | `parallel/expert_parallel/`                                                    | EP：HF MoE 块替换（搬权重而非重新初始化）+ all-to-all dispatcher + 布局 probe                                                                                                           |
 | `parallel/pipeline_parallel/`                                                  | PP：stage 切分（`pipeline.py`）与 schedule 驱动（`apply.py`）                                                                                                                           |
-| `models/hf_wrapper.py`                                                         | 模型唯一抽象 `HFTransformerModel`（HF `ForCausalLM` + 并行化方式）                                                                                                                      |
-| `models/hf_factory.py`                                                         | 建模前助手：HF config 构造、meta 模型 materialize、`num_flops_per_token`                                                                                                                |
-| `models/hf_state_dict_adapter.py`                                              | HF safetensors 命名映射（wrapper 多一层 `model.` 前缀，无张量变换）                                                                                                                     |
+| `models/hf/wrapper.py`                                                         | 模型唯一抽象 `HFTransformerModel`（HF `ForCausalLM` + 并行化方式）                                                                                                                      |
+| `models/hf/factory.py`                                                         | 建模前助手：HF config 构造、meta 模型 materialize、`num_flops_per_token`                                                                                                                |
+| `models/hf/state_dict_adapter.py`                                              | HF safetensors 命名映射（wrapper 多一层 `model.` 前缀，无张量变换）                                                                                                                     |
 | `models/common/`                                                               | vendored 模型组件词汇表：注意力片段、MoE、FFN、norm/激活、RoPE、多模态胶水                                                                                                              |
 | `trainer/train.py`                                                             | CLI 入口（`llmtuner.trainer.train:main`，即 `llmtuner-train`）                                                                                                                          |
 | `trainer/builder.py`                                                           | 装配顺序（＝契约）：PG/rank → 度解析 → 组合守卫 → 播种 → mesh → 模型 → 并行化 → 优化器/调度/EMA/aux hooks → 数据 / checkpoint / 指标                                                    |

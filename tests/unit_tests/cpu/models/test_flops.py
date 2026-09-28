@@ -22,8 +22,8 @@ import pytest
 from transformers import AutoConfig
 from transformers.configuration_utils import PretrainedConfig
 
-from llmtuner.models import hf_factory
-from llmtuner.models.hf_factory import (
+from llmtuner.models.hf import factory
+from llmtuner.models.hf.factory import (
     flops_per_token,
     num_flops_per_token,
     quadratic_attention_flops_per_token,
@@ -136,7 +136,7 @@ def test_num_flops_per_token_passes_the_run_sequence_length_through(
     ``cfg.max_seq_len``; the attention term must use the run's own sequence
     length, not the architecture's maximum."""
     monkeypatch.setattr(
-        hf_factory, "build_model_config_for", lambda cfg: _arch("llama")
+        factory, "build_model_config_for", lambda cfg: _arch("llama")
     )
     short = num_flops_per_token(SimpleNamespace(max_seq_len=8))
     long = num_flops_per_token(SimpleNamespace(max_seq_len=32))

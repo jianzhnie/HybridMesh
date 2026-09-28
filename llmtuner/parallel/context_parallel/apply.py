@@ -16,7 +16,7 @@ logger = get_logger(__name__)
 __all__ = ["apply_cp"]
 
 # HF names the attention submodule differently across model families; probe in
-# the style of hf_wrapper's ``first_present`` rather than hardcoding one
+# the style of hf/wrapper's ``first_present`` rather than hardcoding one
 # family's spelling.
 _ATTN_MODULE_NAMES = ("self_attn", "attn", "attention")
 
@@ -40,12 +40,12 @@ def apply_cp(
     if cfg.cp == 1:
         return model
 
-    # Lazy: ``models/hf_wrapper`` imports this package's ``__init__`` at module
+    # Lazy: ``models/hf/wrapper`` imports this package's ``__init__`` at module
     # scope (for the CP input sharding), and the ``__init__`` eagerly
     # re-exports ``apply_cp`` from this module -- a module-level import of
-    # hf_wrapper here would close that cycle whenever hf_wrapper is imported
+    # hf/wrapper here would close that cycle whenever hf/wrapper is imported
     # first. Keeping it at the call site is what lets both import orders work.
-    from ...models.hf_wrapper import _ATTN_IMPLEMENTATION
+    from ...models.hf.wrapper import _ATTN_IMPLEMENTATION
 
     impl = getattr(getattr(model, "model", None), "config", None)
     impl = getattr(impl, "_attn_implementation", None)

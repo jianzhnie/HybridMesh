@@ -22,7 +22,7 @@ require_env('spmd_types')
 import pytest
 import torch
 
-from llmtuner.models.common.qkv import QKVLinear, local_head_split
+from llmtuner.models.common.attention.qkv import QKVLinear, local_head_split
 
 DIM = 16
 HEAD_DIM = 4

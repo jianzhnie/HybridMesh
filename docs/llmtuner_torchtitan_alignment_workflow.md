@@ -124,7 +124,7 @@ git -C <torchtitan> log <上次-torchtitan-基线>..HEAD -- torchtitan/
 适用于相同意图但实现形状不同的文件。只迁移不变量、错误检查和数学语义，不复制上游
 类层次。重点模块：
 
-- `models/hf_wrapper.py`
+- `models/hf/wrapper.py`
 - `parallel/parallelize.py`
 - `parallel/tensor_parallel/tp.py`
 - `parallel/expert_parallel/*`

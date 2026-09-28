@@ -40,27 +40,27 @@ from transformers.configuration_utils import PretrainedConfig
 from transformers.integrations.flex_attention import flex_attention_forward
 from transformers.modeling_utils import AttentionInterface
 
-from ..accelerator import dist_utils
-from ..components.loss import next_token_targets
-from ..datasets.types import Batch
-from ..parallel.compile import maybe_regional_inductor
-from ..parallel.context_parallel import (
+from ...accelerator import dist_utils
+from ...components.loss import next_token_targets
+from ...datasets.types import Batch
+from ...parallel.compile import maybe_regional_inductor
+from ...parallel.context_parallel import (
     shard_attention_mask_for_cp,
     shard_batch_for_cp,
     shard_batch_for_tp,
     shard_padding_mask_for_cp,
     shard_padding_mask_for_tp,
 )
-from ..parallel.parallel_dims import ParallelDims
-from ..utils.logger_utils import get_logger
-from .common.cast_linear import TORCH_DTYPE_MAP, to_cast_linear
-from .common.masks import (
+from ...parallel.parallel_dims import ParallelDims
+from ...utils.logger_utils import get_logger
+from ..common.attention.masks import (
     create_attention_mask,
     get_causal_mask_mod,
     get_document_mask_mod,
 )
-from .common.moe import iter_moe_layers
-from .hf_factory import _ATTN_IMPLEMENTATION, resolve_model_class, unwrap_text_config
+from ..common.cast_linear import TORCH_DTYPE_MAP, to_cast_linear
+from ..common.moe.block import iter_moe_layers
+from .factory import _ATTN_IMPLEMENTATION, resolve_model_class, unwrap_text_config
 
 logger = get_logger(__name__)
 

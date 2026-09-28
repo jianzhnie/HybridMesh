@@ -127,10 +127,8 @@ from ..models.common.aux_loss import (
     AuxLoss,
     collect_aux_loss_metrics,
 )
-from ..models.common.grouped_experts import GroupedExperts
-from ..models.common.moe import (
-    MoE,
-)
+from ..models.common.moe.block import MoE
+from ..models.common.moe.experts import GroupedExperts
 from ..parallel.parallel_dims import ParallelDims
 from ..parallel.tensor_parallel.tp import (
     ColumnParallelLinear,

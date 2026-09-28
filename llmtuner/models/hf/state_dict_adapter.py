@@ -14,7 +14,7 @@ from typing import Any
 
 from torch.distributed.checkpoint import HuggingFaceStorageReader
 
-from ..utils.logger_utils import get_logger
+from ...utils.logger_utils import get_logger
 
 logger = get_logger(__name__)
 

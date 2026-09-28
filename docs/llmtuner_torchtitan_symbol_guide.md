@@ -93,20 +93,20 @@ step 1 恢复 optimizer、scheduler、dataloader 和 train state 后完成并保
 | `param_init.skip_param_init`, `depth_scaled_std` | ~~`models/common/param_init.py`~~ | **2026-09-25 已删除**：parity vendored 死代码，llmtuner 用 HF 自带 `_init_weights`，无消费者 |
 | `Embedding.forward` | 上游同名文件仅供概念比较 | llmtuner 是 C 类独立实现并支持 vocab shard bounds；不是同名移植。2026-09-23 移植上游 #4637 同源修复：vocab-parallel 分支把全局 `padding_idx` 映射为本地坐标，只有持有该行的 shard 传入，修复越界崩溃与他 shard 行梯度被静默抑制，**通过** |
 | `scatter_add.deterministic_scatter_add` 及 autograd hooks | `ops/scatter_add.py` | 路径不同，算法来源明确；前后向测试覆盖，**通过** |
-| `grouped_experts.GroupedExperts.forward` | `models/common/grouped_experts.py` 与 `models/gpt_oss/moe.py` | llmtuner 统一 grouped-mm/fallback，并承载 HF 权重形状，**通过（适配）** |
+| `moe.experts.GroupedExperts.forward` | `models/common/grouped_experts.py` 与 `models/gpt_oss/moe.py` | llmtuner 统一 grouped-mm/fallback，并承载 HF 权重形状，**通过（适配）** |
 | `cast_linear.CastLinear`, `to_cast_linear` | `models/common/linear.py::CastLinear`（150c4f73a 配套） | 前向 input/weight/bias 转 `compute_dtype` 后 `F.linear`，参数保原 dtype（autograd 回 cast）；`nn.Linear` 子类 + 同 `Parameter` 重绑定，state-dict FQN 与 tying 不变；经 `ModelConfig.compute_dtype` 启用，默认关闭逐位回归，**通过（适配）** |
 
 ### 4.2 Attention、RoPE 与 mask
 
 | llmtuner 符号 | TorchTitan 对应符号 | 差异与正确性 |
 |---|---|---|
-| `qkv.local_head_split` | `models/common/attention.py::local_head_split` | 去 SPMD 注解，reshape 语义一致，**通过** |
-| `qkv.QKVLinear` | `FusedQKVLinear`/QKV 部分 | llmtuner 注入 plain linear 并用 state_dict hook 拆合 HF Q/K/V，**通过（适配）** |
+| `attention.qkv.local_head_split` | `models/common/attention.py::local_head_split` | 去 SPMD 注解，reshape 语义一致，**通过** |
+| `attention.qkv.QKVLinear` | `FusedQKVLinear`/QKV 部分 | llmtuner 注入 plain linear 并用 state_dict hook 拆合 HF Q/K/V，**通过（适配）** |
 | `QKVLinear._split_qkv_on_save/_merge_qkv_on_load` | 上游 fused QKV state hooks | llmtuner 额外兼容 DTensor gather 与原始 FQN，round-trip 测试覆盖，**通过**。上游 1e4b1f686 把 QKV 转换移入 HF adapters；llmtuner 不跟随——checkpoint 以 HF `wq/wk/wv` 名义存取是本地契约 |
 | `RoPEConfig`, `RoPE`, `ComplexRoPE`, `CosSinRoPE` | `models/common/rope.py` | 去 Module/Config 协议，缓存为普通 buffer，**通过** |
 | `_yarn_inv_freq` | 同名函数 | 已包含 YaRN `low==0/low==high` 和显式 factor 启用修复，**通过** |
 | `_maybe_check_max_pos` | 上游 RoPE bounds check | async assert，compile 时跳过，**通过**。上游 7e7f271e0 已删除 DTensor positions 包装；llmtuner 本无此路径 |
-| mask modifier 系列 | `models/common/attention.py` 对应 mask helpers | llmtuner 拆成 `masks.py`；公式一致，**通过** |
+| mask modifier 系列 | `models/common/attention.py` 对应 mask helpers | llmtuner 拆成 `attention/masks.py`；公式一致，**通过** |
 | `create_varlen_metadata_for_document` | 上游同名 helper | llmtuner 支持固定容量和动态路径，**通过** |
 | `create_attention_mask` | `flex_attention.create_block_mask` 调用点 | llmtuner 缓存 compile，并兼容 Torch 2.10 缺少 `separate_full_blocks`，**通过（适配）** |
 
@@ -420,21 +420,21 @@ helper 在前文涉及关键算法时单列。成组条目（`config/`、`traine
 | `models/common/cast_linear.py` | `CastLinear` / `to_cast_linear`（lm_head compute-dtype 变换） | A2，`models/common/linear.py`（150c4f73a） |
 | `models/common/embedding.py` | vocab-aware embedding | C，同名不同源 |
 | `models/common/feed_forward.py` | FFN helpers/classes | A2，同文件 |
-| `models/common/grouped_experts.py` | `GroupedExperts` | B，common + gpt_oss MoE |
+| `models/common/moe/experts.py` | `GroupedExperts`, `RoutedExperts` | B，common + gpt_oss MoE |
 | `models/common/linear.py` | router/partial-bias linear | A2，同文件 |
-| `models/common/masks.py` | mask mods、varlen metadata | A2，`attention.py` 拆分 |
-| `models/common/moe.py`（MoE 本体/experts/balance loss）+ `routers.py` + `balancing.py` | router、experts、MoE、balance loss、bias 更新钩子 | A2，同文件 |
+| `models/common/attention/masks.py` | mask mods、varlen metadata | A2，`attention.py` 拆分 |
+| `models/common/moe/`（`block.py` MoE 本体 + `router.py` + `experts.py` + `dispatcher.py` + `load_balance.py` + `balancing.py`） | router、experts、MoE、balance loss、bias 更新钩子 | A2，上游单文件 `moe.py` + `token_dispatcher.py`；2026-09-28 拆为子包（十七次增量） |
 | `models/common/multimodal.py` | vision/text fusion helpers | A2，同文件 |
 | ~~`models/common/param_init.py`~~ | init context/std helper | 已于 2026-09-25 删除（死代码） |
-| `models/common/qkv.py` | fused QKV 与 state hooks | A2，`attention.py` 拆分 |
-| ~~`models/common/config_utils.py`~~ | 上游 config 工厂：`make_*_config`、`fused_*_param_init`、`get_attention_config`、`make_token_dispatcher_config` | 无对应物（2026-09-28 定性）：llmtuner 没有 config tree，`Module.Config` 那层整体不存在，其*判定*分别落在 `expert_parallel/probe.py`（top_k/score_func/route_norm/route_scale/expert groups）、`parallel/matrix.py`（组合裁决与 loud-raise）、`models/hf_factory.py`（HF config 构建）、`hf_wrapper._flex_supported`（attention backend 选择） |
+| `models/common/attention/qkv.py` | fused QKV 与 state hooks | A2，`attention.py` 拆分 |
+| ~~`models/common/config_utils.py`~~ | 上游 config 工厂：`make_*_config`、`fused_*_param_init`、`get_attention_config`、`make_token_dispatcher_config` | 无对应物（2026-09-28 定性）：llmtuner 没有 config tree，`Module.Config` 那层整体不存在，其*判定*分别落在 `expert_parallel/probe.py`（top_k/score_func/route_norm/route_scale/expert groups）、`parallel/matrix.py`（组合裁决与 loud-raise）、`models/hf/factory.py`（HF config 构建）、`models/hf/wrapper.py` 的 `_flex_supported`（attention backend 选择） |
 | ~~`models/common/lora.py`~~ | `get_lora_linear`/`get_lora_grouped_linear` | 无对应物（裁剪面）：LoRA 由 HF/peft 提供，llmtuner 不持有上游 `_linear()` seam 与量化轴，故不移植 |
 | `models/common/rope.py` | RoPE 全家族 | A2，同文件 |
 | `models/common/scatter_add.py` | deterministic scatter-add autograd | A2，`ops/scatter_add.py` |
-| `models/common/token_dispatcher.py` | local/all-to-all dispatchers + TorchAO 可选导入适配层；DeepEP/HybridEP 登记缺口（config 期 loud-raise） | A2，同文件 |
-| `models/hf_wrapper.py` + `models/hf_factory.py` | wrapper/forward 与 config 构建/类解析/meta materialize/FLOPs | B，transformers backend model |
+| `models/common/moe/dispatcher.py` | local/all-to-all dispatchers + TorchAO 可选导入适配层；DeepEP/HybridEP 登记缺口（config 期 loud-raise） | A2，同文件 |
+| `models/hf/wrapper.py` + `models/hf/factory.py` | wrapper/forward 与 config 构建/类解析/meta materialize/FLOPs | B，transformers backend model |
 | ~~`experiments/transformers_modeling_backend/` 的 `module_conversion.py` / `config_registry.py` / `__init__.py`~~ | HF 模块的 `Module` 协议转换 / 实验用家族 config 注册表 / 模型注册表 | 无对应物（2026-09-28 定性）：llmtuner 没有 `Module` 协议这一层（同类 `__class__` swap 技术用于 `GatherSequenceFirst`/`TPMoeSequenceBoundary`/TP realizer），config 由 HF `AutoConfig` + `config/` 门面构建，模型类由 HF auto mapping 解析（`resolve_model_class`） |
-| `models/hf_state_dict_adapter.py` | HF↔llmtuner state-dict 键转换与 safetensors index 严格校验 | B，`experiments/.../state_dict_adapter.py` |
+| `models/hf/state_dict_adapter.py` | HF↔llmtuner state-dict 键转换与 safetensors index 严格校验 | B，`experiments/.../state_dict_adapter.py` |
 | `parallel/activation_checkpoint.py` | full/selective AC | A2，distributed AC |
 | `parallel/compile.py` | `apply_compile`（逐 block compile / async TP / regional_inductor / capture_scalar_outputs） | A2，`distributed/compile.py` |
 | `accelerator/collectives.py` | reductions、timeouts、grad norm | A2（部分），`distributed/utils.py` 的两个 vendored 符号 |
@@ -536,7 +536,8 @@ helper 在前文涉及关键算法时单列。成组条目（`config/`、`traine
   5 failed，5 个失败**均属该文件既有漂移、与本轮改动无关**：2 个是自带 fake wandb 的
   `log()` 没有 `commit` 参数（`WandBLogger.log(..., commit=True)` 是 2026-09-23 的改动，
   因该文件常被跳过而没同步到 fake）、1 个 wandb 缺失路径的断言与实现不符、2 个引用已不存在
-  的 `hf_wrapper.build_model_config_for`。登记待修，不在本轮范围内。
+  的 `hf/wrapper.py` 里从未导出的 `build_model_config_for`（2026-09-28 十七次增量已随
+  FLOPs 用例迁移一并删除该断言）。登记待修，不在本轮范围内。
 - 2026-09-28 同轮的 optimizer 面：`tests/unit_tests/cpu/components/optimizer/
   test_optimizer_container.py` 整体被 `torch_param_names` 门控（该 cap 探测的是
   optimizer `state_dict()` 的 param group 是否带 `param_names`，torch 2.2.2 无），

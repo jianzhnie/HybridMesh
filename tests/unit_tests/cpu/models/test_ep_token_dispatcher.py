@@ -21,7 +21,7 @@ import pytest
 import torch
 
 from llmtuner.config import ParallelConfig
-from llmtuner.models.common.token_dispatcher import (
+from llmtuner.models.common.moe.dispatcher import (
     TORCHAO_INSTALL_HINT,
     AllToAllTokenDispatcher,
     LocalTokenDispatcher,

@@ -22,7 +22,7 @@ behavior: one whole-model ``torch.compile(model, backend="inductor")``.
   aten ops. When the model routes through llmtuner's flex path, the backend
   is wrapped so just the annotated flex region is scooped into an inductor
   sub-compile (the annotation is ``maybe_regional_inductor`` at the flex
-  call site in ``models/hf_wrapper.py``). A flex model with any other
+  call site in ``models/hf/wrapper.py``). A flex model with any other
   non-inductor backend raises, as upstream does.
 * **capture_scalar_outputs**: token-choice MoE dispatch has data-dependent
   shapes (per-expert token counts), which dynamo cannot trace without
@@ -47,7 +47,7 @@ from llmtuner.config import CompileConfig
 from llmtuner.errors import EnvironmentUnsupportedError
 
 from ..accelerator.capabilities import has
-from ..models.common.moe import iter_moe_layers
+from ..models.common.moe.block import iter_moe_layers
 from ..utils.logger_utils import get_logger
 
 logger = get_logger(__name__)
@@ -171,7 +171,7 @@ def maybe_regional_inductor_backend(
 
     ``regional_inductor`` lowers just the regions annotated with
     ``compile_with_inductor`` (see ``maybe_regional_inductor`` and the flex
-    call site in ``models/hf_wrapper.py``) while the rest stays in
+    call site in ``models/hf/wrapper.py``) while the rest stays in
     aot_eager. Only applied for ``aot_eager`` on a model that actually runs
     flex attention: the default inductor backend already lowers flex
     directly, and a model on the sdpa fallback has no flex region to scoop,

@@ -32,8 +32,8 @@ import torch
 import torch.distributed as dist
 from torch.distributed.device_mesh import init_device_mesh
 
-from llmtuner.models.hf_factory import build_model_config_for
-from llmtuner.models.hf_wrapper import HFTransformerModel
+from llmtuner.models.hf.factory import build_model_config_for
+from llmtuner.models.hf.wrapper import HFTransformerModel
 from llmtuner.parallel.context_parallel import apply_cp, shard_batch_for_cp
 from llmtuner.trainer import (
     LLMTunerConfig,
@@ -130,7 +130,7 @@ def main() -> None:
     failures: list[str] = []
 
     with mock.patch(
-        "llmtuner.models.hf_wrapper.create_attention_mask",
+        "llmtuner.models.hf.wrapper.create_attention_mask",
         _uncompiled_create_attention_mask,
     ):
         inputs, out_labels, extra = model.preprocess_inputs(

@@ -124,8 +124,8 @@ def test_a_wrapper_tp_plan_matches_the_modules_it_exposes() -> None:
 
     Checked on the real wrapper so the path spelling is the real one.
     """
-    from llmtuner.models.hf_factory import build_model_config
-    from llmtuner.models.hf_wrapper import HFTransformerModel
+    from llmtuner.models.hf.factory import build_model_config
+    from llmtuner.models.hf.wrapper import HFTransformerModel
 
     config = build_model_config(
         "llama",
@@ -173,8 +173,8 @@ def test_qwen3_plan_resolves_rather_than_raising_on_its_qk_norms() -> None:
     its gradient summed by ``Trainer._allreduce_replicated_tp_grads``), while
     the projections still resolve to real realizers.
     """
-    from llmtuner.models.hf_factory import build_model_config
-    from llmtuner.models.hf_wrapper import HFTransformerModel
+    from llmtuner.models.hf.factory import build_model_config
+    from llmtuner.models.hf.wrapper import HFTransformerModel
 
     config = build_model_config(
         "qwen3",

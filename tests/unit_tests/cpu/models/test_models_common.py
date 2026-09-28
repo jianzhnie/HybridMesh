@@ -24,9 +24,9 @@ from llmtuner.models.common.feed_forward import (
     SigmoidGatedFeedForward,
     compute_ffn_hidden_dim,
 )
-from llmtuner.models.common.grouped_experts import GroupedExperts
 from llmtuner.models.common.linear import PartialBiasRowwiseLinear, RouterGateLinear
-from llmtuner.models.common.moe import TokenChoiceTopKRouter
+from llmtuner.models.common.moe.experts import GroupedExperts
+from llmtuner.models.common.moe.router import TokenChoiceTopKRouter
 
 
 def _ffn(dim: int = 8, hidden: int = 6) -> FeedForward:
@@ -250,9 +250,9 @@ def test_router_gate_matches_a_plain_fp32_linear() -> None:
 
 def test_router_gate_is_the_moe_router_projection() -> None:
     """One class, imported by the MoE router -- not a second copy of it."""
-    from llmtuner.models.common.moe import RouterGateLinear as FromMoe
+    from llmtuner.models.common.moe.router import RouterGateLinear as FromRouter
 
-    assert FromMoe is RouterGateLinear
+    assert FromRouter is RouterGateLinear
 
 
 # -- PartialBiasRowwiseLinear ------------------------------------------------
@@ -470,7 +470,7 @@ def test_the_grouped_mm_probe_follows_the_op(monkeypatch) -> None:
 
 def test_the_grouped_mm_probe_agrees_with_the_real_op_here() -> None:
     """On whatever host this runs, the probe must match the actual call."""
-    from llmtuner.models.common.grouped_experts import grouped_mm_available
+    from llmtuner.models.common.moe.experts import grouped_mm_available
 
     reported = grouped_mm_available()
     try:
@@ -498,7 +498,7 @@ def test_the_fused_path_matches_the_loop_bit_for_bit_in_bf16() -> None:
     assertion and would hide a mis-segmented expert. Skipped where the op is
     unavailable.
     """
-    from llmtuner.models.common.grouped_experts import grouped_mm_available
+    from llmtuner.models.common.moe.experts import grouped_mm_available
 
     if not grouped_mm_available():
         pytest.skip("torch._grouped_mm is unavailable on this build")
@@ -536,7 +536,7 @@ def test_the_fused_path_is_refused_for_a_wider_dtype() -> None:
 
 def test_the_default_follows_the_probe() -> None:
     """``None`` means "decide here", and the decision is the probe's."""
-    from llmtuner.models.common.grouped_experts import grouped_mm_available
+    from llmtuner.models.common.moe.experts import grouped_mm_available
 
     assert _grouped(use_grouped_mm=None).use_grouped_mm == grouped_mm_available()
     # An explicit value still wins, which is what lets a test pin a path.

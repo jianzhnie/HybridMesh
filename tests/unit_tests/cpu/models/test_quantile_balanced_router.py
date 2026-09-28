@@ -32,16 +32,17 @@ import pytest
 import torch
 import torch.distributed as dist
 
-from llmtuner.models.common.grouped_experts import GroupedExperts
-from llmtuner.models.common.moe import (
-    MoE,
-    QuantileBalancedTopKRouter,
-    RoutedExperts,
-    TokenChoiceTopKRouter,
+from llmtuner.models.common.moe.balancing import (
     register_moe_quantile_balancing_hook,
     update_quantile_expert_bias,
 )
-from llmtuner.models.common.token_dispatcher import LocalTokenDispatcher
+from llmtuner.models.common.moe.block import MoE
+from llmtuner.models.common.moe.dispatcher import LocalTokenDispatcher
+from llmtuner.models.common.moe.experts import GroupedExperts, RoutedExperts
+from llmtuner.models.common.moe.router import (
+    QuantileBalancedTopKRouter,
+    TokenChoiceTopKRouter,
+)
 
 _NUM_EXPERTS = 4
 _DIM = 8

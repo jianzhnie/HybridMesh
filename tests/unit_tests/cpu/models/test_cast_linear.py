@@ -25,8 +25,8 @@ from llmtuner.models.common.cast_linear import (
     CastLinear,
     to_cast_linear,
 )
-from llmtuner.models.hf_factory import build_model_config
-from llmtuner.models.hf_wrapper import HFTransformerModel
+from llmtuner.models.hf.factory import build_model_config
+from llmtuner.models.hf.wrapper import HFTransformerModel
 
 
 def _tiny_qwen3_config(compute_dtype: str | None = None):

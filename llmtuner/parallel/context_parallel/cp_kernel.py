@@ -1,7 +1,7 @@
 """The CP flex kernel: redistribute q/k/v across the CP group, then run flex.
 
 ``apply_cp`` attaches one of these to every decoder layer's attention module
-as ``_titan_flex_kernel``; ``hf_wrapper.flex_attention_hf`` then routes the
+as ``_titan_flex_kernel``; ``hf.wrapper.flex_attention_hf`` then routes the
 layer's attention call through it. q/k/v arrive HF-shaped --
 ``(batch, heads, seq, dim)`` -- with the sequence already sharded along dim 2
 by ``shard_batch_for_cp``. Two strategies redistribute them:
@@ -43,7 +43,10 @@ import torch.distributed.distributed_c10d as c10d
 import torch.nn as nn
 from torch.distributed.device_mesh import DeviceMesh
 
-from llmtuner.models.common.masks import create_attention_mask, get_causal_mask_mod
+from llmtuner.models.common.attention.masks import (
+    create_attention_mask,
+    get_causal_mask_mod,
+)
 
 __all__ = ["CPFlexKernel"]
 
@@ -246,7 +249,7 @@ class CPFlexKernel(nn.Module):
         Q, full KV) that pairs with the gathered K/V; for ``ulysses`` it is
         either dropped and rebuilt (single causal document) or used as-is
         (packed corpus, full-length -- see :meth:`_forward_ulysses`). Returns
-        just the attention output tensor -- ``hf_wrapper.flex_attention_hf``
+        just the attention output tensor -- ``hf.wrapper.flex_attention_hf``
         appends the ``None`` LSE itself.
         """
         if self.strategy == "ulysses":

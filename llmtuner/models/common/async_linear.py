@@ -38,8 +38,8 @@ import torch
 import torch.nn as nn
 
 from llmtuner.accelerator.spmd_context import spmd_mesh_group
+from llmtuner.models.common.attention.qkv import QKVLinear
 from llmtuner.models.common.feed_forward import FeedForward
-from llmtuner.models.common.qkv import QKVLinear
 from llmtuner.parallel.tensor_parallel.linear import (
     AllGatherLinear,
     LinearReduceScatter,

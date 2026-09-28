@@ -27,17 +27,15 @@ import pytest
 import torch
 import torch.distributed as dist
 
-from llmtuner.models.common.grouped_experts import GroupedExperts
-from llmtuner.models.common.moe import (
-    MoE,
-    RoutedExperts,
-    TokenChoiceTopKRouter,
-    iter_moe_layers,
+from llmtuner.models.common.moe.balancing import (
     register_moe_load_balancing_hook,
     update_expert_bias,
 )
-from llmtuner.models.common.token_dispatcher import LocalTokenDispatcher
-from llmtuner.models.hf_wrapper import HFTransformerModel
+from llmtuner.models.common.moe.block import MoE, iter_moe_layers
+from llmtuner.models.common.moe.dispatcher import LocalTokenDispatcher
+from llmtuner.models.common.moe.experts import GroupedExperts, RoutedExperts
+from llmtuner.models.common.moe.router import TokenChoiceTopKRouter
+from llmtuner.models.hf.wrapper import HFTransformerModel
 from llmtuner.parallel.expert_parallel import swap_hf_moe_blocks
 
 try:

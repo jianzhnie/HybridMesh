@@ -13,18 +13,17 @@ import torch.distributed as dist
 import torch.nn as nn
 
 from ...accelerator import dist_utils
-from ...models.common.grouped_experts import GroupedExperts
-from ...models.common.moe import (
-    MicrobatchWiseLoadBalanceLoss,
-    MoE,
-    QuantileBalancedTopKRouter,
-    RoutedExperts,
-    TokenChoiceTopKRouter,
-)
-from ...models.common.token_dispatcher import (
+from ...models.common.moe.block import MoE
+from ...models.common.moe.dispatcher import (
     AllToAllTokenDispatcher,
     LocalTokenDispatcher,
     TorchAOTokenDispatcher,
+)
+from ...models.common.moe.experts import GroupedExperts, RoutedExperts
+from ...models.common.moe.load_balance import MicrobatchWiseLoadBalanceLoss
+from ...models.common.moe.router import (
+    QuantileBalancedTopKRouter,
+    TokenChoiceTopKRouter,
 )
 from .. import matrix
 from .probe import (

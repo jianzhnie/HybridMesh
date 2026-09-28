@@ -132,7 +132,7 @@ G1 决定模型层只能依赖 HF 公共约定（`config.architectures`、常见
              [SEAM 1]  HF wrapper 契约 (§4.2)
                           |
 +---------------------------------------------------------------+
-|  models/hf_wrapper.py    唯一的 HF wrapper                    |
+|  models/hf/wrapper.py    唯一的 HF wrapper                       |
 |    forward(input_ids, *, positions, attention_masks) -> logits|
 |    named_children() -> tok_embeddings/layers/norm/lm_head/... |
 |    tp_plan property    <- 重写 HF 模型自带的 _tp_plan          |
@@ -163,7 +163,7 @@ G1 决定模型层只能依赖 HF 公共约定（`config.architectures`、常见
 2. `models/common/embedding.py` -> `components.loss`（`vocab_shard_bounds`）：
    vocab 并行 embedding 的分片边界是 loss 层共用的纯函数词汇表，反向移动会让
    loss 依赖模型构件。
-3. `models/hf_wrapper.py` -> `parallel.compile` / `parallel.context_parallel` /
+3. `models/hf/wrapper.py` -> `parallel.compile` / `parallel.context_parallel` /
    `parallel.parallel_dims`：wrapper 的全部职责就是把 HF 模型插进并行层
    （SEAM 1），CP 分片与 regional-inductor 标注是它契约的一部分。
 
@@ -332,7 +332,7 @@ cp 整除 seq_len、async_tp×{compile,tp}），与其余字段校验同处、�
 
 ### 4.2 SEAM 1：HF wrapper 契约
 
-`HFTransformerModel(nn.Module)`（models/hf_wrapper.py）是唯一 wrapper，
+`HFTransformerModel(nn.Module)`（models/hf/wrapper.py）是唯一 wrapper，
 `__init__(config: PretrainedConfig)` 内按 `config.architectures` 解析 `ForCausalLM`
 类并直接 `model_cls(config=config)`——用 HF 自己的初始化，无 monkey-patch。对并行层
 暴露的契约只有三条：

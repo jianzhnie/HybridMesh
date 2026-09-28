@@ -38,7 +38,7 @@ from llmtuner.models.common.aux_loss import (
     collect_aux_loss_metrics,
     zero_aux_losses,
 )
-from llmtuner.models.common.moe import MicrobatchWiseLoadBalanceLoss
+from llmtuner.models.common.moe.load_balance import MicrobatchWiseLoadBalanceLoss
 
 
 @pytest.fixture(autouse=True)

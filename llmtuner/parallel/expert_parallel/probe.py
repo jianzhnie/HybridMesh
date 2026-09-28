@@ -79,7 +79,7 @@ from typing import NamedTuple
 import torch
 import torch.nn as nn
 
-from ...models.common.moe import MOE_LAYER_ATTRS
+from ...models.common.moe.block import MOE_LAYER_ATTRS
 from ...utils.logger_utils import get_logger
 from .. import matrix
 
@@ -326,7 +326,7 @@ def moe_block_of(layer: nn.Module) -> tuple[str, nn.Module | None]:
     replacement must land in the same slot.
 
     ``MOE_LAYER_ATTRS`` is shared with the expert-bias hook in
-    ``models/common/moe.py`` -- that hook rediscovers these blocks after the
+    ``models/common/moe/block.py`` -- that hook rediscovers these blocks after the
     swap, so the two must agree on where a MoE can live.
     """
     for name in MOE_LAYER_ATTRS:

@@ -174,13 +174,13 @@ CAPABILITIES: dict[str, _Capability] = {
         "without upstream's SAC + pipeline-parallel cache workaround.",
         consumers="parallel/activation_checkpoint.py (_disable_dynamo_lru_cache)",
     ),
-    # -- model kernels (consumer: models/common/grouped_experts.py) ------------
+    # -- model kernels (consumer: models/common/moe/experts.py) ----------------
     "torch_grouped_mm": _Capability(
         _grouped_mm_runs,
         what="torch._grouped_mm",
         since="torch 2.7 (grouped GEMM, bf16; CPU-reachable but shape-constrained)",
         hint="Upgrade torch, or leave GroupedExperts on the looped-GEMM fallback.",
-        consumers="models/common/grouped_experts.py (GroupedExperts forward)",
+        consumers="models/common/moe/experts.py (GroupedExperts forward)",
     ),
 }
 

@@ -1,10 +1,10 @@
-"""Construction-time helpers for the HF model layer.
+"""Construction-time helpers: build the config, resolve the class, count FLOPs.
 
 Everything here runs BEFORE the model exists (or, for ``num_flops_per_token``,
 describes it from the config alone): building the HF ``PretrainedConfig``,
 resolving the ``ForCausalLM`` class it names, materializing a meta-device
 model, and counting FLOPs. The model body itself -- ``HFTransformerModel`` and
-the five-part contract -- lives in ``hf_wrapper.py``, which imports from here;
+the five-part contract -- lives in ``wrapper.py``, which imports from here;
 nothing here imports back.
 """
 

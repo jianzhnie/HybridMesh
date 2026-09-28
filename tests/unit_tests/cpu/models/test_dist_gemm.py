@@ -31,7 +31,7 @@ from llmtuner.models.common.async_linear import (
     RowParallelLinear,
     validate_dist_gemm_preconditions,
 )
-from llmtuner.models.common.qkv import QKVLinear
+from llmtuner.models.common.attention.qkv import QKVLinear
 
 DIM = 16
 HIDDEN = 32

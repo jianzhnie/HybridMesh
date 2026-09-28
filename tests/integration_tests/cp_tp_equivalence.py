@@ -49,8 +49,8 @@ from __future__ import annotations
 import torch
 import torch.distributed as dist
 
-from llmtuner.models.hf_factory import build_model_config_for
-from llmtuner.models.hf_wrapper import HFTransformerModel
+from llmtuner.models.hf.factory import build_model_config_for
+from llmtuner.models.hf.wrapper import HFTransformerModel
 from llmtuner.parallel.context_parallel import (
     apply_cp,
     shard_batch_for_cp,

@@ -332,7 +332,7 @@ def test_swap_refuses_a_shared_expert_block_under_tp_x_ep() -> None:
 
 
 def test_tp_sharded_param_ids_covers_dense_tp_and_ep_experts_not_router() -> None:
-    from llmtuner.models.common.grouped_experts import GroupedExperts
+    from llmtuner.models.common.moe.experts import GroupedExperts
     from llmtuner.parallel.tensor_parallel.tp import ColumnParallelLinear
     from llmtuner.trainer.trainer import tp_sharded_param_ids
 

@@ -36,8 +36,9 @@ import torch
 from transformers import AutoConfig
 
 from llmtuner.models.common.aux_loss import AuxLoss
-from llmtuner.models.common.moe import MoE, RoutedExperts
-from llmtuner.models.hf_wrapper import HFTransformerModel
+from llmtuner.models.common.moe.block import MoE
+from llmtuner.models.common.moe.experts import RoutedExperts
+from llmtuner.models.hf.wrapper import HFTransformerModel
 from llmtuner.parallel.expert_parallel import swap_hf_moe_blocks
 from llmtuner.parallel.expert_parallel.swap import restore_fp32_state_buffers
 
@@ -803,7 +804,7 @@ def test_the_fp32_restore_covers_the_bias_buffer() -> None:
     narrow and worth isolating: yes to float buffers, no to a plain
     ``Module.to``.
     """
-    from llmtuner.models.common.grouped_experts import GroupedExperts
+    from llmtuner.models.common.moe.experts import GroupedExperts
 
     grouped = GroupedExperts(dim=16, hidden_dim=32, num_experts=256)
     moe = MoE(

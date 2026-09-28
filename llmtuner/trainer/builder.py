@@ -37,17 +37,17 @@ from ..components.checkpointer import DATALOADER, TRAIN_STATE, CheckpointManager
 from ..components.metrics import MetricsProcessor
 from ..components.optimizer import EMA, OptimizersContainer, build_lr_scheduler
 from ..models.common.aux_loss import register_aux_loss_zero_hook
-from ..models.common.moe import (
+from ..models.common.moe.balancing import (
     register_moe_load_balancing_hook,
     register_moe_quantile_balancing_hook,
 )
-from ..models.hf_factory import (
+from ..models.hf.factory import (
     build_model_config_for,
     materialize_meta_model,
     num_flops_per_token,
 )
-from ..models.hf_state_dict_adapter import HFTransformerStateDictAdapter
-from ..models.hf_wrapper import HFTransformerModel
+from ..models.hf.state_dict_adapter import HFTransformerStateDictAdapter
+from ..models.hf.wrapper import HFTransformerModel
 from ..parallel import matrix
 from ..parallel.parallel_dims import build_mesh, build_parallel_dims
 from ..parallel.pipeline_parallel import PipelineParallelSetup

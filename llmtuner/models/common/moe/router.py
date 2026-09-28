@@ -1,12 +1,12 @@
 """Router modules for the MoE stack: token-choice top-K routing.
 
-Split out of ``moe.py`` (which keeps the MoE block itself and the aux-loss):
-``TokenChoiceTopKRouter`` is the base router, ``QuantileBalancedTopKRouter``
-the quantile-balanced variant, and ``QuantileBalancer`` its per-step bias
-estimator. Nothing here knows about EP dispatch or the bias-update hooks --
-those live in ``moe.py`` and ``balancing.py`` respectively.
+One node of the ``moe`` package: ``TokenChoiceTopKRouter`` is the base router,
+``QuantileBalancedTopKRouter`` the quantile-balanced variant, and
+``QuantileBalancer`` its per-step bias estimator. Nothing here knows about EP
+dispatch or the bias-update hooks -- those live in ``dispatcher.py`` and
+``balancing.py`` respectively.
 
-Shape legend matches ``moe.py``: ``T`` = tokens, ``D`` = model dimension,
+Shape legend, scoped to this file: ``T`` = tokens, ``D`` = model dimension,
 ``E`` = experts, ``K`` = experts per token, ``B`` = quantile-histogram bins.
 """
 
@@ -18,10 +18,10 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from .linear import RouterGateLinear
+from ..linear import RouterGateLinear
 
 if TYPE_CHECKING:
-    from .aux_loss import AuxLoss
+    from ..aux_loss import AuxLoss
 
 
 class TokenChoiceTopKRouter(nn.Module):

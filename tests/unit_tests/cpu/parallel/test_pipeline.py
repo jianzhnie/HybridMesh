@@ -23,8 +23,8 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torch.distributed.device_mesh import init_device_mesh
 
-from llmtuner.models.hf_factory import build_model_config
-from llmtuner.models.hf_wrapper import HFTransformerModel
+from llmtuner.models.hf.factory import build_model_config
+from llmtuner.models.hf.wrapper import HFTransformerModel
 from llmtuner.parallel.parallel_dims import ParallelDims
 from llmtuner.parallel.pipeline_parallel.apply import (
     apply_pp,

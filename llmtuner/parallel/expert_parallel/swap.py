@@ -72,7 +72,7 @@ import torch.nn as nn
 
 from llmtuner.errors import EnvironmentUnsupportedError
 
-from ...models.common.token_dispatcher import EP_DISPATCHER_BACKENDS
+from ...models.common.moe.dispatcher import EP_DISPATCHER_BACKENDS
 from ...utils.logger_utils import get_logger
 from .convert import convert_block, restore_fp32_state_buffers
 from .probe import is_hf_moe_block, moe_block_of, router_of

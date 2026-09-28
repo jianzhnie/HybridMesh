@@ -1,9 +1,10 @@
-"""Grouped experts: one weight tensor per projection, holding every expert.
+"""The expert weights, and the routed-expert module that consumes them.
 
-Vendored from torchtitan ``models/common/moe.py`` (the ``GroupedExperts`` class
-only). Removals: the nested ``Config`` dataclass, ``torch_remat``, and the
-``spmd_types`` type-checking block in ``forward`` -- none of them affect the
-arithmetic.
+``GroupedExperts`` is vendored from torchtitan ``models/common/moe.py`` (that
+class only); ``RoutedExperts`` is the wrapper that pairs it with a token
+dispatcher, and is what the model's MoE block calls. Removals from both: the
+nested ``Config`` dataclasses, ``torch_remat``, and the ``spmd_types``
+type-checking blocks -- none of them affect the arithmetic.
 
 Shape legend (Noam Shazeer's convention, scoped to this file):
 
@@ -22,14 +23,19 @@ instead of E separate ones.
 
 from __future__ import annotations
 
+from typing import TYPE_CHECKING
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from ...accelerator.capabilities import has
-from .activation import SwiGLU
+from ....accelerator.capabilities import has
+from ..activation import SwiGLU
 
-__all__ = ["GroupedExperts"]
+if TYPE_CHECKING:
+    from .dispatcher import LocalTokenDispatcher
+
+__all__ = ["GroupedExperts", "RoutedExperts", "grouped_mm_available"]
 
 
 def grouped_mm_available() -> bool:
@@ -149,3 +155,51 @@ class GroupedExperts(nn.Module):
                 out_TD[start:end] = F.linear(x_TD[start:end], weight_EOI[expert])
                 start = end
         return out_TD
+
+
+class RoutedExperts(nn.Module):
+    """The dispatch/combine pair wrapped around the grouped expert weights.
+
+    Split out from ``MoE`` so the routing (which is model-specific) and the
+    expert compute (which is not) can vary independently.
+
+    Args:
+        grouped_experts: the expert weights.
+        dispatcher: moves tokens to the ranks holding their experts.
+    """
+
+    def __init__(
+        self,
+        grouped_experts: GroupedExperts,
+        dispatcher: LocalTokenDispatcher,
+    ) -> None:
+        super().__init__()
+        self.inner_experts = grouped_experts
+        self.token_dispatcher = dispatcher
+
+    def forward(
+        self,
+        x_TD: torch.Tensor,
+        topk_scores_TK: torch.Tensor,
+        topk_expert_ids_TK: torch.Tensor,
+        num_local_tokens_per_expert_E: torch.Tensor,
+    ) -> torch.Tensor:
+        """Dispatch tokens to experts, run them, and combine the results."""
+        (
+            routed_input_RD,
+            num_global_tokens_per_local_expert_e,
+            metadata,
+        ) = self.token_dispatcher.dispatch(
+            x_TD,
+            topk_scores_TK,
+            topk_expert_ids_TK,
+            num_local_tokens_per_expert_E,
+        )
+        routed_output_RD = self.inner_experts(
+            routed_input_RD, num_global_tokens_per_local_expert_e
+        )
+        return self.token_dispatcher.combine(
+            routed_output_RD,
+            metadata,
+            x_TD,
+        )

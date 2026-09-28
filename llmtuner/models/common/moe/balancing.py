@@ -1,11 +1,11 @@
 """MoE load-balancing hooks: the per-step expert-bias updates.
 
-Split out of ``moe.py``: the sign-based bias update
+One node of the ``moe`` package: the sign-based bias update
 (``register_moe_load_balancing_hook``) and the quantile-histogram update
 (``register_moe_quantile_balancing_hook``), plus their reduction helpers.
 Both are optimizer step pre-hooks over the MoE blocks ``iter_moe_layers``
-finds; the blocks themselves and the routers live in ``moe.py`` /
-``routers.py``.
+finds; the blocks themselves live in ``block.py`` and the routers in
+``router.py``.
 """
 
 from __future__ import annotations
@@ -18,11 +18,11 @@ import torch.nn as nn
 
 from llmtuner.accelerator.dist import all_reduce
 
-from .moe import MoE, iter_moe_layers
-from .routers import QuantileBalancedTopKRouter
+from .block import MoE, iter_moe_layers
+from .router import QuantileBalancedTopKRouter
 
 if TYPE_CHECKING:
-    from ...parallel.parallel_dims import ParallelDims
+    from ....parallel.parallel_dims import ParallelDims
 
 
 def update_expert_bias(
