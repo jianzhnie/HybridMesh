@@ -217,7 +217,7 @@ class DistGEMMFeedForward(FeedForward):
             tp_group.group_name,
         )
         out_TD = LinearReduceScatter.apply(
-            self.activation_fn(*self._split_gate_up(gate_up_TF)),
+            self.activation_fn(*self.split_gate_up(gate_up_TF)),
             self.w2.weight,
             self.w2.bias,
             tp_group,

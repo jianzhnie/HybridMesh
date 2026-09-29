@@ -536,8 +536,8 @@ llmtuner 侧是 `datasets/multimodal/image.py`），本表的 llmtuner 列是唯
   `llmtuner/README.md` 的登记行。
 - 2026-09-27 五次增量（lm_head 缺口第一步 + config 走查）：
   1. **vocab-parallel loss 四处接线**（D 类 `lm_head` 缺口的第一步，纯 no-op）：
-     `Trainer._loss_vocab_kwargs()`（TP mesh + 模型自身 HF config 的 `vocab_size`，
-     新增 `HFTransformerModel.vocab_size` 属性）驱动 `Trainer._loss_sum`、
+     `Trainer.loss_vocab_kwargs()`（原 `_loss_vocab_kwargs`；TP mesh + 模型自身 HF config 的 `vocab_size`，
+     新增 `HFTransformerModel.vocab_size` 属性）驱动 `Trainer.loss_sum`（原 `_loss_sum`）、
      `chunked_lm_head_cross_entropy`、PP 的 `scalar_loss_fn`（2026-09-29 去私有化，原名 `_scalar_loss_fn`）与 Validator 路径；
      选择仍按形状（`components/loss.py`），所以 lm_head 复制的今天每条路径都走
      普通 CE，逐位不变。测试：`test_chunked_loss.py` 增 1 例（分片参数下值与三份
@@ -743,7 +743,7 @@ llmtuner 侧是 `datasets/multimodal/image.py`），本表的 llmtuner 列是唯
   `real_pp_fake_spmd`）→ 唯一的真缺口，已挂 D 表（本机 torch 2.2.2 无 `backend="fake"`，
   不可验证）。`batch_invariant`/`bf16x9` 属四次增量已删特性面，不重复。
   (c) **补移植（唯一代码改动）**：上游 `set_determinism` 中两件可移植件落到
-  `Trainer._seed_everything` —— `PYTHONHASHSEED = str(seed % 2**32)`（本进程读不到，但
+  `Trainer.seed_everything`（原 `_seed_everything`，2026-09-29 去私有化）—— `PYTHONHASHSEED = str(seed % 2**32)`（本进程读不到，但
   之后 spawn 的 dataloader worker 会读，故必须在此设置，与上游同拼写）与
   `detect_anomaly`（`TrainingConfig.detect_anomaly`，默认 `False` 逐位不变；
   `torch.autograd.set_detect_anomaly(True, check_nan=False)` + 上游同文告警，
@@ -1152,16 +1152,22 @@ llmtuner 侧是 `datasets/multimodal/image.py`），本表的 llmtuner 列是唯
   （`trainer/builder.py`、`trainer/pp_steps.py` 与两个 PP 集成测试都在调它）。
   另把 `models/common/scatter_add.py` 中 `@register_fake` 的匿名 `def _` 命名为
   `deterministic_scatter_add_fake`（PyTorch 的注册钩子不需要匿名名，堆栈里也能读）。
-  (c) **保留面及其理由（写进 symbol guide 第五条横切约定）**：模块级 `_` = 本模块实现细节；
-  跨模块使用的必须公开；三类例外保留——协议要求的方法名、上游同名的私有 helper（34 个）、
-  基类给子类/同包协作者的 protected 方法。类内 `self._x` 属于封装，不在本条范围。
-  顺带记录方法层的同类审计：115 个私有方法里有 11 个被"别的模块"调用，逐个看过都属
-  受保护成员（`checkpointer/base.py` 的 `_should_save`/`_purge_stale_checkpoints`/
-  `_create_checkpoint_id` 被子类覆盖或调用；`Trainer` 被拆成 trainer/builder/validate/pp_steps
-  后同包互调的 `_loss_sum`/`_param_context`/`_seed_everything` 等；`feed_forward.py::_split_gate_up`
-  被 `async_linear.DistGEMMFeedForward` 这个子类调用；`optimizer.py::_post_init`/`_validate_params`
-  被 `ema.py` 的子类调用），故保留。
-  (d) 验证：审计脚本复查「跨模块使用的模块级私有符号」= 0（仅剩两处误报：capabilities 条目里
+  (c) **方法层同轮一并处理**：109 个私有方法里 13 个被"别的模块"调用（脚本按
+  `obj._name` 调用与跨模块 `def _name` 覆盖两种情形统计）。其中 5 个与上游同名
+  （`checkpointer/base.py` 的 `_should_save`/`_purge_stale_checkpoints`/`_create_checkpoint_id`
+  是 base 与 backend 之间的 template-method 契约，`optimizer.py` 的 `_post_init`/`_validate_params`
+  被 `ema.py` 的子类复用），按"上游拼写优先"保留；另 **6 个 llmtuner 自有的去私有化**：
+  `Trainer._seed_everything`→`seed_everything`、`._example_model`→`example_model`、
+  `._loss_vocab_kwargs`→`loss_vocab_kwargs`、`._loss_sum`→`loss_sum`、
+  `._param_context`→`param_context`（trainer 拆成 trainer/builder/validate/pp_steps/batch 后
+  同包互调，单测也直接调它们）、`FeedForward._split_gate_up`→`split_gate_up`
+  （`async_linear.DistGEMMFeedForward` 子类与单测调用）。集成测试里各自定义的*本地参考实现*
+  `_loss_sum` 保持原名（它们是测试内的私有模型，不是被审对象；脚本首轮误改已回退）。
+  (d) **保留面及其理由（写进 symbol guide 第五条横切约定）**：模块级 `_` = 本模块实现细节，
+  跨模块使用的必须公开；三类例外保留——协议要求的方法名、上游同名的私有 helper（模块级 34 个、
+  方法级 5 个）、基类给子类/同包协作者的 protected 方法。类内 `self._x` 属性属于封装，不在本条
+  范围。审计后跨模块却仍带 `_` 的只剩上游同名的那批（脚本复查：模块级仅 2 处字符串/同名误报）。
+  (e) 验证：审计脚本复查「跨模块使用的模块级私有符号」= 0（仅剩两处误报：capabilities 条目里
   对 `_disable_dynamo_lru_cache` 的字符串引用、另一个同名 `_resolve`）；`ruff check`（F821
   覆盖改名后的引用）与 `tests/unit_tests` 全量通过（248 passed / 56 skipped / 9 failed，失败集
   不变）。

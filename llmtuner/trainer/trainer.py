@@ -234,7 +234,7 @@ class Trainer:
     # -- setup helpers ---------------------------------------------------------
 
     @staticmethod
-    def _seed_everything(
+    def seed_everything(
         seed: int, *, deterministic: bool, detect_anomaly: bool = False
     ) -> None:
         torch.manual_seed(seed)
@@ -309,7 +309,7 @@ class Trainer:
     # -- the step, one function per level --------------------------------------
 
     @property
-    def _example_model(self):
+    def example_model(self):
         """The model a batch is normalized against, present on every PP stage.
 
         Unlike ``self.model`` (``None`` under PP, where this rank holds several
@@ -397,7 +397,7 @@ class Trainer:
         # the region whose components read the ambient mesh -- the optimizer and
         # the checkpointers take their groups as arguments. On a single process
         # it is a no-op, so the same code runs from one device to a full mesh.
-        with self._param_context(), spmd_context(self.parallel_dims):
+        with self.param_context(), spmd_context(self.parallel_dims):
             if self._chunked_loss_num_chunks > 1:
                 # Chunked loss: the forward skips lm_head and returns hidden
                 # states; lm_head + cross-entropy then run per sequence chunk,
@@ -413,10 +413,10 @@ class Trainer:
                     labels,
                     num_chunks=self._chunked_loss_num_chunks,
                     grad_scale=1.0 / global_valid_tokens,
-                    **self._loss_vocab_kwargs(),
+                    **self.loss_vocab_kwargs(),
                 )
             logits = self.model(inputs, **extra_kwargs)
-            loss_sum = self._loss_sum(logits, labels, **self._loss_vocab_kwargs())
+            loss_sum = self.loss_sum(logits, labels, **self.loss_vocab_kwargs())
             del logits
             # Normalize BEFORE backward, while the sum is still differentiable.
             # Dividing after backwarding the raw sum would work for a single
@@ -430,7 +430,7 @@ class Trainer:
             (loss_sum / global_valid_tokens).backward()
         return loss_sum.detach()
 
-    def _loss_vocab_kwargs(self) -> dict[str, Any]:
+    def loss_vocab_kwargs(self) -> dict[str, Any]:
         """The vocab-parallel arguments for the loss seam, when TP is on.
 
         Both are handed to :func:`cross_entropy_loss`, which selects the
@@ -465,7 +465,7 @@ class Trainer:
         return {"tp_group": tp_mesh.get_group(), "global_vocab_size": vocab_size}
 
     @staticmethod
-    def _loss_sum(
+    def loss_sum(
         logits: torch.Tensor,
         labels: torch.Tensor,
         *,
@@ -567,7 +567,7 @@ class Trainer:
                 else:
                     all_reduce(grad, group=group)
 
-    def _param_context(self):
+    def param_context(self):
         """The context a forward/backward runs inside.
 
         Currently empty (``nullcontext``), and kept as a named, mockable seam

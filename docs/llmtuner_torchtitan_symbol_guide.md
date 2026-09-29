@@ -150,7 +150,7 @@ step 1 恢复 optimizer、scheduler、dataloader 和 train state 后完成并保
 | `collectives.set_pg_timeouts` | 上游 trainer/comm timeout | llmtuner 独立实现，**通过（适配）** |
 | 归约调用（train_step 的 loss/token 归约） | 上游 scattered reductions | 2026-09-24 起收敛为 `accelerator.dist.all_reduce` 在调用点直接使用（clone + in-place collective），原 `dist_sum`/`dist_max`/`dist_sum_tensor` 薄封装已删除；`reduce_equivalence.py` 验证 all_reduce 语义与 clone 调用惯例（trainer 的内联 clone 由 review 保证），**通过** |
 | `clip_grad_norm_` | 上游 distributed grad clipping | llmtuner 额外按本地 expert/dense 参数分组并跨 EP 归约，支持 DP/TP/PP/EP，**通过（适配）**。2026-09-28 十次增量复核：dense-only 路径与上游逐行同构（含 DTensor 先 `full_tensor()` 再跨 PP 归约的 `p` 次幂技巧），EP 分支免去上游「每个参数都必须是带 `"ep"` 轴的 DTensor」断言；上游的 `dist_sum`/`dist_max`/`dist_mean` 薄封装**不重建**——llmtuner 对应物是 `accelerator/dist.all_reduce` 在调用点（trainer/validator）使用，`components/metrics.py` 不做任何 `torch.distributed` 调用 |
-| 种子与确定性（`Trainer._seed_everything`、`trainer/seed.py`） | `distributed/utils.py::set_determinism` | 2026-09-24 起先移植四项确定性开关（`use_deterministic_algorithms`、`cudnn.deterministic/benchmark`、`fill_uninitialized_memory=False`、`CUBLAS_WORKSPACE_CONFIG`）；2026-09-28 十次增量补齐剩余可移植件：`PYTHONHASHSEED = str(seed % 2**32)`（为之后 spawn 的 dataloader worker）与 `TrainingConfig.detect_anomaly`（`set_detect_anomaly(True, check_nan=False)` + 上游同文告警，`check_nan=False` 因 NaN/Inf 检查走 `aten._is_any_true` 无 DTensor 策略）；PP 的 distinct-seed 派生（`trainer/seed.py`）对应上游同函数公式。不移植两件：DTensor mesh-aware RNG tracker（上游用于分片参数初始化，llmtuner 走 HF 自身初始化）与 `warn_only` 开关（llmtuner 固定 `False`，更严）。**通过（适配）** |
+| 种子与确定性（`Trainer.seed_everything`（原 `_seed_everything`）、`trainer/seed.py`） | `distributed/utils.py::set_determinism` | 2026-09-24 起先移植四项确定性开关（`use_deterministic_algorithms`、`cudnn.deterministic/benchmark`、`fill_uninitialized_memory=False`、`CUBLAS_WORKSPACE_CONFIG`）；2026-09-28 十次增量补齐剩余可移植件：`PYTHONHASHSEED = str(seed % 2**32)`（为之后 spawn 的 dataloader worker）与 `TrainingConfig.detect_anomaly`（`set_detect_anomaly(True, check_nan=False)` + 上游同文告警，`check_nan=False` 因 NaN/Inf 检查走 `aten._is_any_true` 无 DTensor 策略）；PP 的 distinct-seed 派生（`trainer/seed.py`）对应上游同函数公式。不移植两件：DTensor mesh-aware RNG tracker（上游用于分片参数初始化，llmtuner 走 HF 自身初始化）与 `warn_only` 开关（llmtuner 固定 `False`，更严）。**通过（适配）** |
 
 ### 5.2 TP
 
@@ -488,11 +488,16 @@ helper 在前文涉及关键算法时单列。成组条目（`config/`、`traine
   私有 helper（它们是映射表的锚点，见 §10 —— 34 个）；③ 基类给子类/同包协作者用的
   protected 方法（`checkpointer/base.py` 的 `_should_save` 等）。类内 `self._attr`
   之类的实例状态不受本条约束（那是封装，不是命名问题）。
-  2026-09-29 按此审计过一遍 `llmtuner/` 的模块级函数与类：95 个前导 `_` 符号里，
-  6 个真正被跨模块使用（`packing/{conversions,iterators}` 的 5 个 + `pipeline_parallel/
-  apply.py::scalar_loss_fn`）已去私有化，`models/common/scatter_add.py` 里 `register_fake`
-  的匿名 `def _` 命名为 `deterministic_scatter_add_fake`；其余按"上游同名 34 个 / 仅本模块
-  使用"保留，审计后**已无跨模块使用的私有模块级符号**（脚本复查只剩两处字符串/同名误报）。
+  2026-09-29（二十次增量）按此审计过一遍 `llmtuner/`：模块级 95 个前导 `_` 符号（其中 34
+  个上游同名）、109 个私有方法。**模块级**：6 个真正被跨模块使用的已去私有化
+  （`packing/{conversions,iterators}` 的 5 个 + `pipeline_parallel/apply.py::scalar_loss_fn`），
+  `models/common/scatter_add.py` 里 `register_fake` 的匿名 `def _` 命名为
+  `deterministic_scatter_add_fake`。**方法级**：13 个被"其它模块"调用的私有方法里，5 个与上游
+  同名（`checkpointer/base.py` 的 `_should_save`/`_purge_stale_checkpoints`/`_create_checkpoint_id`、
+  `optimizer.py` 的 `_post_init`/`_validate_params`）保留原拼写，另外 6 个 llmtuner 自有的去私有化
+  （`Trainer.seed_everything`/`example_model`/`loss_vocab_kwargs`/`loss_sum`/`param_context`、
+  `FeedForward.split_gate_up`）。审计后**跨模块使用却仍带 `_` 的符号只剩上游同名的那批**
+  （脚本复查：模块级 2 处字符串/同名误报、方法级 5 个上游同名）。
 
 ## 11. 上游同步检查清单
 

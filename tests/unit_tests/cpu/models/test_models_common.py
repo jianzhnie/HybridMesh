@@ -86,7 +86,7 @@ def test_interleaved_layout_pairs_each_gate_with_its_own_up() -> None:
     ffn = FeedForward(w13=w13, w2=nn.Linear(hidden, dim, bias=False))
 
     gate_up = ffn.w13(torch.ones(1, dim))
-    gate, up = ffn._split_gate_up(gate_up)
+    gate, up = ffn.split_gate_up(gate_up)
     assert torch.equal(gate, gate_up[..., 0::2])
     assert torch.equal(up, gate_up[..., 1::2])
 

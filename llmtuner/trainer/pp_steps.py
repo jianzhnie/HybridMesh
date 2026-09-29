@@ -104,7 +104,7 @@ def pp_forward_backward_body(
             target_mbs.append(labels)
 
     losses: list[torch.Tensor] | None = [] if self.pp_has_last_stage else None
-    with self._param_context(), spmd_context(self.parallel_dims):
+    with self.param_context(), spmd_context(self.parallel_dims):
         # ``_step_microbatches`` is the pre-split driver behind torch's public
         # ``step``, and it is used directly when present: the wrapper re-splits
         # the arguments it is handed, which is wrong for lists llmtuner already

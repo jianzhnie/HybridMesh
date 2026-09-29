@@ -5,7 +5,7 @@ These are module-level functions whose first parameter is deliberately named
 keeps same-named thin delegates (``should_validate`` / ``validate`` /
 ``validate_body`` / ``check_validation_feasibility``) so its public surface,
 error types and message texts are unchanged. Everything the bodies touch --
-``dp_rank_world_size``, ``_loss_sum``, ``metrics``, ... -- stays on the
+``dp_rank_world_size``, ``loss_sum``, ``metrics``, ... -- stays on the
 trainer; this module owns only the pass itself.
 """
 
@@ -174,15 +174,15 @@ def validate_body(self, validation: ValidationConfig, step: int) -> None:
                 # plain int among tensors would be splatted into the model
                 # forward as a kwarg.
                 batch.pop("num_valid_tokens", None)
-            inputs, labels, extra_kwargs = self._example_model.preprocess_inputs(
+            inputs, labels, extra_kwargs = self.example_model.preprocess_inputs(
                 self.to_device(batch),
                 parallel_dims=self.parallel_dims,
                 parallelism=self.cfg.parallel,
                 max_context_length=self.cfg.max_seq_len,
             )
-            with self._param_context(), spmd_context(self.parallel_dims):
-                logits = self._example_model(inputs, **extra_kwargs)
-                loss_sum = self._loss_sum(logits, labels, **self._loss_vocab_kwargs())
+            with self.param_context(), spmd_context(self.parallel_dims):
+                logits = self.example_model(inputs, **extra_kwargs)
+                loss_sum = self.loss_sum(logits, labels, **self.loss_vocab_kwargs())
             if accumulated_loss is None:
                 accumulated_loss = loss_sum.clone()
             else:

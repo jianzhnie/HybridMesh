@@ -470,8 +470,8 @@ def test_wrapper_forward_returns_logits_the_trainer_can_score() -> None:
     yields one logit row per input token, and the trainer's next-token
     cross-entropy over those rows is a finite scalar.
 
-    The labels handed to ``_loss_sum`` are already next-token aligned, which is
-    what ``preprocess_inputs`` produces for both loaders; ``_loss_sum`` does no
+    The labels handed to ``loss_sum`` are already next-token aligned, which is
+    what ``preprocess_inputs`` produces for both loaders; ``loss_sum`` does no
     shifting of its own. A sequence whose every position is predictable
     therefore contributes one prediction per token.
     """
@@ -488,7 +488,7 @@ def test_wrapper_forward_returns_logits_the_trainer_can_score() -> None:
         logits = model(ids)
 
     assert logits.shape == (ids.shape[0], cfg.vocab_size)
-    loss_sum = Trainer._loss_sum(logits, ids)
+    loss_sum = Trainer.loss_sum(logits, ids)
     assert loss_sum.ndim == 0
     assert float(loss_sum) > 0
 
@@ -499,7 +499,7 @@ def test_wrapper_forward_returns_logits_the_trainer_can_score() -> None:
     row_aware = next_token_targets(ids, seq_len=cfg.max_seq_len)
     counted = int((row_aware != IGNORE_INDEX).sum())
     assert counted == ids.shape[0] - cfg.global_batch_size
-    row_loss = Trainer._loss_sum(logits, row_aware)
+    row_loss = Trainer.loss_sum(logits, row_aware)
     assert row_loss.ndim == 0
     # Row-final positions predict nothing, so they contribute nothing.
     assert float(row_loss) < float(loss_sum)

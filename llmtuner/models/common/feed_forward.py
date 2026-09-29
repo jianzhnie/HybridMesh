@@ -94,9 +94,9 @@ class FeedForward(nn.Module):
             ).flatten(0, 1)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        return self.w2(self.activation_fn(*self._split_gate_up(self.w13(x))))
+        return self.w2(self.activation_fn(*self.split_gate_up(self.w13(x))))
 
-    def _split_gate_up(
+    def split_gate_up(
         self, gate_up_TF: torch.Tensor
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """Split the interleaved gate/up halves along the feature dim.

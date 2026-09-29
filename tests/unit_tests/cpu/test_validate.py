@@ -111,7 +111,7 @@ def _make_trainer(
 
 def _expected_loss(batches: list[dict[str, Any]]) -> float:
     loss_sum = sum(
-        float(_trainer_cls()._loss_sum(_EchoModel()(b["input_ids"]), b["labels"]))
+        float(_trainer_cls().loss_sum(_EchoModel()(b["input_ids"]), b["labels"]))
         for b in batches
     )
     valid = sum(b["num_valid_tokens"] for b in batches)

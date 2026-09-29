@@ -260,7 +260,7 @@ def preprocess(
         tensors are moved to the device here -- at consumption, not at read --
         so an accumulation window's unread groups stay on the host.
         """
-    return self._example_model.preprocess_inputs(
+    return self.example_model.preprocess_inputs(
         self.to_device(microbatch["batch"]),
         parallel_dims=self.parallel_dims,
         parallelism=self.cfg.parallel,

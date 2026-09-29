@@ -102,7 +102,7 @@ def test_pp_forward_backward_releases_consumed_loss_graphs() -> None:
             pp_has_last_stage=True,
             pp_schedule=SimpleNamespace(step=schedule_step),
             parallel_dims=None,
-            _param_context=nullcontext,
+            param_context=nullcontext,
             pp_microbatches=lambda batch: [batch, batch],
             preprocess=lambda microbatch: (
                 torch.ones(1),
@@ -139,7 +139,7 @@ def test_seeding_exports_the_hash_seed_for_spawned_workers(monkeypatch) -> None:
     spelling.
     """
     monkeypatch.setenv("PYTHONHASHSEED", "0")
-    Trainer._seed_everything(7, deterministic=False)
+    Trainer.seed_everything(7, deterministic=False)
     assert os.environ["PYTHONHASHSEED"] == str(7 % 2**32)
 
 
@@ -156,9 +156,9 @@ def test_detect_anomaly_watches_nans_but_skips_the_dtensor_hostile_check(
         lambda mode, check_nan=True: calls.append((mode, check_nan)),
     )
 
-    Trainer._seed_everything(1, deterministic=False)
+    Trainer.seed_everything(1, deterministic=False)
     assert calls == []
-    Trainer._seed_everything(1, deterministic=False, detect_anomaly=True)
+    Trainer.seed_everything(1, deterministic=False, detect_anomaly=True)
     assert calls == [(True, False)]
 
 
@@ -891,7 +891,7 @@ def test_count_valid_tokens_reports_the_row_final_mask_the_loss_skips() -> None:
     """The two halves of "the count is not the loss's business".
 
     A synthetic batch loses one prediction per row to the shift, so the count
-    the trainer reports and the labels ``_loss_sum`` scores disagree by exactly
+    the trainer reports and the labels ``loss_sum`` scores disagree by exactly
     that many positions -- and the count is the smaller, correct one.
     """
     batch = _random_batch(batch_size=3, seq_len=4)
@@ -980,16 +980,16 @@ def test_loss_vocab_kwargs_need_a_tp_axis_and_a_named_vocabulary() -> None:
     trainer.model = SimpleNamespace(vocab_size=9)
 
     trainer.parallel_dims = None
-    assert trainer._loss_vocab_kwargs() == {}
+    assert trainer.loss_vocab_kwargs() == {}
 
     trainer.parallel_dims = SimpleNamespace(
         get_optional_mesh=lambda name: SimpleNamespace(get_group=lambda: object())
     )
     trainer.model = nn.Linear(2, 2)  # a double that names no vocabulary
-    assert trainer._loss_vocab_kwargs() == {}
+    assert trainer.loss_vocab_kwargs() == {}
 
     trainer.model = None
-    assert trainer._loss_vocab_kwargs() == {}
+    assert trainer.loss_vocab_kwargs() == {}
 
 
 def test_loss_vocab_kwargs_carry_the_models_own_vocabulary() -> None:
@@ -1006,7 +1006,7 @@ def test_loss_vocab_kwargs_carry_the_models_own_vocabulary() -> None:
     )
     trainer.model = SimpleNamespace(vocab_size=151936)
 
-    assert trainer._loss_vocab_kwargs() == {
+    assert trainer.loss_vocab_kwargs() == {
         "tp_group": group,
         "global_vocab_size": 151936,
     }
@@ -1015,7 +1015,7 @@ def test_loss_vocab_kwargs_carry_the_models_own_vocabulary() -> None:
 def test_loss_sum_scores_every_label_ignored_ones_included() -> None:
     """The shift, not the loss, is what removes positions from the denominator.
 
-    ``_loss_sum`` returns the raw summed CE; the count that normalizes it is
+    ``loss_sum`` returns the raw summed CE; the count that normalizes it is
     taken upstream, from the *unsharded* batch, because context parallelism
     slices ``labels`` after the fact and a recount here would undercount by
     ``cp``. So the loss itself only skips the ignored rows.
@@ -1023,7 +1023,7 @@ def test_loss_sum_scores_every_label_ignored_ones_included() -> None:
     logits = torch.randn(6, 8)
     labels = torch.tensor([1, 2, IGNORE_INDEX, 4, IGNORE_INDEX, IGNORE_INDEX])
 
-    loss_sum = Trainer._loss_sum(logits, labels)
+    loss_sum = Trainer.loss_sum(logits, labels)
 
     expected = F.cross_entropy(logits.float(), labels, reduction="sum")
     torch.testing.assert_close(loss_sum, expected, rtol=1e-5, atol=1e-8)
@@ -1033,7 +1033,7 @@ def test_loss_sum_makes_one_prediction_per_predictable_label() -> None:
     """``logits[t]`` scores ``labels[t]``: the two are already aligned."""
     logits = torch.randn(4, 8)
     labels = torch.tensor([1, 2, 3, 4])
-    loss_sum = Trainer._loss_sum(logits, labels)
+    loss_sum = Trainer.loss_sum(logits, labels)
 
     expected = F.cross_entropy(logits.float(), labels, reduction="sum")
     torch.testing.assert_close(loss_sum, expected, rtol=1e-5, atol=1e-8)

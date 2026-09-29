@@ -140,10 +140,10 @@ llmtuner 全部内联在一个函数里（`llmtuner/trainer/trainer.py:528-830`�
 | spmd 上下文 | `llmtuner/trainer/trainer.py:386` `spmd_context(self.parallel_dims)` | `torchtitan/training_engine.py:601` 段的 `get_spmd_context(..., spmd_typechecking=)` | 有意裁剪（见 D11） |
 | 类型检查抑制 | 无 | `torchtitan/training_engine.py:601` 段 `spmd.no_typecheck()` | 有意裁剪（`llmtuner/models/common/rope.py:8` 已记录） |
 | 非 PP body | `llmtuner/trainer/trainer.py:372-416` | `torchtitan/training_engine.py:601` | 等价但落点不同（见 D1） |
-| loss 计算 | `llmtuner/trainer/trainer.py:419-446` `_loss_sum` | `torchtitan/components/loss.py:321-322` | 等价但落点不同 |
+| loss 计算 | `llmtuner/trainer/trainer.py:419-446` `loss_sum`（原 `_loss_sum`，2026-09-29 二十次增量去私有化） | `torchtitan/components/loss.py:321-322` | 等价但落点不同 |
 | chunked loss | `llmtuner/trainer/trainer.py:387-402` | `torchtitan/training_engine.py:252` 段的 `ChunkedLossWrapper` | 等价但落点不同 |
 | PP body | `llmtuner/trainer/pp_steps.py:62` | `torchtitan/training_engine.py:624` | 对齐 |
-| `_param_context` | `llmtuner/trainer/trainer.py:510` | 上游无对应（AC 在并行层） | 等价 + 注释已更正（见 D3） |
+| `param_context`（原 `_param_context`，2026-09-29 去私有化） | `llmtuner/trainer/trainer.py:510` | 上游无对应（AC 在并行层） | 等价 + 注释已更正（见 D3） |
 
 ## 7. PP 微批的切分点
 
@@ -201,7 +201,7 @@ llmtuner 全部内联在一个函数里（`llmtuner/trainer/trainer.py:528-830`�
 |---|---|---|---|---|
 | D1 | loss 归一化落点 | 上游在 loss_fn 内除（`torchtitan/components/loss.py:321-322`）并返回归一化值，`accumulated_loss` 直接求和上报；llmtuner 图内除、返回未归一化 sum（`llmtuner/trainer/trainer.py:416`），`:767` 报告时再除。逐项推导：上游 `accumulated = Σ局部sum/G`、`global_avg = Σ accumulated`；llmtuner `loss = Σsum/G`、`global_avg = Σ loss` —— 同一个数；`local_avg` 两边都等于 `Σsum/局部tokens` | 等价 | `forward_backward_step` docstring 明确声明返回值未归一化（已改） |
 | D2 | 被取消步的计数 | 上游 `num_completed_steps` 只在 `optimizer_step`（`torchtitan/training_engine.py:654`）末尾自增，数据耗尽时不计；llmtuner 原在循环顶 `+1` | 真实差异 | 弃步分支回补（`llmtuner/trainer/trainer.py:975`），使 `state_dict` 不会跳过未更新的步 |
-| D3 | `_param_context` | AC 在 llmtuner 并行层（`llmtuner/parallel/parallelize.py:169` 的 `apply_ac` 阶段），与上游把 `ac_config` 交给 `model.parallelize` 同构；`_param_context` 上游无对应，当前是 `nullcontext`，被三个 body 共用且测试可替换 | 等价 | 更正 docstring：它**不是** AC 的位置（已改） |
+| D3 | `param_context` | AC 在 llmtuner 并行层（`llmtuner/parallel/parallelize.py:169` 的 `apply_ac` 阶段），与上游把 `ac_config` 交给 `model.parallelize` 同构；`param_context` 上游无对应，当前是 `nullcontext`，被三个 body 共用且测试可替换 | 等价 | 更正 docstring：它**不是** AC 的位置（已改） |
 | D7 | `ntokens_seen` 口径 | llmtuner `labels.numel() // (cp*tp)`（`llmtuner/trainer/batch.py:224`）并在 `loss` mesh（含 tp，`llmtuner/parallel/parallel_dims.py:220`）上求和；上游 `num_tokens_per_microbatch_per_dp_rank // cp` 并在 `dp×cp` 的 loss mesh 上求和（`torchtitan/distributed/parallel_dims.py:260`、`:317`）。两者都重建全局 token 数 | 等价 | 无（口径差异源于 D14 的 TP 设计） |
 | D9 | 结构化日志 | 上游 `sl.log_trace_*`/`sl.set_step` 遍布 trainer/engine；llmtuner 只有 `utils/logger_utils` | 有意裁剪 | 无（可观测性面） |
 | D10 | SDC replay / CUDA graphs | 上游 `torchtitan/training_engine.py:390` `_initialize_forward_backward` + `:736` `close` 的 graph teardown；llmtuner 无图路径 | 有意裁剪 | 无（`zero_grad` 的 `set_to_none=True` 因此恒等价） |

@@ -72,7 +72,7 @@ def scalar_loss_fn(
 ) -> torch.Tensor:
     """Summed next-token CE over one microbatch, as a bare scalar.
 
-    Same arithmetic as ``Trainer._loss_sum``: ``labels`` arrives already
+    Same arithmetic as ``Trainer.loss_sum``: ``labels`` arrives already
     aligned (``pred[t]`` predicts ``labels[t]``, ``IGNORE_INDEX`` at document
     boundaries), so no shift happens here. Schedules call
     ``loss_fn(output, target)`` and backward the result directly, so the
@@ -125,7 +125,7 @@ def make_schedule_loss_fn(
     Returning the closure rather than a lambda also makes this testable without
     a live pipeline, which a lambda defined inline could not be.
 
-    ``vocab_kwargs`` is this path's copy of ``Trainer._loss_vocab_kwargs``:
+    ``vocab_kwargs`` is this path's copy of ``Trainer.loss_vocab_kwargs``:
     ``tp_group`` and ``global_vocab_size`` are constant for the whole run, so
     they are captured here at build time (where the pre-split model still
     exists and knows its vocabulary) rather than read off the schedule on every

@@ -100,7 +100,7 @@ def build_trainer_state(self, cfg) -> None:
         seed = derive_distinct_seed(
             seed, [(pp_mesh.get_local_rank(), pp_mesh.size())]
         )
-    self._seed_everything(
+    self.seed_everything(
         seed, deterministic=cfg.deterministic, detect_anomaly=cfg.detect_anomaly
     )
 
