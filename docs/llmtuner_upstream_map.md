@@ -172,6 +172,7 @@ A2 分类（见上表），mesh 构建这一段记在该行的"改写点"里，�
 | `components/optimizer/ema.py`（2026-09 新增，515 行） | **已移植**（2026-09-24，`llmtuner/components/optimizer/ema.py`）：在线 EMA 模型平均，config/trainer/checkpointer 三侧接线完成，见下"已从 D 移除" |
 | `components/optimizer/optimizer.py` 的 `implementation="fused_opt_states_bf16"`（+ `_register_bf16_optimizer_state_hook`） | **登记缺口**（2026-09-28，components 批次 optimizer 走查）：上游第四种实现模式用 Adam 的 step pre-hook 预建 bf16 `exp_avg`/`exp_avg_sq`（fused CUDA 核据此走 fp32 参数+bf16 状态的混合精度路径，省一半优化器状态显存），再用 `register_load_state_dict_post_hook` 在 DCP 载入后把被 torch 转回参数 dtype 的状态重新降为 bf16。llmtuner 的 `implementation` 只声明 `fused`/`foreach`/`for-loop`（配置期即 Literal 拒绝，装配期 `_build_impl_kwargs` 再兜一道 `ValueError`）。不移植的理由是**不可验证**：它的全部价值来自那个 CUDA fused 核，本机无 CUDA 也无从复现上游的显存收益；同时它改写 checkpoint 里 Adam 状态的 dtype，属续训兼容敏感面，盲写风险高于收益。解锁条件：CUDA 目标设备 + 确有优化器状态显存诉求；届时实现要点即上面两条 hook（上游 `components/optimizer/optimizer.py:339` 起） |
 | `components/optimizer/optimizer.py` 的 `optimizer_factory_kwargs_by_name` | **登记缺口（无消费者）**（2026-09-28，同上）：上游用它把「实例级对象」——per-parameter compute metadata、通信 bucket 规格——按 optimizer 名传进工厂，而它现在的两个消费者（`DistMuon`、Float8 系优化器）都在 llmtuner 裁剪面内（前者属已在 C 类登记为范围外的 `distributed/flex_shard/`）。按本仓"有调用者再补"的口径不预置字段；补 `DistMuon` 时一并加 |
+| `components/optimizer/optimizer.py` 的 `init_cache_state_dict` | **故意删除，不是缺口**（2026-09-29，二十二次增量）：上游该方法在基类是 `pass` no-op，服务 TorchFT 容器（其子类覆写）与 TorchFT 训练循环的无条件调用；llmtuner 无 TorchFT（D 表已登记裁剪），移植物里那份 no-op **全仓零调用者**，属无效抽象，已删。若将来接入 TorchFT，补回一个 `pass` 方法即可 |
 
 | Ulysses CP × varlen/packed（baff3c681） | **已移植**（2026-09-25，批 5）：`apply_cp` 不再 fail-fast，wrapper 全长透传文档 mask、kernel 按 mask Q 长度分派，见下"已从 D 移除" |
 | 多轮对话 SFT 的 renderer 路径（4a0d8dab3） | **已适配为可选路径**（2026-09-25，§9.1 第 12 项）：不引入硬依赖、不复制 Configurable 外形。`datasets/text/renderer.py` 为可选导入适配层（`build_chat_renderer` + `RendererTokenizerWrapper`），`ChatProcessor(renderer=...)` 走多-turn renderer 分支，`--chat_renderer`/`--messages_field` 接线 `local_jsonl_sft`；未装 `renderers` 时启用 loud-raise（ImportError 带安装指引），默认关闭逐位不变。真实库数值**未验证**（本机无 renderers，单测以 fake 模块覆盖接口与 mask 移位语义）；解锁条件：pyproject 加 optional extra `renderers==0.1.11` 后装包复跑 |
@@ -1191,12 +1192,13 @@ llmtuner 侧是 `datasets/multimodal/image.py`），本表的 llmtuner 列是唯
   `llmtuner/__init__.py` 的 `Trainer` 特例也改用同一张表。验证：五个索引逐一解析成功
   （`accelerator.get_dist_info`/`parallel.apply_tp`/`models.common.SwiGLU`/`checkpointer.canonical_fqn`），
   每个索引对未知名字仍抛 `AttributeError`（不静默返回 `None`）。
-  (c) **删死代码 7 个**（`accelerator/device.py` 里无任何消费者的 mmengine 面）：
+  (c) **删死代码（登记 7 个，实际落地 5 个——见二十四次增量 (c) 的更正）**
+  （`accelerator/device.py` 里无任何消费者的 mmengine 面）：
   `is_cuda_available`、`is_mlu_available`、`is_musa_available`、`is_mps_available`、
   `is_dipu_available`、`get_max_cuda_memory`、`get_max_musa_memory`（连带不再需要的
   `importlib.util` 导入与那段"逐厂商谓词"注释），模块 docstring 改写为"哪些留下了、为什么，
   其余按本仓对 vendored-but-unused 代码的一贯做法删掉"。保留 `is_npu_available`（`dist.py`
-  在用）与 `is_npu_support_full_precision`。
+  在用）与 `is_npu_support_full_precision`（后者在二十四次增量中按"有调用者再补"删除）。
   (d) **两个 checkpoint 后端的 `__init__` 去重 20 行 ×2**：`dcp.CheckpointManager` 与
   `TorchCheckpointingManager` 逐字重复的"策略装配"（`self.states` 三键排序 + `load_only`/
   `exclude_from_loading`/`initial_load_*`/`last_save_*`/`export_dtype`/`keep_latest_k`/
@@ -1224,6 +1226,141 @@ llmtuner 侧是 `datasets/multimodal/image.py`），本表的 llmtuner 列是唯
   (h) 验证：`ruff check`、`git diff --check` 通过；`tests/unit_tests` = 248 passed / 56 skipped /
   9 failed（失败集不变）；重跑"零引用符号"扫描只剩 `deterministic_scatter_add_fake`
   ——那是 `@register_fake` 注册钩子，不是死代码。
+
+- 2026-09-29 二十二次增量（去冗余/去重复复查第二遍 + 删两处无效抽象；含一次**按用户要求回退**）：
+  (a) **复制粘贴的校验文案 → 两个有名字的校验器**。`max_num_documents must be positive`、
+  `num_packing_bins must be positive`、`dp_world_size must be positive` 三条文案此前各写在
+  2–3 处（dataclass 的 `__post_init__` 与同值的普通参数入口各一份），
+  `cannot resume after changing the effective data-parallel degree` 写 2 处。新增
+  `datasets/types.py::require_positive(name, value)` 与 `datasets/loader.py::require_same_dp_degree(...)`，
+  由 `DatasetBuildContext`/`DatasetIterationPolicy`/`GrainDataLoader`/`RandomTokenDataLoader`/
+  `packing/build.py`/`multimodal/datasets.py` 共用。验证：把新旧 `__post_init__` 与 dp 检查各自
+  AST 取出后跑行为网格（三个 int 字段 + `None` 的 64 组、dp degree 9 组），异常文案与
+  正常路径**零差异**。
+  (b) **HF 索引文件名单一来源**：`model.safetensors.index.json` 此前在
+  `dcp.py::_is_valid_checkpoint`（探测）与 `models/hf/state_dict_adapter.py`（写出/读取）
+  各拼一遍，新增 `checkpoint_keys.SAFETENSORS_INDEX` 承载（该模块本就是依赖自由的叶子，
+  `models/hf` 导入它不引入 checkpointer 后端面），两处改为引用。
+  (c) **两个 checkpoint 后端 12 个共享字段里再省 2 个**：`folder`（`filesystem.join(folder, config.folder)`）
+  与 `interval` 在 `dcp`/`torch_checkpointing` 里逐字重复赋值，提到
+  `BaseCheckpointManager.__init__`（`folder` 参数）。28 处构造路径上的 `self.属性`集合
+  仍与改动前一致（dcp 22、torch_checkpointing 24，`folder`/`interval` 改由基类贡献）；
+  checkpointer 单测在本机被 `dcp/dtensor` 门控跳过，故以该 AST 等价性为证。
+  同轮把 `components/checkpointer/__init__.py` 的 state-key 映射改为直接从
+  `checkpoint_keys` 解析（二十一次 (e) 的 `base.__all__ = list(checkpoint_keys.__all__)`
+  随之收尾：`base` 现在只 `__all__` 自己定义的四个名字，不再 import 它用不到的
+  `DATALOADER`/`TRAIN_STATE`；对外 `llmtuner.components.checkpointer.<KEY>` 不变）。
+  (d) **删两处无效抽象**（本轮的"避免无效的抽象"）：
+  ① `components/optimizer/optimizer.py::init_cache_state_dict` —— 只有 `pass` 的 no-op，
+  全仓（含测试）**零调用者**，docstring 自述的存在理由是"上游子类会覆写、上游训练循环会
+  无条件调用"，而 TorchFT 整个在 llmtuner 裁剪面内（D 表已登记）；已删除，并在 D 表登记
+  为有意删除项。② `models/common/rope.py::RoPE` —— 三个钩子（`_precompute_cache`/
+  `_reshape_cache`/`apply_rotary_emb`）体是 `raise NotImplementedError` 却未声明抽象，
+  基类看着可实例化、实际构造即崩。改为 `ABC` + `@abstractmethod`（与仓内其余 7 个基类
+  同一写法）：`RoPE` 实例化现在抛 `TypeError`，`ComplexRoPE`/`CosSinRoPE` 正常构造、
+  缓存形状不变。
+  (e) **回退：共享日志常量层删除**（用户判定为多余抽象）。二十二次曾把四条
+  "两个后端共用的日志文案"提到 `base.py`（`CHECKPOINTING_ACTIVE_LOG` 等），
+  **已按用户要求整条撤回**，字面量回到各自后端调用点（与上游逐字同形）；
+  `base.py` 的 `__all__` 只剩四个类/契约名。
+  (f) 对照扫描（无动作，登记理由）：AST 归一化后**无相同函数体**、无 ≥0.75 相似的近重复函数；
+  跨模块相同的 3–4 语句窗口只剩两处——两个后端 `__init__` 的 purge 线程装配与
+  `_wait_for_saving`（上游即按后端各写一份，且 `_wait_for_saving` 在 `base` 里是
+  显式 `@abstractmethod` 契约），保持不回并；≥25 字符的跨模块字符串重复只剩索引
+  re-export 名、能力注册表键与 trainer 委托方法的 docstring，均有意为之；
+  `components/checkpointer/utils.py`（仅 `canonical_fqn`）**不并**——它是 `config`/`optimizer`
+  依赖的依赖自由叶子，并进 optimizer 会把 checkpointer 后端面反向拖进那条导入链。
+  (g) 验证：`ruff check`（含 `tests`）、`git diff --check`、`python -m compileall -q llmtuner`
+  全通过；`tests/unit_tests` = 248 passed / 56 skipped / 9 failed（失败集不变，仍是
+  profiler 的 7 个 OOM 用例 + optimizer_config 的 2 个缺 `torch.distributed.pipelining`）。
+
+- 2026-09-29 二十三次增量（去冗余/去重复复查第三遍：把上一轮没扫的维度补齐，并修掉两处）：
+  (a) **先补扫描覆盖**（这一轮新做的检查项）：跨模块 5–10 语句窗口（标识符/数字归一化后）、
+  同一条函数体内的重复语句组、同形状错误/日志文案、跨模块**字面量值集合**（tuple/set/dict/
+  `frozenset(...)`）、配置 dataclass 字段的零引用扫描、`except ImportError` 各站点、
+  ≥60 行函数与 ≥15 方法类清单。前三项与"字段零引用""死名"三条**结果为空**——即：
+  没有可合并的大块重复，没有死的配置字段，没有无人引用的模块级名字。
+  (b) **值集合重复 → 修一处**：跨模块同值集合共 5 对，其中 4 对是**有意**的（下方 (e) 登记），
+  1 对是真重复：`parallel/activation_checkpoint.py` 的 `VALID_AC_MODES` 与
+  `config/training.py::TrainingConfig.__post_init__` 里手写的四个模式各写一遍。
+  现由 **config 侧持有**（`config/training.py::VALID_AC_MODES`，紧挨它约束的字段）：
+  该文件本来就 import `torch.distributed.pipelining` 做同类校验，方向不变；`config/__init__.py`
+  导出；`parallel/activation_checkpoint.py` 改为 `from llmtuner.config import VALID_AC_MODES`
+  并保留 `__all__` 里的再导出，故 `from llmtuner.parallel.activation_checkpoint import
+  VALID_AC_MODES`（测试在用）与 `apply_ac` 自身的成员校验都不变。验证：两处取到的是
+  **同一个对象**；四个合法模式全部接受、`'bogus'` 被拒（消息含字段名与集合）、
+  `'region'` 仍走 `EnvironmentUnsupportedError` 分支；`test_activation_checkpoint.py` 那条
+  `test_valid_modes_are_the_configs_accepted_set` 的断言名至此名副其实。
+  (c) **四处同形状的 `>= 1` 守卫 → 一个循环**：`TrainingConfig.__post_init__` 里
+  `global_batch_size`/`max_seq_len`/`steps`/`gradient_accumulation_steps` 四段
+  `if self.X < 1: raise ConfigError(f"X must be >= 1, got {self.X}")` 逐字相同，且
+  `test_config.py` 本就按 `f"{field} must be >= 1"` 参数化这四个名字，`config/parallel.py`
+  与 `parallel/parallel_dims.py` 也早就是"一组名字 + 一个循环"的写法；现统一为该写法
+  （`chunked_loss_num_chunks` 的文案自带括号说明，单独保留）。验证：8 组（4 字段 ×
+  {0, -1}）的异常文案与改动前**逐字相同**（直接构造 `TrainingConfig` 比对，因为
+  `test_config.py` 整模块被 `pipelining` 门控在本机跳过）。
+  (d) 验证：`ruff check`（含 `tests`，两处 import 排序由 `ruff check --fix` 归位）、
+  `git diff --check`、`python -m compileall -q llmtuner` 全通过；`tests/unit_tests` =
+  248 passed / 56 skipped / 9 failed（失败集不变）。`parallel/activation_checkpoint.py`
+  在本机 torch 2.2.2 下 import 即失败（上游 `torch._functorch.partitioners.get_default_op_list`
+  不存在），故该文件的改动以 AST/文本等价 + 上述 `VALID_AC_MODES` 对象同一性为证。
+  (e) **登记为有意保留的重复（本轮明确不动）**：
+  ① `('alltoall','torchao','deepep','hybridep')`（`config/parallel.py` 的本地校验元组 vs
+  `models/common/moe/dispatcher.py::EP_DISPATCHER_BACKENDS`）——两个方向的收敛都别扭：
+  config→models 会让配置解析拉进 models 包，models→config 会让每个模型导入拉进 config 包
+  （且 `parallel/activation_checkpoint.py` 已 config→parallel，存在环的隐患）。保持两份，
+  与 (c) 同形的 `swap.py` 成员校验一起以测试钉住（`test_ep_token_dispatcher.py`）。
+  ② `('fused','foreach','for-loop')`（`config/optimizer.py` 的 `Literal[...]` 类型 vs
+  `components/optimizer/optimizer.py` 的运行时 `ValueError`）——`Literal` 的参数必须是字面量，
+  抽成元组也无法复用同一处，收益仅剩消息文案。
+  ③ `EXPORT_DTYPE_MAP` vs `cast_linear.TORCH_DTYPE_MAP`——已在二十一次增量登记：一张是
+  checkpointer 能导出的 dtype、一张是 lm_head 能计算的 dtype，**重叠是巧合**，代码与文档均已注明。
+  ④ `(0.5, 0.5, 0.5)` 的 `image_mean`/`image_std` 默认值出现在
+  `datasets/multimodal/{image,video,datasets}.py` 三处签名默认——三者都是叶子模块，
+  提取常量需要一个共同宿主（`image.py`）并让另两个反向 import 它，为纯默认值新增模块间耦合
+  不划算。登记在案，改 Qwen-VL 归一化时三处同步改。
+
+- 2026-09-29 二十四次增量（专查"无效抽象 + 过度拆分的小函数"，并**补上二十一次漏删的死面**）：
+  (a) **小函数粒度扫描**（四条口径同时判定：行数、仓库内调用点、是否在任一 `__all__`/索引里
+  属公开面、是否以**值**形式被传递）：模块级"≤8 行 + 1 个调用点 + 非公开"只剩
+  `scatter_add.py::deterministic_scatter_add_fake`（`@register_fake` 注册钩子，不是拆分产物）；
+  放宽到 9–14 行仍只剩 `accelerator/device.py::get_max_cuda_memory`（见 (c)）。
+  方法侧："≤4 行 + 1 个调用点 + 不覆写基类 + 无装饰器"只剩
+  `MetricsProcessor.add_data_loading_time`（3 行记录器，production 1 处 + 测试 3 处）与
+  `Trainer.should_continue_training`（`while self.should_continue_training():` 的具名循环条件）。
+  结论：**没有需要内联的过度拆分**——库内既没有 1 行转发的包装，也没有只为单一调用点存在的
+  短助手。
+  (b) **类级抽象扫描**（方法数 / 自有代码行数 / 被继承次数 / 被实例化次数 / 是否 ABC）：
+  报出的都是应有的形态——枚举、异常类、dataclass/NamedTuple（"tiny" 是定义使然）、
+  `ActivationFn`/`BaseTokenizer`/`BaseEPTokenDispatcher`（ABC + 共享实现 + 单子类，均为 A2 移植）。
+  两个 `instantiations=0` 的**假阳性**已核实：`tp.py::GatherSequenceFirst` 与
+  `tp.py::TPMoeSequenceBoundary` 是 `__class__` swap 安装的 mixin（`apply.py:154,196` 用类对象
+  赋值），从不被调用。
+  (c) **补删二十一次漏掉的死面**（本轮唯一实质删除）。二十一次增量登记"删掉无消费者的
+  mmengine 面（7 个名字）"，但 `d065928` 实际只删了 5 个（`is_mlu_available`/
+  `is_musa_available`/`is_mps_available`/`is_dipu_available`/`get_max_musa_memory`）：
+  `is_cuda_available` 与 `get_max_cuda_memory` 仍在 `accelerator/device.py` 里，零调用者，
+  且与该模块 docstring 自述的"这些没有调用者、不为自身保留"**直接矛盾**（文档比代码更"干净"）。
+  本轮删除这两个，并连带删除同样零消费者的 `is_npu_support_full_precision`（它的唯一效果是
+  为一次 `torch_npu.npu.utils.get_soc_version()` 探测而 import 该私有模块）及其专用的
+  `from torch_npu.npu import utils as _npu_utils` 包装；模块 docstring 随之改写，
+  并注明 `is_npu_available` 保留的原因（`accelerator/dist.py` 的 `broadcast_object_list`
+  分支在用）。判断口径即本仓既有的"有调用者再补"：NPU 全精度探测在 llmtuner 内既无调用者
+  也无第二处概念引用，将来要接时补回约 10 行即可（从 `torch_npu` 拿 `get_soc_version()`）。
+  验证：`rg` 全仓（含 tests/docs）再无这四个名字的代码引用；模块 import 正常，
+  `is_npu_available`/`is_device_type_available`/`should_use_pin_memory`/`set_device` 等
+  其余面不变；`tests/unit_tests/cpu/accelerator` 12 passed / 1 skipped。
+  (d) **复核后判定保留的"移出体外"结构**：`trainer/trainer.py` 有 11 个方法是一行委托
+  （`return batch.dp_rank_world_size(self, ...)` 等，bodies 在 `batch.py`/`pp_steps.py`/
+  `validate.py`）。本轮核实其理由成立且**不是**可无痛消除的抽象：测试调用的是**方法**
+  （`trainer.batch_size_per_rank(2)`、`Trainer.pp_forward_backward_body(...)`、
+  `trainer.data_iterator()`），不是那些自由函数；`trainer.py` 的类 docstring 与属性注解
+  明确写了"`__new__` 构造的 Trainer 是测试驱动纯 helper 的方式"，`__init__` 委托
+  `builder.build_trainer_state` 也有"装配顺序即契约"的说明；全仓**没有**任何
+  `monkeypatch.setattr(batch_mod, ...)`。即：拆分的作用是把 1111 行的类留在"状态 + 方法面"
+  这一层，正文按关注点分文件，属有意结构而非过度拆分；拆掉它反而要重写这些测试。
+  (e) 验证：`ruff check`（含 `tests`）、`git diff --check`、`python -m compileall -q llmtuner`
+  全通过；`tests/unit_tests` = 248 passed / 56 skipped / 9 failed（失败集不变）。
 
 - 检查后续漂移：`git -C <torchtitan> log f35966713..HEAD -- torchtitan/`。
 - 2026-09-23 映射修订：上游 `distributed/linear.py` 已删除、内容迁入

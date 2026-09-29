@@ -52,6 +52,7 @@ from llmtuner.config.optimizer import (
 from llmtuner.config.parallel import ParallelConfig
 from llmtuner.config.root import LLMTunerConfig
 from llmtuner.config.training import (
+    VALID_AC_MODES,
     CompileConfig,
     MemoryBudgetACConfig,
     MetricsConfig,
@@ -77,5 +78,6 @@ __all__ = [
     "ProfilerConfig",
     "SelectiveACConfig",
     "TrainingConfig",
+    "VALID_AC_MODES",
     "ValidationConfig",
 ]

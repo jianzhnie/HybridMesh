@@ -103,7 +103,7 @@ step 1 恢复 optimizer、scheduler、dataloader 和 train state 后完成并保
 | `attention.qkv.local_head_split` | `models/common/attention.py::local_head_split` | 去 SPMD 注解，reshape 语义一致，**通过** |
 | `attention.qkv.QKVLinear` | `FusedQKVLinear`/QKV 部分 | llmtuner 注入 plain linear 并用 state_dict hook 拆合 HF Q/K/V，**通过（适配）** |
 | `QKVLinear._split_qkv_on_save/_merge_qkv_on_load` | 上游 fused QKV state hooks | llmtuner 额外兼容 DTensor gather 与原始 FQN，round-trip 测试覆盖，**通过**。上游 1e4b1f686 把 QKV 转换移入 HF adapters；llmtuner 不跟随——checkpoint 以 HF `wq/wk/wv` 名义存取是本地契约 |
-| `RoPEConfig`, `RoPE`, `ComplexRoPE`, `CosSinRoPE` | `models/common/rope.py` | 去 Module/Config 协议，缓存为普通 buffer，**通过** |
+| `RoPEConfig`, `RoPE`, `ComplexRoPE`, `CosSinRoPE` | `models/common/rope.py` | 去 Module/Config 协议，缓存为普通 buffer。2026-09-29 二十二次增量：`RoPE` 基类的三个钩子（`_precompute_cache`/`_reshape_cache`/`apply_rotary_emb`）体是 `raise NotImplementedError`（基类构造即崩）却未声明抽象，改为 `ABC` + `@abstractmethod`（与仓内其余基类同写法），实例化改抛 `TypeError`，两个子类行为与缓存形状不变，**通过** |
 | `yarn_inv_freq` | 上游 `_yarn_inv_freq` | 已包含 YaRN `low==0/low==high` 和显式 factor 启用修复，**通过** |
 | `maybe_check_max_pos` | 上游 `_maybe_check_max_pos` | async assert，compile 时跳过，**通过**。上游 7e7f271e0 已删除 DTensor positions 包装；llmtuner 本无此路径 |
 | mask modifier 系列 | `models/common/attention.py` 对应 mask helpers | llmtuner 拆成 `attention/masks.py`；公式一致，**通过** |
@@ -189,6 +189,13 @@ step 1 恢复 optimizer、scheduler、dataloader 和 train state 后完成并保
 | `apply_pp(first_stage_module_fqns=...)`, `prepend_first_stage_modules` | 同文件 `pipeline_with_first_stage_modules` | 额外顶层模块并入 stage 0：仅作用自动切分，存在的 FQN 按序前插，已占有/重复 FQN raise、缺失跳过，显式 `module_fqns_per_model_part` 给定时忽略并告警（同上游委托语义）；`split_model_into_stages` 配套把 wrapper `named_children()` 不呈现的额外顶层模块在非属主 stage 置 `Identity`（上游 "pruned on other stages" 语义），装五部件的容器经"包含已呈现部件"判定跳过。stage FQN 稳定、默认 None 逐位不变，**通过（适配）** |
 | `apply_ac`, selective helpers, `apply_memory_budget`, `disable_dynamo_lru_cache` | `distributed/activation_checkpoint.py` | FullAC/SelectiveAC 已移植，**通过**；两处 `early_stop` 已于 2026-09-27 跟随上游 #4836 同步为 `True`（此前为上游 #1580 的 `False` workaround）。MemoryBudgetAC 已移植为 `mode='memory_budget'` + `MemoryBudgetACConfig`（设 `torch._functorch.config.activation_memory_budget`，需 compile，torch 无 knob 时 loud-raise），见 §9.1；RegionAC 未移植（配置即 `NotImplementedError`）。`_disable_dynamo_lru_cache` 亦已移植（同上，上游在每个 policy 的 `apply` 开头调用），并经 `has("dynamo_lru_cache")` 能力门：torch 2.2.2 有 `torch._C._dynamo.eval_frame` 而无 `_set_lru_cache`，此时记 info 后继续。AC 也跑在 PP 路径上（2026-09-27：`stages.py` 的 `ac` 行 `on_pp=True`，逐 chunk 折层，与上游把 `ac_config` 交给每个 model part 的 `parallelize` 同构）。FullAC 的 `determinism_check`/`debug` 旋钮未暴露（固定默认值），登记于此 |
 | `apply_compile`, `maybe_enable_async_tp`, `maybe_regional_inductor_backend`, `maybe_regional_inductor` | `distributed/compile.py` 同名函数 | 四件全移植为 `parallel/compile.py` + `CompileConfig`（`training.compile_config`，默认全关 = 旧整体 compile 逐位不变）：逐 block compile 用 `Module.compile` 就地（`per_block=True`）；async TP 设 `_micro_pipeline_tp` + symm-mem 注册（按 group 名去重），配置期拒无 compile/tp=1，装配期对无 mesh/旧 torch loud-raise；regional_inductor 仅 `aot_eager`×flex 触发（wrapper `uses_flex_attention` 判定，annotation 在 `flex_attention_hf`，inductor_configs 传空），flex×其他 backend `ValueError`、torch 无该模块 `NotImplementedError`；`capture_scalar_outputs` 按上游条件（`iter_moe_layers` 非空）设置，dense 不动。上游的 `skip_fwd_side_effects_in_bwd_under_checkpoint` 与 FakeTensorMode monkeypatch 未移植（登记于 upstream map），**通过（适配）** |
+
+`VALID_AC_MODES` 自 2026-09-29（二十三次增量）起声明在 `config/training.py`，紧挨它约束的
+`TrainingConfig.activation_checkpoint_mode`；`parallel/activation_checkpoint.py` 改为从这里
+import 并保留 `__all__` 再导出（此前两侧各写一份同一个四元组，配置校验与 `apply_ac` 的成员
+检查可能各自漂移）。同轮的 `config/training.py`：`global_batch_size` / `max_seq_len` /
+`steps` / `gradient_accumulation_steps` 四处逐字相同的 `>= 1` 守卫并为同一循环，与
+`config/parallel.py`、`parallel/parallel_dims.py` 的既有写法一致（异常文案逐字不变）。
 
 ## 6. 数据系统
 
@@ -369,6 +376,11 @@ step 1 恢复 optimizer、scheduler、dataloader 和 train state 后完成并保
 `Configurable`、TorchTitan `Module`、`protocols/`、`structured_logger/`、quantization
 组件均是设计裁剪，不应为了"对应完整"重新加入。
 
+2026-09-29 二十二次增量再删一处：`OptimizersContainer.init_cache_state_dict` —— 上游基类是
+`pass` no-op，只服务 TorchFT 容器（子类覆写）与 TorchFT 训练循环的无条件调用；llmtuner
+无 TorchFT，移植物里那份 no-op 全仓零调用者，属无效抽象。将来接入 TorchFT 时补回一个
+`pass` 方法即可（已同步登记在 `llmtuner_upstream_map.md` 的 D 表）。
+
 ### 9.3 已清理的悬空链
 
 `parallel/sharding.py` → `parallel/spmd_shims.py` 因没有上层消费者已整体删除；
@@ -460,7 +472,7 @@ helper 在前文涉及关键算法时单列。成组条目（`config/`、`traine
 | `trainer/train.py` | parse/main | B，根 `train.py` |
 | `trainer/trainer.py` + `builder.py`（装配段）/ `validate.py` / `pp_steps.py` / `batch.py` / `seed.py` | 完整训练生命周期 | B，根 `trainer.py` + `training_engine.py` |
 | `components/checkpointer/checkpoint_keys.py` | checkpoint state key 常量 | C |
-| `accelerator/device.py` | 设备发现、backend 选择、pin-memory 判定、NPU 谓词；**2026-09-29 二十一次增量**删掉无消费者的 mmengine 面（`is_cuda_available`/`is_mlu_available`/`is_musa_available`/`is_mps_available`/`is_dipu_available`/`get_max_cuda_memory`/`get_max_musa_memory`） | C |
+| `accelerator/device.py` | 设备发现、backend 选择、pin-memory 判定、NPU 谓词；**2026-09-29 二十一次增量**登记删掉无消费者的 mmengine 面（`is_cuda_available`/`is_mlu_available`/`is_musa_available`/`is_mps_available`/`is_dipu_available`/`get_max_cuda_memory`/`get_max_musa_memory`），但**实际只删掉 5 个**（`is_mlu_available`/`is_musa_available`/`is_mps_available`/`is_dipu_available`/`get_max_musa_memory`），`is_cuda_available`/`get_max_cuda_memory` 漏删；**二十四次增量**补齐这两个，并再删同样零消费者的 `is_npu_support_full_precision` 及其专用的 `torch_npu.npu.utils` 导入（`is_npu_available` 保留——`accelerator/dist.py` 在用） | C |
 | `components/checkpointer/filesystem.py` | path/storage helpers | A1，`tools/filesystem.py` |
 | `utils/gc.py` | `GarbageCollection` | B，`tools/utils.py` |
 | `utils/logger_utils.py` | `get_logger`（彩色 formatter + 发射时 rank 过滤）、`get_distributed_rank` | C |

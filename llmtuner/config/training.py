@@ -128,6 +128,18 @@ class ProfilerConfig:
 # A plain `checkpoint` field would be nicer to read, but a dataclass field and
 # the class it types cannot share a name.
 
+VALID_AC_MODES: tuple[str, ...] = ("none", "full", "selective", "memory_budget")
+"""The accepted ``training.activation_checkpoint_mode`` values.
+
+Declared here because this is where the value is constrained (the field is
+parsed and validated in this module), and imported by
+``parallel/activation_checkpoint.py`` -- which dispatches on the same set -- so
+the config's accepted set and the applier's set cannot drift apart. The
+``"region"`` mode is deliberately absent: it is refused separately, with its
+unlock conditions, before this membership test.
+"""
+
+
 @dataclass(kw_only=True)
 class SelectiveACConfig:
     """Settings for ``activation_checkpoint_mode='selective'``.
@@ -509,19 +521,18 @@ class TrainingConfig:
         return self.validation_config
 
     def __post_init__(self) -> None:
-        if self.global_batch_size < 1:
-            raise ConfigError(
-                f"global_batch_size must be >= 1, got {self.global_batch_size}"
-            )
-        if self.max_seq_len < 1:
-            raise ConfigError(f"max_seq_len must be >= 1, got {self.max_seq_len}")
-        if self.steps < 1:
-            raise ConfigError(f"steps must be >= 1, got {self.steps}")
-        if self.gradient_accumulation_steps < 1:
-            raise ConfigError(
-                "gradient_accumulation_steps must be >= 1, got "
-                f"{self.gradient_accumulation_steps}"
-            )
+        # One loop, not four copies: these fields share the check and the
+        # wording, and the same shape guards parallel_dims.py's degrees. The
+        # text is the contract -- test_config.py pins ``f"{field} must be >= 1"``
+        # for each of these names.
+        for name in (
+            "global_batch_size",
+            "max_seq_len",
+            "steps",
+            "gradient_accumulation_steps",
+        ):
+            if getattr(self, name) < 1:
+                raise ConfigError(f"{name} must be >= 1, got {getattr(self, name)}")
         if self.chunked_loss_num_chunks < 1:
             raise ConfigError(
                 "chunked_loss_num_chunks must be >= 1 (1 disables chunking), "
@@ -534,16 +545,10 @@ class TrainingConfig:
                 "regions, which llmtuner has no equivalent of; see "
                 "parallel/activation_checkpoint.py's docstring."
             )
-        if self.activation_checkpoint_mode not in (
-            "none",
-            "full",
-            "selective",
-            "memory_budget",
-        ):
+        if self.activation_checkpoint_mode not in VALID_AC_MODES:
             raise ConfigError(
-                "training.activation_checkpoint_mode must be one of: 'none', "
-                "'full', 'selective', 'memory_budget' (got "
-                f"{self.activation_checkpoint_mode!r})"
+                "training.activation_checkpoint_mode must be one of: "
+                f"{VALID_AC_MODES} (got {self.activation_checkpoint_mode!r})"
             )
         if (
             self.activation_checkpoint_mode == "memory_budget"

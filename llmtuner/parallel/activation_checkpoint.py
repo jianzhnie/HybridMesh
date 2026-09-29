@@ -78,16 +78,18 @@ from torch.utils.checkpoint import (
     create_selective_checkpoint_contexts,
 )
 
-from llmtuner.config import MemoryBudgetACConfig, SelectiveACConfig
+from llmtuner.config import VALID_AC_MODES, MemoryBudgetACConfig, SelectiveACConfig
 
 from ..accelerator.capabilities import has
 from ..utils.logger_utils import get_logger
 
 logger = get_logger(__name__)
 
+# ``VALID_AC_MODES`` is declared next to the field it constrains
+# (``config/training.py``) and imported here. It stays in ``__all__`` as a
+# re-export so ``from llmtuner.parallel.activation_checkpoint import
+# VALID_AC_MODES`` keeps working.
 __all__ = ["VALID_AC_MODES", "apply_ac"]
-
-VALID_AC_MODES = ("none", "full", "selective", "memory_budget")
 
 
 def get_default_save_ops() -> set:

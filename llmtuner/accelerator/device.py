@@ -5,17 +5,19 @@ CUDA and other torch accelerators that provide distributed collectives. MPS is
 intentionally excluded: it has no distributed backend and cannot host a
 ``DeviceMesh`` even when torch reports it as available.
 
-``is_npu_available`` / ``is_npu_support_full_precision`` and
-``is_device_type_available`` / ``should_use_pin_memory`` derive from OpenMMLab's
-``mmengine.device`` conventions, merged here so nothing needs the mmengine
-dependency. The rest of that file's surface was not carried over: its
-import-time ``DEVICE`` constant and ``get_device()`` duplicate this module's
-``device_type`` / ``get_device_type()``, its ``torch.npu.set_compile_mode`` call
-mutates global torch state at import time, and its per-vendor predicates for
-devices llmtuner does not run on (``is_cuda_available``, ``is_mlu_available``,
-``is_musa_available``, ``is_mps_available``, ``is_dipu_available``) plus its
-peak-memory queries had no caller -- the `mmengine`-style surface is not kept
-for its own sake, the same way the other vendored-but-unused files were dropped.
+``is_npu_available``, ``is_device_type_available`` and ``should_use_pin_memory``
+derive from OpenMMLab's ``mmengine.device`` conventions, merged here so nothing
+needs the mmengine dependency. The rest of that file's surface was not carried
+over: its import-time ``DEVICE`` constant and ``get_device()`` duplicate this
+module's ``device_type`` / ``get_device_type()``, its
+``torch.npu.set_compile_mode`` call mutates global torch state at import time,
+and its per-vendor predicates for devices llmtuner does not run on
+(``is_cuda_available``, ``is_mlu_available``, ``is_musa_available``,
+``is_mps_available``, ``is_dipu_available``), its NPU full-precision probe, and
+its peak-memory queries had no caller -- the `mmengine`-style surface is not
+kept for its own sake, the same way the other vendored-but-unused files were
+dropped. ``is_npu_available`` stays because ``accelerator/dist.py``'s
+``broadcast_object_list`` branch reads it.
 """
 
 from __future__ import annotations
