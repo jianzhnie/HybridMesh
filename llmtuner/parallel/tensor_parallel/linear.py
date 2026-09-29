@@ -44,7 +44,7 @@ def ensure_symm_mem_ops():
     return symm_mem
 
 
-def _functional_collectives():
+def functional_collectives():
     """Import torch's functional collectives, lazily and version-tolerantly.
 
     The autograd-covered variants were renamed across torch releases. Current
@@ -53,7 +53,7 @@ def _functional_collectives():
     variants explicitly: the non-autograd collectives would silently break TP
     weight/input gradients.
     """
-    from torch.distributed import _functional_collectives as funcol
+    from torch.distributed import functional_collectives as funcol
 
     if hasattr(funcol, "all_gather_tensor_autograd"):
         return funcol.all_gather_tensor_autograd, funcol.reduce_scatter_tensor_autograd
@@ -75,7 +75,7 @@ def all_gather_linear(
     backward is a reduce-scatter (the dgrad dual), and the weight gradient falls
     out of the local matmul against the gathered input.
     """
-    all_gather, _ = _functional_collectives()
+    all_gather, _ = functional_collectives()
     x_full = all_gather(x_shard_m.contiguous(), 0, group)
     return torch.nn.functional.linear(x_full, w_shard_n)
 
@@ -93,7 +93,7 @@ def linear_reduce_scatter(
     dual); the weight gradient is the local matmul against the re-gathered
     output gradient, which autograd produces on its own.
     """
-    _, reduce_scatter = _functional_collectives()
+    _, reduce_scatter = functional_collectives()
     y_partial = torch.nn.functional.linear(x_shard_k, w_shard_k)
     return reduce_scatter(y_partial.contiguous(), "sum", 0, group)
 
@@ -107,7 +107,7 @@ def all_gather_along(
     leading dims, any gather dim -- unlike the fused symm-mem ops, which are
     strictly 2D.
     """
-    all_gather, _ = _functional_collectives()
+    all_gather, _ = functional_collectives()
     return all_gather(x.contiguous(), dim, group)
 
 
@@ -121,7 +121,7 @@ def reduce_scatter_along(
     TP (see ``tp.py``), where the block's output is partial over the TP group
     and must return to a sequence shard.
     """
-    _, reduce_scatter = _functional_collectives()
+    _, reduce_scatter = functional_collectives()
     return reduce_scatter(x.contiguous(), "sum", dim, group)
 
 

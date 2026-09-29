@@ -354,7 +354,7 @@ def ensure_pp_loss_visible(
 
 
 @dataclass(kw_only=True, slots=True)
-class _Derived:
+class DerivedMetrics:
     """The numbers a log call computes from its window, before naming."""
 
     tps: float
@@ -518,7 +518,7 @@ class MetricsProcessor:
 
         return logger_container
 
-    def _derive(self, step: int) -> _Derived:
+    def _derive(self, step: int) -> DerivedMetrics:
         """Compute the windowed numbers that both log paths share.
 
         The keys these become carry no tag: a sensor is what the tag belongs to,
@@ -559,7 +559,7 @@ class MetricsProcessor:
         )
         time_data_loading_pct = 100 * sum(self.data_loading_times) / time_delta
 
-        return _Derived(
+        return DerivedMetrics(
             tps=tps,
             tflops=tflops,
             mfu=mfu,

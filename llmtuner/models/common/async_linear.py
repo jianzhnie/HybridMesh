@@ -63,7 +63,7 @@ __all__ = [
 _WARNED_NO_TP = False
 
 
-def _warn_once_no_tp_overlap() -> None:
+def warn_once_no_tp_overlap() -> None:
     """Say so when the dist-GEMM modules were selected but TP is not on.
 
     Otherwise the fallback is indistinguishable from the feature working: the run
@@ -115,7 +115,7 @@ class AllGatherFusedQKVLinear(QKVLinear):
     def _project(self, x: torch.Tensor) -> torch.Tensor:
         tp_group = spmd_mesh_group("tp")
         if tp_group is None:
-            _warn_once_no_tp_overlap()
+            warn_once_no_tp_overlap()
             return super()._project(x)
 
         return AllGatherLinear.apply(
@@ -172,7 +172,7 @@ class RowParallelLinear(nn.Module):
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         tp_group = spmd_mesh_group("tp")
         if tp_group is None:
-            _warn_once_no_tp_overlap()
+            warn_once_no_tp_overlap()
             return torch.nn.functional.linear(x, self.weight, self.bias)
 
         return LinearReduceScatter.apply(
@@ -206,7 +206,7 @@ class DistGEMMFeedForward(FeedForward):
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         tp_group = spmd_mesh_group("tp")
         if tp_group is None:
-            _warn_once_no_tp_overlap()
+            warn_once_no_tp_overlap()
             return super().forward(x)
 
         gate_up_TF = AllGatherLinear.apply(

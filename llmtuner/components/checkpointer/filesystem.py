@@ -30,7 +30,7 @@ def is_remote(path: str | os.PathLike) -> bool:
     return "://" in str(path)
 
 
-def _resolve(path: str | os.PathLike):
+def resolve(path: str | os.PathLike):
     """Return ``(fs, path)`` for a remote URI via fsspec.
 
     Imported lazily so a pure-local environment never needs fsspec at all, and
@@ -44,21 +44,21 @@ def _resolve(path: str | os.PathLike):
 
 def exists(path: str | os.PathLike) -> bool:
     if is_remote(path):
-        fs, p = _resolve(path)
+        fs, p = resolve(path)
         return fs.exists(p)
     return os.path.exists(path)
 
 
 def isdir(path: str | os.PathLike) -> bool:
     if is_remote(path):
-        fs, p = _resolve(path)
+        fs, p = resolve(path)
         return fs.isdir(p)
     return os.path.isdir(path)
 
 
 def isfile(path: str | os.PathLike) -> bool:
     if is_remote(path):
-        fs, p = _resolve(path)
+        fs, p = resolve(path)
         return fs.isfile(p)
     return os.path.isfile(path)
 
@@ -75,7 +75,7 @@ def listdir(path: str | os.PathLike) -> list[str]:
     happens to share the parent's basename is kept.
     """
     if is_remote(path):
-        fs, p = _resolve(path)
+        fs, p = resolve(path)
         self_entry = p.rstrip("/")
         return [
             posixpath.basename(entry.rstrip("/"))
@@ -87,7 +87,7 @@ def listdir(path: str | os.PathLike) -> list[str]:
 
 def rmtree(path: str | os.PathLike) -> None:
     if is_remote(path):
-        fs, p = _resolve(path)
+        fs, p = resolve(path)
         # Mirror ``shutil.rmtree(..., ignore_errors=True)`` for the common
         # already-deleted case. Other errors (permissions, transient backend
         # failures) propagate so the caller can decide what to do with them.

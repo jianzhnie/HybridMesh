@@ -90,7 +90,7 @@ assert {f.name for f in fields(Color)} == {f.name for f in fields(NoColor)}, (
 )
 
 
-def _stdout_supports_color() -> bool:
+def stdout_supports_color() -> bool:
     """Whether writing ANSI escapes to stdout will be interpreted, not shown.
 
     Not the same question as ``isatty``: a terminal under ``TERM=dumb`` accepts
@@ -119,7 +119,7 @@ def colors_enabled(*, disable_color_printing: bool) -> bool:
     out of a file rather than watched, escapes are noise the reader has to
     strip, which is why the second check is here.
     """
-    return not disable_color_printing and _stdout_supports_color()
+    return not disable_color_printing and stdout_supports_color()
 
 
 def get_device_name() -> str:
@@ -222,7 +222,7 @@ def get_peak_flops(device_name: str) -> float:
     return 0.0
 
 
-def _memory_module():
+def memory_module():
     """The module that owns memory history for the training device, or None.
 
     Not ``torch.cuda.memory`` unconditionally, the way torchtitan does it: its
@@ -251,7 +251,7 @@ def record_memory_history(*, max_entries: int) -> bool:
     Returns False when the device has no allocator history, so the caller can
     say the snapshot is unavailable rather than write an empty file.
     """
-    memory = _memory_module()
+    memory = memory_module()
     if memory is None:
         return False
     memory._record_memory_history(stacks="python", max_entries=max_entries)
@@ -260,7 +260,7 @@ def record_memory_history(*, max_entries: int) -> bool:
 
 def read_memory_snapshot():
     """The accumulated allocator history, for writing to a snapshot file."""
-    memory = _memory_module()
+    memory = memory_module()
     if memory is None:
         return None
     return memory._snapshot()

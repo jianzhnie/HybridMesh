@@ -149,7 +149,7 @@ def make_schedule_loss_fn(
     return _schedule_loss_fn
 
 
-def _get_pipeline_metadata(
+def get_pipeline_metadata(
     parallel_dims: ParallelDims,
     parallelism: ParallelConfig,
     num_layers: int,
@@ -157,7 +157,7 @@ def _get_pipeline_metadata(
     """Decide the stage count, from the schedule class and the config.
 
     Returns ``(num_stages, input_weight, output_weight)``. Vendored from
-    torchtitan's ``_get_pipeline_metadata``: single-stage schedules (GPipe,
+    torchtitan's ``get_pipeline_metadata``: single-stage schedules (GPipe,
     1F1B) default to one stage per rank, looped ones (Interleaved1F1B, ...)
     to two; ``pipeline_parallel_layers_per_stage`` overrides the default and
     is validated against the schedule kind.
@@ -329,7 +329,7 @@ def apply_pp(
     module_names_per_stage = parallelism.module_fqns_per_model_part
     if module_names_per_stage is None:
         num_layers = len(model.layers)
-        num_stages, input_weight, output_weight = _get_pipeline_metadata(
+        num_stages, input_weight, output_weight = get_pipeline_metadata(
             parallel_dims, parallelism, num_layers
         )
         module_names_per_stage = generate_llm_fqn_per_model_part(
@@ -347,7 +347,7 @@ def apply_pp(
                 "place the extra modules in the explicit split instead."
             )
         # An explicit split still has to land a whole number of stages per
-        # rank; the per-schedule-kind check happens in _get_pipeline_metadata
+        # rank; the per-schedule-kind check happens in get_pipeline_metadata
         # for the generated path, so assert the divisibility here.
         num_stages = len(module_names_per_stage)
         if num_stages % parallel_dims.pp != 0:

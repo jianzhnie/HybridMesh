@@ -25,7 +25,7 @@ from .iterators import (
 )
 
 
-def _row_lengths(context: DatasetBuildContext) -> dict[str, int]:
+def row_lengths(context: DatasetBuildContext) -> dict[str, int]:
     """The per-feature row length every packing node fills to.
 
     All four token features are packed to the same length; the dict is what the
@@ -68,7 +68,7 @@ def build_concat_then_split_packing(
     )
     dataset_graph = as_iter_dataset(dataset_graph, context=context)
     dataset_graph = grain.experimental.ConcatThenSplitIterDataset(
-        dataset_graph, length_struct=_row_lengths(context)
+        dataset_graph, length_struct=row_lengths(context)
     )
     dataset_graph = dataset_graph.filter(packing_output_is_full)
     return dataset_graph.map(
@@ -116,7 +116,7 @@ def build_first_fit_packing(
     # ranks receive similarly filled rows.
     dataset_graph = grain.experimental.FirstFitPackIterDataset(
         dataset_graph,
-        length_struct=_row_lengths(context),
+        length_struct=row_lengths(context),
         padding_struct={
             "input_ids": 0,
             "labels": IGNORE_INDEX,

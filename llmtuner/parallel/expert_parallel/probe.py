@@ -187,7 +187,7 @@ def fused_experts_of(block: nn.Module) -> FusedExperts | None:
     )
 
 
-def _has_router_weight(router: nn.Module | None) -> bool:
+def has_router_weight(router: nn.Module | None) -> bool:
     """Whether a router carries its own ``(E, D)`` gate weight.
 
     DeepSeek-V3 and GLM4 routers are bespoke classes rather than ``nn.Linear``,
@@ -222,7 +222,7 @@ def is_hf_moe_block(module: nn.Module) -> bool:
         raise
     if experts is None:
         return False
-    return _has_router_weight(router_of(module)) and resolve_top_k(module) is not None
+    return has_router_weight(router_of(module)) and resolve_top_k(module) is not None
 
 
 def resolve_top_k(block: nn.Module) -> int | None:
@@ -295,7 +295,7 @@ def resolve_score_func(block: nn.Module, router: nn.Module) -> str:
     return "softmax"
 
 
-def _read_int_attr(block: nn.Module, router: nn.Module, name: str) -> int | None:
+def read_int_attr(block: nn.Module, router: nn.Module, name: str) -> int | None:
     """Read an optional integer attribute off the block or the router."""
     for owner in (block, router):
         value = getattr(owner, name, None)
@@ -361,9 +361,9 @@ def read_expert_groups(
     # Both are probed: reading only one silently disables grouping for the
     # family that spells it the other way, which is a routing change HF does not
     # make and no error surfaces.
-    num_groups = _read_int_attr(block, router, "n_group")
+    num_groups = read_int_attr(block, router, "n_group")
     if num_groups is None:
-        num_groups = _read_int_attr(block, router, "num_group")
+        num_groups = read_int_attr(block, router, "num_group")
     if num_groups is None:
         return None, None
 
@@ -376,10 +376,10 @@ def read_expert_groups(
         return None, None
     if ignores_norm_topk_prob(block, router):
         matrix.group_limited_greedy()
-    return num_groups, _read_int_attr(block, router, "topk_group")
+    return num_groups, read_int_attr(block, router, "topk_group")
 
 
-def _probe_expert_layouts() -> None:
+def probe_expert_layouts() -> None:
     """Development-time survey of the expert layouts transformers 5.9 ships.
 
     Not called at import: it builds seven real models, which is far too much
@@ -415,7 +415,7 @@ def _probe_expert_layouts() -> None:
     transformers = sys.modules.get("transformers")
     if transformers is None:
         raise RuntimeError(
-            "_probe_expert_layouts needs transformers imported first; it is a "
+            "probe_expert_layouts needs transformers imported first; it is a "
             "development tool, not part of the training path."
         )
 

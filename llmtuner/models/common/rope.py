@@ -7,7 +7,7 @@ Vendored from torchtitan ``models/common/rope.py``. What changed:
   (see docs/torchllmtuner_design.md, SEAM 1).
 * ``spmd.no_typecheck()`` and ``spmd.local_map(...)`` are gone. The first was a
   type-checker suppression with no runtime effect; the second declared that
-  ``_reshape_for_broadcast`` is a pure per-rank reshape, which is true as
+  ``reshape_for_broadcast`` is a pure per-rank reshape, which is true as
   written -- the function only indexes ``rope_cache`` with token positions.
 * ``_init_self_buffers`` is gone. It existed so a meta-device build could
   recompute the cache after ``to_empty()``; llmtuner builds real HF models, and a
@@ -43,7 +43,7 @@ __all__ = [
 # TODO: This is an async bounds check rather than a host-side comparison so it
 # does not force a device sync. It is a no-op under torch.compile, where the
 # position range is already guaranteed by the BlockMask.
-def _maybe_check_max_pos(positions: torch.Tensor, *, max_valid_pos: int) -> None:
+def maybe_check_max_pos(positions: torch.Tensor, *, max_valid_pos: int) -> None:
     """Assert every position fits the cache, without syncing device to host.
 
     Uses ``torch._assert_async`` so the failure surfaces at a later kernel
@@ -57,7 +57,7 @@ def _maybe_check_max_pos(positions: torch.Tensor, *, max_valid_pos: int) -> None
     )
 
 
-def _yarn_inv_freq(
+def yarn_inv_freq(
     dim: int,
     base: float,
     rope_factor: float,
@@ -236,7 +236,7 @@ class ComplexRoPE(RoPE):
             freqs = torch.where(is_medium_freqs, smoothed_freqs, freqs)
         elif cfg.scaling == "yarn" and cfg.rope_factor > 1.0:
             # YaRN (DeepSeek V3 style)
-            freqs = _yarn_inv_freq(
+            freqs = yarn_inv_freq(
                 dim,
                 theta,
                 cfg.rope_factor,
@@ -258,10 +258,10 @@ class ComplexRoPE(RoPE):
     ) -> torch.Tensor:
         """Return the complex cache shaped ``(T, 1, dim / 2)`` for broadcast."""
         if positions is not None:
-            _maybe_check_max_pos(positions, max_valid_pos=self.cache.shape[0] - 1)
+            maybe_check_max_pos(positions, max_valid_pos=self.cache.shape[0] - 1)
         # Half the width: each complex value covers a pair of real dimensions.
         complex_query_shape = (*query.shape[:-1], query.shape[-1] // 2)
-        return _reshape_for_broadcast(self.cache, complex_query_shape, positions)
+        return reshape_for_broadcast(self.cache, complex_query_shape, positions)
 
     @staticmethod
     def apply_rotary_emb(
@@ -305,7 +305,7 @@ class CosSinRoPE(RoPE):
             raise NotImplementedError("Cos/sin RoPE does not support Llama scaling.")
 
         if cfg.scaling == "yarn" and cfg.rope_factor > 1.0:
-            inv_freq = _yarn_inv_freq(
+            inv_freq = yarn_inv_freq(
                 dim,
                 base,
                 cfg.rope_factor,
@@ -337,8 +337,8 @@ class CosSinRoPE(RoPE):
     ) -> torch.Tensor:
         """Return the cos/sin cache shaped ``(T, 1, dim * 2)`` for broadcast."""
         if positions is not None:
-            _maybe_check_max_pos(positions, max_valid_pos=self.cache.shape[0] - 1)
-        return _reshape_for_broadcast(self.cache, query.shape, positions)
+            maybe_check_max_pos(positions, max_valid_pos=self.cache.shape[0] - 1)
+        return reshape_for_broadcast(self.cache, query.shape, positions)
 
     @staticmethod
     def apply_rotary_emb(
@@ -371,7 +371,7 @@ class CosSinRoPE(RoPE):
         return torch.cat((-x2, x1), dim=-1)
 
 
-def _reshape_for_broadcast(
+def reshape_for_broadcast(
     rope_cache: torch.Tensor,
     query_shape: torch.Size | tuple[int, ...],
     positions: torch.Tensor | None = None,

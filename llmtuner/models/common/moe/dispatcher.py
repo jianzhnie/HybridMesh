@@ -79,7 +79,7 @@ TORCHAO_INSTALL_HINT = (
 )
 
 
-def _materialize(tensor: torch.Tensor) -> torch.Tensor:
+def materialize(tensor: torch.Tensor) -> torch.Tensor:
     """Force an async collective result to be ready.
 
     ``all_to_all_single`` returns immediately, leaving the transfer running; the
@@ -323,7 +323,7 @@ class AllToAllTokenDispatcher(BaseEPTokenDispatcher):
         data all-to-all is launched; local counts are ours already and only need
         to reach the host.
         """
-        num_global_tokens_per_local_expert_EP_e = _materialize(
+        num_global_tokens_per_local_expert_EP_e = materialize(
             num_global_tokens_per_local_expert_EP_e
         )
         num_global_tokens_per_local_expert_E = (
@@ -557,7 +557,7 @@ class AllToAllTokenDispatcher(BaseEPTokenDispatcher):
         # scattering home is exactly the local dispatcher's combine.
         return LocalTokenDispatcher.combine(
             self,
-            _materialize(routed_output_RD),
+            materialize(routed_output_RD),
             metadata,
             x_TD,
         )

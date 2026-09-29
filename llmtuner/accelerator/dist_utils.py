@@ -80,9 +80,9 @@ def init_dist(launcher,
     if launcher == 'pytorch':
         init_dist_pytorch(backend, init_backend=init_backend, **kwargs)
     elif launcher == 'mpi':
-        _init_dist_mpi(backend, **kwargs)
+        init_dist_mpi(backend, **kwargs)
     elif launcher == 'slurm':
-        _init_dist_slurm(backend, init_backend=init_backend, **kwargs)
+        init_dist_slurm(backend, init_backend=init_backend, **kwargs)
     else:
         raise ValueError(f'Invalid launcher type: {launcher}')
 
@@ -134,7 +134,7 @@ def init_dist_pytorch(backend, init_backend='torch', **kwargs) -> None:
                 f'but got {init_backend}')
 
 
-def _init_dist_mpi(backend, **kwargs) -> None:
+def init_dist_mpi(backend, **kwargs) -> None:
     """Initialize distributed environment with MPI launcher.
 
     Args:
@@ -166,7 +166,7 @@ def _init_dist_mpi(backend, **kwargs) -> None:
     torch_dist.init_process_group(backend=backend, **kwargs)
 
 
-def _init_dist_slurm(backend,
+def init_dist_slurm(backend,
                      port=None,
                      init_backend='torch',
                      **kwargs) -> None:

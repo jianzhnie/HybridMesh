@@ -59,7 +59,7 @@ except ImportError:  # pragma: no cover - exercised only on torch builds without
     _context_parallel_shard = None
 
 
-def _require_torch_cp() -> None:
+def require_torch_cp() -> None:
     """Fail with a version note rather than a bare ``TypeError: NoneType``."""
     if _context_parallel_shard is None or _HeadTailLoadBalancer is None:
         raise ImportError(
@@ -71,7 +71,7 @@ def _require_torch_cp() -> None:
         )
 
 
-def _resolve_load_balancer(
+def resolve_load_balancer(
     load_balancer: str | None, seq_len: int, cp_mesh: DeviceMesh
 ):
     """Instantiate the named load balancer for one sequence length.
@@ -80,7 +80,7 @@ def _resolve_load_balancer(
     trainer sharding the batch and the wrapper sharding the BlockMask construct
     them independently and still agree on the rearrangement.
     """
-    _require_torch_cp()
+    require_torch_cp()
     if load_balancer is None:
         return None
     cp_size = cp_mesh.size()
@@ -124,7 +124,7 @@ def shard_batch_for_cp(
         docstring); the sum-reduced loss is permutation-invariant, so the
         trainer does not need to undo it.
     """
-    balancer = _resolve_load_balancer(load_balancer, input_ids.shape[0], cp_mesh)
+    balancer = resolve_load_balancer(load_balancer, input_ids.shape[0], cp_mesh)
     sharded = _context_parallel_shard(
         mesh=cp_mesh,
         buffers=[input_ids, labels, positions],
@@ -145,11 +145,11 @@ def shard_padding_mask_for_cp(
     ``shard_batch_for_cp`` so that function's triple return -- unpacked at
     every call site -- stays stable. The rearrangement still agrees with the
     batch shard: the load balancers are deterministic in
-    ``(seq_len, cp_size, device)`` (see ``_resolve_load_balancer``), so
+    ``(seq_len, cp_size, device)`` (see ``resolve_load_balancer``), so
     constructing one here for the same sequence lands the same tokens on this
     rank.
     """
-    balancer = _resolve_load_balancer(load_balancer, padding_mask.shape[0], cp_mesh)
+    balancer = resolve_load_balancer(load_balancer, padding_mask.shape[0], cp_mesh)
     return _context_parallel_shard(
         mesh=cp_mesh,
         buffers=[padding_mask],
@@ -167,7 +167,7 @@ def shard_padding_mask_for_tp(
     The same contiguous cut, for the same reason: the mask must follow the
     token stream it describes into this rank's ``T / tp`` slice.
     """
-    _require_torch_cp()
+    require_torch_cp()
     if padding_mask.shape[0] % tp_mesh.size() != 0:
         raise ValueError(
             f"sequence length {padding_mask.shape[0]} is not divisible by "
@@ -218,7 +218,7 @@ def shard_batch_for_tp(
     the CP shard's business; slicing inside it evenly keeps every TP rank at
     the same GEMM size.
     """
-    _require_torch_cp()
+    require_torch_cp()
     if input_ids.shape[0] % tp_mesh.size() != 0:
         raise ValueError(
             f"sequence length {input_ids.shape[0]} is not divisible by "
@@ -256,7 +256,7 @@ def shard_attention_mask_for_cp(
         raise TypeError(
             f"CP can only shard BlockMask attention masks, got {type(mask).__name__}."
         )
-    balancer = _resolve_load_balancer(load_balancer, mask.seq_lengths[0], cp_mesh)
+    balancer = resolve_load_balancer(load_balancer, mask.seq_lengths[0], cp_mesh)
     return _context_parallel_shard(
         mesh=cp_mesh,
         buffers=[mask],

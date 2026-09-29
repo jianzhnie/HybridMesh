@@ -37,7 +37,7 @@ from .fsdp import (
 __all__ = ["apply_fsdp"]
 
 
-def _force_sum_grad_reduction(model: torch.nn.Module) -> None:
+def force_sum_grad_reduction(model: torch.nn.Module) -> None:
     """Use plain SUM for FSDP's gradient reduce comms.
 
     FSDP defaults to ``ReduceOp.PREMUL_SUM``, which pre-scales the local
@@ -116,6 +116,6 @@ def apply_fsdp(
 
     # gloo implements no PREMUL_SUM; NCCL does, and there it is the faster path.
     if dist_utils.is_distributed() and dist_utils.get_backend() != "nccl":
-        _force_sum_grad_reduction(model)
+        force_sum_grad_reduction(model)
 
     return model

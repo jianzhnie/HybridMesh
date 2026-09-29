@@ -136,7 +136,7 @@ def cross_entropy_loss(
     )
 
 
-def _shard_local_labels(
+def shard_local_labels(
     labels: torch.Tensor, vocab_start: int, local_vocab_size: int
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Map global labels to shard-local indices, masking non-owned tokens.
@@ -241,7 +241,7 @@ class LossParallelCrossEntropy(torch.autograd.Function):
 
         # Mask labels outside this shard; the all-reduce below then selects the
         # owner rank's log-probability for each target.
-        local_labels, out_of_range = _shard_local_labels(
+        local_labels, out_of_range = shard_local_labels(
             labels, vocab_start, local_vocab_size
         )
 
@@ -269,7 +269,7 @@ class LossParallelCrossEntropy(torch.autograd.Function):
         ctx, grad_output: torch.Tensor
     ) -> tuple[torch.Tensor, None, None, None, None]:
         log_probs, labels = ctx.saved_tensors
-        local_labels, out_of_range = _shard_local_labels(
+        local_labels, out_of_range = shard_local_labels(
             labels, ctx.vocab_start, ctx.local_vocab_size
         )
 
@@ -389,7 +389,7 @@ def chunked_lm_head_cross_entropy(
     return total
 
 
-def _vocab_parallel_entropy(
+def vocab_parallel_entropy(
     logits: torch.Tensor, tp_group: dist.ProcessGroup
 ) -> torch.Tensor:
     """Exact per-token Shannon entropy from vocab-sharded logits, no gather.
@@ -438,7 +438,7 @@ def compute_logprobs(
 
     With a sharded vocabulary each rank holds only its own classes, so the
     log-probabilities come from the vocab-parallel path and the entropy from
-    ``_vocab_parallel_entropy`` -- neither gathers the vocabulary. Reachability
+    ``vocab_parallel_entropy`` -- neither gathers the vocabulary. Reachability
     note: nothing in llmtuner shards the lm_head yet, so today the sharded
     branch is unreachable in training -- it is here because the local-vocab case
     is the whole reason llmtuner has an ``LossParallelCrossEntropy`` at all.
@@ -463,7 +463,7 @@ def compute_logprobs(
         if not return_entropy:
             return logprobs
         with torch.no_grad():
-            entropy = _vocab_parallel_entropy(logits, tp_group)
+            entropy = vocab_parallel_entropy(logits, tp_group)
         return logprobs, entropy
 
     # One bf16 -> fp32 upcast, shared by the logprobs and (if asked) the entropy.

@@ -29,7 +29,7 @@ class DocumentAwareConcatThenSplitIterDataset(grain.IterDataset):
         self._num_tokens_per_row = num_tokens_per_row
 
     def __iter__(self) -> grain.DatasetIterator:
-        return _DocumentAwareConcatThenSplitIterator(
+        return DocumentAwareConcatThenSplitIterator(
             iter(self._parent),
             max_num_documents_per_row=self._max_num_documents_per_row,
             max_context_length=self._max_context_length,
@@ -37,7 +37,7 @@ class DocumentAwareConcatThenSplitIterDataset(grain.IterDataset):
         )
 
 
-class _DocumentAwareConcatThenSplitIterator(grain.DatasetIterator):
+class DocumentAwareConcatThenSplitIterator(grain.DatasetIterator):
     """Build fixed-size rows while preserving document order and remainders."""
 
     def __init__(
@@ -89,7 +89,7 @@ class _DocumentAwareConcatThenSplitIterator(grain.DatasetIterator):
             source_positions = (
                 None if sequence.positions is None else np.asarray(sequence.positions)
             )
-            segment_end = _next_document_chunk_end(
+            segment_end = next_document_chunk_end(
                 num_tokens=len(sequence.input_ids),
                 positions=source_positions,
                 start=self._remainder_offset,
@@ -183,7 +183,7 @@ class SplitTextSequenceDocuments(grain.experimental.FlatMapTransform):
         chunks = []
         chunk_start = 0
         while chunk_start < len(element.input_ids):
-            chunk_end = _next_document_chunk_end(
+            chunk_end = next_document_chunk_end(
                 num_tokens=len(element.input_ids),
                 positions=positions,
                 start=chunk_start,
@@ -205,7 +205,7 @@ class SplitTextSequenceDocuments(grain.experimental.FlatMapTransform):
         return chunks
 
 
-def _next_document_chunk_end(
+def next_document_chunk_end(
     *,
     num_tokens: int,
     positions: np.ndarray | None,

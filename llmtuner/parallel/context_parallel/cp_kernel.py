@@ -132,7 +132,7 @@ def reject_unrepresentable_attention_kwargs(kwargs: dict) -> None:
         )
 
 
-def _run_flex(module, q, k, v, block_mask, kwargs) -> torch.Tensor:
+def run_flex(module, q, k, v, block_mask, kwargs) -> torch.Tensor:
     """Run flex attention on already-redistributed q/k/v.
 
     Returns the output in ``(batch, heads, seq, dim)`` on both backends. On
@@ -259,7 +259,7 @@ class CPFlexKernel(nn.Module):
         key, value = self._flex_cp_allgather(
             key.contiguous(), value.contiguous(), _SEQ_DIM, self._cp_pg_name
         )
-        out = _run_flex(module, query, key, value, block_mask, kwargs)
+        out = run_flex(module, query, key, value, block_mask, kwargs)
         # HF's interface contract is (batch, seq, heads, dim).
         return out.transpose(1, 2)
 
@@ -292,7 +292,7 @@ class CPFlexKernel(nn.Module):
         v = SeqToHead.apply(value.contiguous(), self._cp_group)
         if block_mask is None or block_mask.seq_lengths[0] != q.shape[_SEQ_DIM]:
             block_mask = self._full_length_causal_mask(q)
-        out = _run_flex(module, q, k, v, block_mask, kwargs)
+        out = run_flex(module, q, k, v, block_mask, kwargs)
         out = HeadToSeq.apply(out.contiguous(), self._cp_group)
         return out.transpose(1, 2)  # HF's interface contract is (b, s/cp, h, d)
 

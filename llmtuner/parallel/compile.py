@@ -87,7 +87,7 @@ def apply_compile(
     if compile_config is None:
         compile_config = CompileConfig()
 
-    _maybe_enable_async_tp(compile_config, tp_mesh)
+    maybe_enable_async_tp(compile_config, tp_mesh)
 
     if iter_moe_layers(model):
         # Token-choice dispatch sizes its expert splits from the routing,
@@ -118,7 +118,7 @@ def apply_compile(
     return torch.compile(model, backend=backend)
 
 
-def _maybe_enable_async_tp(compile_config: CompileConfig, tp_mesh) -> None:
+def maybe_enable_async_tp(compile_config: CompileConfig, tp_mesh) -> None:
     """Configure Inductor's async TP pass for the TP mesh.
 
     Every precondition is checked here and fails loudly: async TP asked for

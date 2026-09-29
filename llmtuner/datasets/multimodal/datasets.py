@@ -212,7 +212,7 @@ def process_mm_sample(
     }
 
 
-def _process_obelics_sample(
+def process_obelics_sample(
     sample: dict[str, Any],
     tokenizer: MultiModalTokenizer,
     patch_size: int,
@@ -365,7 +365,7 @@ MM_DATASETS: dict[str, SingleDataset] = {
         ),
         processor=partial(
             MultiModalProcessor,
-            sample_processor=_process_obelics_sample,
+            sample_processor=process_obelics_sample,
         ),
         post_filters=(is_not_none,),
     ),
@@ -424,7 +424,7 @@ def build_mm_sample_packing(
     dataset_graph = dataset_graph.filter(
         lambda sample: len(sample["input_ids"]) <= context.max_context_length
     )
-    dataset_graph = dataset_graph.map(_mm_sample_to_packing_input)
+    dataset_graph = dataset_graph.map(mm_sample_to_packing_input)
     dataset_graph = as_iter_dataset(dataset_graph, context=context)
     # TODO(data-global-pack-plan): Consider packing before DP sharding so
     # ranks receive similar text and media work.
@@ -458,7 +458,7 @@ def build_mm_sample_packing(
     )
 
 
-def _mm_sample_to_packing_input(sample: dict[str, Any]) -> dict[str, Any]:
+def mm_sample_to_packing_input(sample: dict[str, Any]) -> dict[str, Any]:
     """Convert Torch token fields to the arrays expected by Grain packing."""
     return {
         "input_ids": np.asarray(sample["input_ids"]),

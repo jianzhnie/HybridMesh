@@ -14,7 +14,7 @@ Two mask families, and the difference is the consumer:
   whose own attention code treats the mask as a plain tensor -- DSA models call
   ``.dim()`` on it and add it to the scores.
 
-The flex import is deliberately lazy (see ``_flex_ops``): the modifiers, the
+The flex import is deliberately lazy (see ``flex_ops``): the modifiers, the
 metadata builder and the dense builder all work without ``torch.nn.attention``,
 so a CPU-only or pre-flex torch can still import this module and run those.
 
@@ -307,7 +307,7 @@ def create_varlen_metadata_for_document(
 
 
 @functools.lru_cache(maxsize=1)
-def _flex_ops() -> tuple[Callable, Callable, bool]:
+def flex_ops() -> tuple[Callable, Callable, bool]:
     """``(create_block_mask, compiled, supports_separate_full_blocks)``.
 
     Resolved once, on first use. The import and the ``torch.compile`` are both
@@ -371,7 +371,7 @@ def create_attention_mask(*args, **kwargs):
     so NPU uses it until that backend bug is fixed.
     """
     create_block_mask, compiled_create_block_mask, supports_separate_full_blocks = (
-        _flex_ops()
+        flex_ops()
     )
     if not supports_separate_full_blocks:
         # PyTorch 2.10 (the current vLLM Ascend image) predates this tuning

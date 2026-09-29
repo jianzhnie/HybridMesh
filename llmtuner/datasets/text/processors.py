@@ -42,7 +42,7 @@ __all__ = [
 ]
 
 
-def _read_text(sample: dict[str, Any]) -> str:
+def read_text(sample: dict[str, Any]) -> str:
     return sample["text"]
 
 
@@ -53,7 +53,7 @@ class TextProcessor(SampleProcessor):
         self,
         *,
         context: DatasetBuildContext,
-        text_fn: Callable[[dict[str, Any]], str] = _read_text,
+        text_fn: Callable[[dict[str, Any]], str] = read_text,
     ) -> None:
         self._tokenizer = context.tokenizer
         self._text_fn = text_fn
@@ -74,7 +74,7 @@ class TextProcessor(SampleProcessor):
         )
 
 
-def _require_token_prefix(full_tokens: list[int], prompt_tokens: list[int]) -> None:
+def require_token_prefix(full_tokens: list[int], prompt_tokens: list[int]) -> None:
     """Raise if prompt_tokens is not an exact prefix of full_tokens.
 
     ChatProcessor locates the prompt/response boundary by re-rendering the
@@ -221,7 +221,7 @@ class ChatProcessor(SampleProcessor):
             messages[:1], add_generation_prompt=True
         )
         prompt_tokens = self._tokenizer.encode(prompt_text, add_bos=True, add_eos=False)
-        _require_token_prefix(full_tokens, prompt_tokens)
+        require_token_prefix(full_tokens, prompt_tokens)
 
         input_ids, labels = self._shift_to_next_token(full_tokens)
         labels[: max(len(prompt_tokens) - 1, 0)] = IGNORE_INDEX
@@ -277,7 +277,7 @@ class ChatProcessor(SampleProcessor):
         return self._tokenize_sample(sample)
 
 
-def _local_jsonl_recipe(
+def local_jsonl_recipe(
     *, path: str, processor: type[SampleProcessor]
 ) -> SingleDataset:
     """One indexed JSONL file, read through ``processor``.
@@ -299,7 +299,7 @@ def make_local_jsonl(*, path: str) -> SingleDataset:
     A function rather than an entry in :data:`DATASETS`: the path is a runtime
     argument, so it cannot live in a module-level dict without a global.
     """
-    return _local_jsonl_recipe(path=path, processor=TextProcessor)
+    return local_jsonl_recipe(path=path, processor=TextProcessor)
 
 
 def make_local_jsonl_sft(
@@ -328,7 +328,7 @@ def make_local_jsonl_sft(
 
             super().__init__(context=context, messages_fn=messages)
 
-    return _local_jsonl_recipe(path=path, processor=_LocalJsonlChatProcessor)
+    return local_jsonl_recipe(path=path, processor=_LocalJsonlChatProcessor)
 
 
 def make_local_jsonl_sft_multiturn(
@@ -367,7 +367,7 @@ def make_local_jsonl_sft_multiturn(
                 context=context, messages_fn=messages, renderer=renderer
             )
 
-    return _local_jsonl_recipe(
+    return local_jsonl_recipe(
         path=path, processor=_LocalJsonlMultiTurnChatProcessor
     )
 

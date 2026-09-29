@@ -139,7 +139,7 @@ def require_torch_checkpointing():
     except ImportError as error:
         raise ImportError(f"{_INSTALL_HINT} ({error})") from error
 
-    return _Backend(
+    return BackendConfig(
         TCPStoreBarrierConfig=TCPStoreBarrierConfig,
         LayoutInfo=LayoutInfo,
         SafetensorsSerialization=SafetensorsSerialization,
@@ -162,7 +162,7 @@ def require_torch_checkpointing():
 
 
 @dataclass(frozen=True, slots=True)
-class _Backend:
+class BackendConfig:
     """The lazily imported ``torch_checkpointing`` names, bundled for transit.
 
     A frozen dataclass rather than a dict so every attribute access is a static
@@ -189,7 +189,7 @@ class _Backend:
     LocalFileSystemStorageConfig: Any
 
 
-class _BackendCheckpointStorage:
+class BackendCheckpointStorage:
     """``CheckpointStorage`` backed by a ``torch_checkpointing`` ``Storage``.
 
     Path probes go through the same ``Storage`` the backend saves and loads
@@ -218,7 +218,7 @@ class _BackendCheckpointStorage:
         self._storage.rmdir(Path(path))
 
 
-def _init_subprocess_logging(
+def init_subprocess_logging(
     init_fn: Callable[..., None] | None,
     init_args: tuple[Any, ...],
 ) -> None:
@@ -237,7 +237,7 @@ def _init_subprocess_logging(
         backend_logger.setLevel(logging.INFO)
 
 
-def _item_specs(backend: _Backend) -> dict[str, Any]:
+def item_specs(backend: BackendConfig) -> dict[str, Any]:
     resharder = backend.DefaultResharder()
     return {
         MODEL: backend.ItemSpec(
@@ -253,7 +253,7 @@ def _item_specs(backend: _Backend) -> dict[str, Any]:
     }
 
 
-def _writer_config(backend: _Backend, *, use_barrier: bool):
+def writer_config(backend: BackendConfig, *, use_barrier: bool):
     return backend.CheckpointWriterConfig(
         checkpoint_write_barrier_timeout_sec=_DEFAULT_BARRIER_TIMEOUT_SEC,
         barrier_config=(
@@ -269,23 +269,23 @@ def _writer_config(backend: _Backend, *, use_barrier: bool):
     )
 
 
-def async_save_config(backend: _Backend):
+def async_save_config(backend: BackendConfig):
     return backend.AsyncCheckpointSaverConfig(
-        writer_config=_writer_config(backend, use_barrier=True),
+        writer_config=writer_config(backend, use_barrier=True),
         staging_config=backend.CheckpointStagerConfig(use_pinned_memory=True),
         wait_timeout_secs=_DEFAULT_BARRIER_TIMEOUT_SEC,
     )
 
 
-def _sync_save_config(backend: _Backend, *, use_barrier: bool = True):
+def sync_save_config(backend: BackendConfig, *, use_barrier: bool = True):
     return backend.SyncCheckpointSaverConfig(
-        writer_config=_writer_config(backend, use_barrier=use_barrier),
+        writer_config=writer_config(backend, use_barrier=use_barrier),
         wait_timeout_secs=_DEFAULT_BARRIER_TIMEOUT_SEC,
     )
 
 
-def _default_backend_config(
-    backend: _Backend,
+def default_backend_config(
+    backend: BackendConfig,
     save_config,
     *,
     storage_config=None,
@@ -299,15 +299,15 @@ def _default_backend_config(
     torchtitan routes the async-save subprocess through
     ``structured_logger``'s subprocess-init hook so the subprocess can log. There
     is no structured logger here, so a caller-supplied ``subprocess_init_fn`` is
-    passed through unchanged, wrapped only in ``_init_subprocess_logging`` to
+    passed through unchanged, wrapped only in ``init_subprocess_logging`` to
     re-level the backend logger -- which is what makes the subprocess emit
     anything at all.
     """
     if isinstance(save_config, backend.AsyncCheckpointSaverConfig):
         subprocess_init_args = (subprocess_init_fn, subprocess_init_args)
-        subprocess_init_fn = _init_subprocess_logging
+        subprocess_init_fn = init_subprocess_logging
     return backend.BackendCheckpointManager.Config(
-        items=_item_specs(backend) if items is None else items,
+        items=item_specs(backend) if items is None else items,
         default=backend.ItemSpec(requires_copy=False),
         save=save_config,
         storage_config=storage_config,
@@ -396,11 +396,11 @@ class TorchCheckpointingManager(BaseCheckpointManager):
         self.purge_exempt = config.purge_exempt
 
         save_config = (
-            _sync_save_config(backend, use_barrier=False)
+            sync_save_config(backend, use_barrier=False)
             if self.load_only
             else async_save_config(backend)
         )
-        manager_config = _default_backend_config(
+        manager_config = default_backend_config(
             backend,
             save_config,
             storage_config=storage_config,
@@ -410,7 +410,7 @@ class TorchCheckpointingManager(BaseCheckpointManager):
             self._manager_config.storage_config
             or backend.LocalFileSystemStorageConfig()
         )
-        self._storage = _BackendCheckpointStorage(storage_config.create_storage())
+        self._storage = BackendCheckpointStorage(storage_config.create_storage())
         self._prewarmed = False
 
         self.sd_adapter = sd_adapter
@@ -625,7 +625,7 @@ class TorchCheckpointingManager(BaseCheckpointManager):
             # pre-finalize callback consolidates them up into checkpoint_id, so
             # the published checkpoint is HF-layout rather than sharded.
             input_checkpoint_id = filesystem.join(checkpoint_id, "sharded")
-            item_specs = _item_specs(self._backend)
+            item_specs = item_specs(self._backend)
             model_spec = item_specs[MODEL]
             item_specs[MODEL] = self._backend.ItemSpec(
                 requires_copy=model_spec.requires_copy,
@@ -660,9 +660,9 @@ class TorchCheckpointingManager(BaseCheckpointManager):
                     storage_config=hf_storage_config,
                 )
 
-        manager_config = _default_backend_config(
+        manager_config = default_backend_config(
             self._backend,
-            _sync_save_config(self._backend),
+            sync_save_config(self._backend),
             storage_config=storage_config,
             items=item_specs,
             pre_finalize_callback=pre_finalize_callback,

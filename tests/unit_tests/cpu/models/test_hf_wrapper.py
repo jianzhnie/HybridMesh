@@ -526,7 +526,7 @@ def _qwen3_config():
 def test_a_dsa_model_is_handed_a_dense_mask() -> None:
     """DSA consumes its mask as a tensor, so it must not get a BlockMask.
 
-    ``index_topk`` is the DSA-specific config attr (torchtitan's ``_uses_dsa``);
+    ``index_topk`` is the DSA-specific config attr (torchtitan's ``uses_dsa``);
     the modeling code then calls ``.dim()`` on the mask and adds it to the
     scores, which a BlockMask cannot answer. The dense mask itself is pinned in
     ``test_masks.py``, against the same modifiers the flex path uses.

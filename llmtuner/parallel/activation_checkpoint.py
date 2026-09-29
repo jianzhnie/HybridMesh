@@ -10,11 +10,11 @@ Three of its four policies are ported:
 
 * ``"selective"`` (upstream ``SelectiveAC``) is per-op: a ``context_fn`` policy
   is asked about every op inside the layer and answers ``MUST_SAVE`` for the
-  ones in the save set (``_get_default_save_ops`` -- matmuls, SDPA and flex
+  ones in the save set (``get_default_save_ops`` -- matmuls, SDPA and flex
   attention, and the collectives whose outputs are expensive to resend) and
   ``PREFER_RECOMPUTE`` for the rest. Matmuls in the save set are recomputed
   every second time instead of always, which is the memory/compute dial. One
-  op is dropped from upstream's set; ``_get_default_save_ops`` says which and
+  op is dropped from upstream's set; ``get_default_save_ops`` says which and
   why, and it is the one place that behavioural difference lives.
 
 * ``"memory_budget"`` (upstream ``MemoryBudgetAC``) wraps nothing: it sets one
@@ -49,7 +49,7 @@ Not ported, deliberately:
   ``apply_ac`` boundary; unlocking it means adding the ``torch_remat``
   dependency plus a region-declaration channel on HF decoder layers.
 
-Upstream's ``_disable_dynamo_lru_cache`` IS ported, because the case it fixes
+Upstream's ``disable_dynamo_lru_cache`` IS ported, because the case it fixes
 is reachable here: activation checkpointing applies on the ``pp > 1`` path too
 (per stage chunk, upstream's ``ac_config``-per-model-part order). It is the
 only place that touches that process-global knob, it runs only when a mode is
@@ -90,7 +90,7 @@ __all__ = ["VALID_AC_MODES", "apply_ac"]
 VALID_AC_MODES = ("none", "full", "selective", "memory_budget")
 
 
-def _get_default_save_ops() -> set:
+def get_default_save_ops() -> set:
     """The ops whose activations ``"selective"`` saves rather than recomputes.
 
     Two sources, ported from upstream: torch's own list of compute-intensive
@@ -152,7 +152,7 @@ def _get_default_save_ops() -> set:
         (torch.ops, "hybridep.combine.default"),
     ]
 
-    def _resolve(op_specs: list) -> set:
+    def resolve(op_specs: list) -> set:
         # Upstream builds a dict here and then only ever uses its keys; a set
         # is the same value with the unused mapping dropped.
         ops = set()
@@ -170,8 +170,8 @@ def _get_default_save_ops() -> set:
         return ops
 
     save_ops = {op.default for op in get_default_op_list().compute_intensive_ops}
-    save_ops.update(_resolve(compute_ops))
-    save_ops.update(_resolve(comm_ops))
+    save_ops.update(resolve(compute_ops))
+    save_ops.update(resolve(comm_ops))
     return save_ops
 
 
@@ -253,11 +253,11 @@ def selective_policy(
     return wrapped_policy
 
 
-def _wrap_selective(
+def wrap_selective(
     module: nn.Module, cfg: SelectiveACConfig, *, base_fqn: str | None = None
 ) -> nn.Module:
     """Wrap one block with the selective policy (upstream's ``_wrap_block``)."""
-    save_ops = _get_default_save_ops()
+    save_ops = get_default_save_ops()
     mm_shapes = mm_recompute_shapes(
         module, base_fqn, cfg.force_recompute_mm_shapes_by_fqns
     )
@@ -272,7 +272,7 @@ def _wrap_selective(
     )
 
 
-def _disable_dynamo_lru_cache() -> None:
+def disable_dynamo_lru_cache() -> None:
     """Select dynamo graphs in insertion order (upstream's SAC+PP workaround).
 
     With activation checkpointing and pipeline parallelism together, a second
@@ -300,7 +300,7 @@ def _disable_dynamo_lru_cache() -> None:
     torch._C._dynamo.eval_frame._set_lru_cache(False)
 
 
-def _apply_memory_budget(cfg: MemoryBudgetACConfig) -> None:
+def apply_memory_budget(cfg: MemoryBudgetACConfig) -> None:
     """Set the one global ``"memory_budget"`` consists of (upstream's
     ``MemoryBudgetAC.apply``).
 
@@ -318,7 +318,7 @@ def _apply_memory_budget(cfg: MemoryBudgetACConfig) -> None:
             f"torch ({torch.__version__}) does not have; the budget would be "
             "a global nothing reads."
         )
-    _disable_dynamo_lru_cache()
+    disable_dynamo_lru_cache()
     torch._functorch.config.activation_memory_budget = cfg.memory_budget
     logger.info("Selected %s memory budget option", cfg.memory_budget)
 
@@ -394,7 +394,7 @@ def apply_ac(
                 "consumed by the compile partitioner, so without "
                 "torch.compile it would silently do nothing."
             )
-        _apply_memory_budget(memory_budget)
+        apply_memory_budget(memory_budget)
         return model
 
     layers = getattr(model, "layers", None)
@@ -405,13 +405,13 @@ def apply_ac(
         )
 
     # Upstream sets this before wrapping, for every policy; so does the
-    # memory_budget branch above (inside ``_apply_memory_budget``). Placed
+    # memory_budget branch above (inside ``apply_memory_budget``). Placed
     # after the checks so a rejected config never mutates a global.
-    _disable_dynamo_lru_cache()
+    disable_dynamo_lru_cache()
 
     for layer_id, transformer_block in layers.named_children():
         if mode == "selective":
-            wrapped = _wrap_selective(
+            wrapped = wrap_selective(
                 transformer_block, selective, base_fqn=f"layers.{layer_id}"
             )
         else:

@@ -51,7 +51,7 @@ PARSER_GROUPS: tuple[type, ...] = (
 
 # The groups that need a view, and which of their fields the CLI cannot carry.
 # A new non-scalar field either joins this table or becomes a flag that rejects
-# every value it is given; ``_cli_view`` fails loudly if a name here goes stale.
+# every value it is given; ``cli_view`` fails loudly if a name here goes stale.
 PROGRAMMATIC_ONLY: dict[type, frozenset[str]] = {
     ModelConfig: frozenset({"arch_overrides"}),
     OptimizerConfig: frozenset({"param_groups"}),
@@ -59,7 +59,7 @@ PROGRAMMATIC_ONLY: dict[type, frozenset[str]] = {
 }
 
 
-def _cli_view(cls: type) -> type:
+def cli_view(cls: type) -> type:
     """``cls`` with its programmatic-only fields hidden from the parser."""
     hidden = PROGRAMMATIC_ONLY.get(cls)
     if not hidden:
@@ -91,4 +91,4 @@ def cli_groups(groups: tuple[type, ...]) -> tuple[type, ...]:
     Order is the parser's contract -- ``parse_args_into_dataclasses`` returns
     one instance per class in this order -- so this preserves it.
     """
-    return tuple(_cli_view(cls) for cls in groups)
+    return tuple(cli_view(cls) for cls in groups)

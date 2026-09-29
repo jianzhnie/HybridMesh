@@ -339,7 +339,7 @@ compile 关闭时 fail-fast；torch 无该 knob（本机 2.2.2 即如此）时 l
 依赖而非删减：`RegionAC` 需要 `torch_remat`（llmtuner 不依赖，且它的"模型声明
 region"建立在 llmtuner 没有的 `Module.configure_remat_regions` 协议上）——配置
 `mode='region'` 在 config 与 `apply_ac` 两处都是显式 `NotImplementedError`，解锁
-条件写在报错与文件 docstring 里。原先同列的 `_disable_dynamo_lru_cache`（SAC+PP 的
+条件写在报错与文件 docstring 里。原先同列的 `disable_dynamo_lru_cache`（SAC+PP 的
 重编译 workaround）已于 2026-09-27 随 pp×AC 对齐一并移植，见下方六次增量。
 
 **已从 D 移除**：`tools/validate.py`——上一版既写了它、又写"上游也没有这个路径，已从
@@ -588,11 +588,11 @@ llmtuner 侧是 `datasets/multimodal/image.py`），本表的 llmtuner 列是唯
      `parallelize_hf_transformers` 入口对 `pp > 1` 直接拒绝 AC
      （`matrix.pp_activation_checkpoint`，文案自述"尚未接线"），等于拒绝上游的默认
      组合。现在 `stages.py` 的 `ac` 行 `on_pp=True`，PP 的 per-chunk runner 表加上
-     `ac`，两条路径共用同一个 `_apply_ac` 闭包（AC 参数不可能在两边漂移）；
+     `ac`，两条路径共用同一个 `apply_ac` 闭包（AC 参数不可能在两边漂移）；
      `matrix.pp_activation_checkpoint` 与其表行一并删除。逐 chunk 应用是安全的：
      `split_model_into_stages` 保留 `layers` 容器（层号沿用原索引），`apply_ac`
      折的正是本 chunk 持有的那些层，与上游 `model.get_submodule("layers")` 同构。
-  2. **`_disable_dynamo_lru_cache` 移植**（上一步解锁的前置条件）。上游在每个
+  2. **`disable_dynamo_lru_cache` 移植**（上一步解锁的前置条件）。上游在每个
      policy 的 `apply()` 开头调用它，修的是 AC+PP+Flex 下"第二个 microbatch
      以动态 shape 重编译 → 同一区域存在两张合法图 → dynamo 默认 latest-wins
      可能选到期望多一个 symint 的那张，而 SAC 缓存的 inductor-HOP 输出没有它"
@@ -676,8 +676,9 @@ llmtuner 侧是 `datasets/multimodal/image.py`），本表的 llmtuner 列是唯
      `iter_fsdp_modules`（`fully_shard/apply.py`）、`resolve_top_k` /
      `resolve_score_func`（`expert_parallel/convert.py`），并给 `fully_shard/fsdp.py` 与
      `expert_parallel/probe.py` 补 `__all__` 明确公共面（fsdp.py 的表面 = 上游 `__all__`
-     减去 llmtuner 有意不带的两个入口）。只被单测引用的 `_get_default_save_ops` /
-     `_yarn_inv_freq` 保持私有：它们钉的是内部实现，不是对外契约。
+     减去 llmtuner 有意不带的两个入口）。只被单测引用的 `get_default_save_ops` /
+     `yarn_inv_freq`（原 `_get_default_save_ops`/`_yarn_inv_freq`）于二十次增量改为公开：
+     本仓规则是模块级 helper 默认公开，`_` 只留给框架协议名与同名校验核。
   3. docstring/注释校正：删掉 `apply_fsdp_to_decoder` 里「上游 `dp_mesh_dims` 入口从未接线」
      这句含混说法，改为写明 mesh 表示差异的成因（上游参数是 DTensor，llmtuner 不是）；MoE
      分支的 NOTE 补一句上游的 stacked-Linear 覆盖与 llmtuner 无需覆盖的理由；`Shard(1)`
@@ -713,7 +714,7 @@ llmtuner 侧是 `datasets/multimodal/image.py`），本表的 llmtuner 列是唯
   （`config/root.py::__post_init__`），运行期交给 torch 的 helper。后者更早、更强（trainer
   路径的 T 恒为 `max_seq_len`），但没有覆盖「调用方传入与 `max_seq_len` 不同的 T」这种绕过
   配置的用法——登记为已知差异，本轮不补冗余运行期检查（本机 torch 2.2 无 CP helper，该分支
-  无法验证，且会与 `_require_torch_cp` 的调用顺序纠缠）。
+  无法验证，且会与 `require_torch_cp` 的调用顺序纠缠）。
   本轮只做复核与登记、无代码改动（同日的命名/私有面调整为八次增量的一部分）：
   `cp_kernel.py` ↔ 上游 `models/common/cp_attention.py` 的逐项对照、
   `accelerator/dist_utils.py` ↔ 上游 `distributed/utils.py` 仍待走。
@@ -762,7 +763,7 @@ llmtuner 侧是 `datasets/multimodal/image.py`），本表的 llmtuner 列是唯
   (a) **checkpointer（`components/checkpointer/`）逐文件对照，语义已对齐，改动只一处死代码。**
   对照方式：AST 归一化（剥 docstring/注释后 `ast.unparse`）逐文件 diff，再人工核对语义。
   `base.py`：策略方法（`_parse_step`/`_find_load_step`/`_purge_stale_checkpoints`/
-  `_states_to_load`/`_create_checkpoint_id`/`ModelWrapper`/`purge_thread`/`_shares_storage`）
+  `_states_to_load`/`_create_checkpoint_id`/`ModelWrapper`/`purge_thread`/`shares_storage`（当时名 `_shares_storage`））
   与上游逐行同构；`dcp.py`：`_save`/`_load_checkpoint`/`dcp_save`/`_save_last_step`/
   `_flattened_model_states_sd` 与上游逐行同构（含 async 三段模式、`exclude_from_loading`
   与 staged 目录保留）；`torch_checkpointing.py`：策略与 `_save_last_step` 的 HF 导出
@@ -848,7 +849,7 @@ llmtuner 侧是 `datasets/multimodal/image.py`），本表的 llmtuner 列是唯
   `utils.py`（ratio 0.996）：只剩 `isinstance(x, A | B)` 与 `zip(..., strict=False)` 之类
   现代化改写，无能力差异。`lr_scheduler.py`：WSD 公式逐行核对一致（同样的 0-based `+1`
   修正、`stable_steps = total + 1 - warmup - decay`、三种 decay 形状与 `min_lr_factor` 缩放）；
-  差异为 `_wsd_factor` 提到模块级 + `build_lr_scheduler` 自由函数取代上游嵌套闭包与
+  差异为 `wsd_factor`（当时名 `_wsd_factor`）提到模块级 + `build_lr_scheduler` 自由函数取代上游嵌套闭包与
   `Config.build`，以及已登记的 `decay_ratio` 默认 0.0（上游 None）、`total_steps < 训练步数`
   拒绝、`load_state_dict({})` 空字典 no-op、`LRSchedulersContainer(total_steps=...)` 断言 seam。
   `ema.py` 属 2026-09-24 批 3a 已移植项，本轮无改动。
@@ -882,7 +883,7 @@ llmtuner 侧是 `datasets/multimodal/image.py`），本表的 llmtuner 列是唯
   逐行核对的是最要紧的那段：vocab-parallel `forward` 的三个 TP all-reduce（max → sumexp →
   gather）、shard 边界公式（`chunk_size = ceil(V/tp)` + 双侧 `min(V, ...)`）、`out_of_range`
   掩码、`backward` 的融合导数（`grad_update = out_of_range - 1` 与
-  `(grad_input + exp(log_probs)) * grad_output`）、`_vocab_parallel_entropy` 的 `isneginf`
+  `(grad_input + exp(log_probs)) * grad_output`）、`vocab_parallel_entropy`（当时名 `_vocab_parallel_entropy`）的 `isneginf`
   守卫与 stack 后单次 all-reduce、`compute_logprobs` 的两条分支、`mse_loss` 的
   `float().detach()` 与 sum 归约——与上游逐行一致（含 `reduction="none"` 的 `[T]` 语义）。
   **新登记差异**：(1) 上游 `cross_entropy_loss` 暴露 `reduction: sum|none`，llmtuner 固定
@@ -908,7 +909,7 @@ llmtuner 侧是 `datasets/multimodal/image.py`），本表的 llmtuner 列是唯
   grain 图本身逐字相同——`length_struct`/`padding_struct`（`labels` 填 `IGNORE_INDEX`、`padding_mask`
   填 `True`）、`meta_features=("labels","positions")`、`seed`/`shuffle_bins`/`num_packing_bins`/
   `max_sequences_per_bin`、`DocumentAwareConcatThenSplitIterDataset/Iterator`（2026-09-29 去私有化，原名带 `_` 前缀；含 remainder
-  `get_state/set_state`）、`_next_document_chunk_end`/`packing_output_is_full`（后者 2026-09-29 去私有化）全部无差异。
+  `get_state/set_state`）、`next_document_chunk_end`/`packing_output_is_full`（两者均 2026-09-29 去私有化，原名带 `_`）全部无差异。
   (b) `collators.py`（4/21）：`TextCollator` 的载荷逐字相同（zeros + `torch.cat` + 超长 raise +
   `positions[num_tokens:].remainder_(max_context_length)` + `num_valid_tokens=(labels !=
   IGNORE_INDEX).sum()`）。差异只有类型面：上游 `TrainingMicrobatch`/`TokenizedTrainingMicrobatch`
@@ -924,7 +925,7 @@ llmtuner 侧是 `datasets/multimodal/image.py`），本表的 llmtuner 列是唯
   （`shuffle=False, repeat=False, dp_rank=0, dp_world_size=1`）、mix 的 `seed + index` 派生、
   `MapDataset.mix`/`IterDataset.mix` 分派全部一致；`sources.py` 的索引 JSONL 解析、
   `split_dataset_by_node`、streaming 不支持精确 resume 的拒绝、`load_dataset` 的一等字段与
-  kwargs 冲突校验（提成 `_reject_duplicated_hf_fields`）全部一致。
+  kwargs 冲突校验（提成 `reject_duplicated_hf_fields`，当时名 `_reject_duplicated_hf_fields`）全部一致。
   (d) `types.py`（3/27）与 `loader.py`（3/23）：`DatasetBuildContext`/`DatasetIterationPolicy`
   新增 `__post_init__` 校验（已登记）；`TrainingMicrobatch` 类层次删除符合 microbatch 分叉；
   llmtuner 另加 `Batch` dataclass（`input_ids`/`labels`，合成路径用；放这里是为了避免
@@ -960,9 +961,9 @@ llmtuner 侧是 `datasets/multimodal/image.py`），本表的 llmtuner 列是唯
   提成 `dataset.py::as_iter_dataset(graph, context=...)`；`loader.py` 那处原用局部 `read_options`，
   与它构造 context 时传入的是同一个对象，故语义一致。
   (3) `packing.py` 的 4 键 `length_struct` 字面量出现两次（concat-then-split 与 first-fit），
-  提成模块内 `_row_lengths(context)`；`text/text.py` 的三个 `make_local_jsonl*` 工厂各自重复
+  提成模块内 `row_lengths(context)`（当时名 `_row_lengths`）；`text/text.py` 的三个 `make_local_jsonl*` 工厂各自重复
   `SingleDataset(source=IndexedJsonlSource(patterns=(path,)), ..., post_filters=...)`，提成
-  `_local_jsonl_recipe(path=, processor=)`。全部是同值替换，无行为变化。
+  `local_jsonl_recipe(path=, processor=)`（当时名 `_local_jsonl_recipe`）。全部是同值替换，无行为变化。
   (b) **一次"差一点改错"的记录（有价值，留档）**：对照上游时发现 `process_cc12_wd_sample`
   缺了上游的 `if image is None: texts=[text]` 兜底，看起来是"缺图行会崩"的 bug——实测确认
   `insert_vision_placeholders([None, "text"], [])` 会 `TypeError: sequence item 0: expected str
@@ -971,7 +972,7 @@ llmtuner 侧是 `datasets/multimodal/image.py`），本表的 llmtuner 列是唯
   `test_process_cc12_wd_sample_raises_when_the_image_field_is_absent` 把"缺图 = 样本畸形 → 响亮失败"
   钉成了契约（上游则是静默降级为纯文本行）。故**不改行为**，只在 `process_cc12_wd_sample` 处
   留注释说明该分叉并指向用例；差异登记于 symbol guide §6。
-  (c) 有意不动的重复：`process_cc12_wd_sample`/`_process_obelics_sample` 那份九参数显式转发表
+  (c) 有意不动的重复：`process_cc12_wd_sample`/`process_obelics_sample`（当时名 `_process_obelics_sample`）那份九参数显式转发表
   与上游逐字相同（`_process_mm_sample` 的上游调用方也这么写），属"上游形状"，不为了 DRY 而偏离。
   (d) 验证：本机**无法运行** `tests/unit_tests/cpu/datasets/`——pyproject 钉 `grain==0.2.18`，
   而该版本在 PyPI 上只有 macOS **arm64** wheel（`macosx_11_0_arm64`），没有 x86_64，本机是 Intel
@@ -1006,13 +1007,13 @@ llmtuner 侧是 `datasets/multimodal/image.py`），本表的 llmtuner 列是唯
   `SqrtSoftplus` 由 router 的字符串打点替代，`SiTUGLU` 只在 Kimi 面）。
   (3) `token_dispatcher.py` 索引数学逐行核对：`_local_reorder`/`_permute`/`_unpermute`/`combine`
   与上游逐字一致（含 rank-major→expert-major 的 `input_starts[seg_ids] + arange −
-  output_starts[seg_ids]`），`all_to_all_single`+`_materialize` 对应上游编译分支的
+  output_starts[seg_ids]`），`all_to_all_single`+`materialize` 对应上游编译分支的
   `all_to_all_single`/`wait_tensor`。**同轮修正一处文档错误**：`BaseEPTokenDispatcher.num_experts`
   被写成"每 rank 专家数"，实为全局数。
   (b) **上游独有三文件定性**：`param_init.py`（已删死代码）、`lora.py`（裁剪面：LoRA 由 HF/peft 提供）、
   `config_utils.py`（**新增登记**：上游 config 工厂层，llmtuner 无 config tree，其判定分别落在
   `expert_parallel/probe.py` / `parallel/matrix.py` / `models/hf/factory.py` /
-  `models/hf/model.py` 的 `_flex_supported`，逐函数映射见 symbol guide §10）。
+  `models/hf/model.py` 的 `flex_supported`，逐函数映射见 symbol guide §10）。
   同轮定性上游实验目录里三个此前未登记的文件：`module_conversion.py`（把 HF 模块 `__class__`
   换成 `Module` 协议子类，好让 Module registry 的 `parallelize()` 生效）—— llmtuner 无
   `Module` 协议层，故无对应物，同类 `__class__` swap 技术用于
@@ -1109,9 +1110,9 @@ llmtuner 侧是 `datasets/multimodal/image.py`），本表的 llmtuner 列是唯
 - 2026-09-28 十九次增量（D 表该批的 DSA 稠密 mask 落地 + 三项可读性/健壮性改进）：
   (a) **DSA 稠密 additive mask（移植）**：`models/common/attention/masks.py::build_dense_attention_mask`
   （纯张量：`[1,1,T,T]`，0 允许 / -inf 屏蔽，`block_causal` 与 flex 的 causal+same-document 同义），
-  `models/hf/model.py::get_attention_masks` 对 `_uses_dsa(config)`（`index_topk`）走该分支——上游
+  `models/hf/model.py::get_attention_masks` 对 `uses_dsa(config)`（`index_topk`）走该分支——上游
   `_build_dense_attention_mask` 的逐行等价物；`__init__` 里原来的构造期 `NotImplementedError` 换成
-  `self._uses_dsa = _uses_dsa(config)`。flex 路径不变：HF 的 flex 集成按 mask 类型分支，稠密张量当
+  `self.uses_dsa = uses_dsa(config)`。flex 路径不变：HF 的 flex 集成按 mask 类型分支，稠密张量当
   `score_mask`（上游注释同义）。**同轮显式拒绝 CP × DSA**（`_get_cp_attention_masks`：
   CP 的 mask 通道只接受 BlockMask，稠密张量要手工 Q 切分 + 过 load balancer，未验证不给近似）。
   验证：新用例把稠密 mask 与 `get_causal_mask_mod` / `get_document_mask_mod` 在同一索引网格上比对
@@ -1119,7 +1120,7 @@ llmtuner 侧是 `datasets/multimodal/image.py`），本表的 llmtuner 列是唯
   (b) 附带改进（同轮，均为可读性/可验证性）：① `models/common/__init__.py` 改成**惰性索引**
   （PEP 562 + `_EXPORTS` 表 + TYPE_CHECKING 静态视图），兑现它自己文档里"命名一个节点不得导入它"
   的承诺——此前 `import llmtuner.models.common.rope` 会连带 MoE 栈与 `DTensor`；② `attention/masks.py`
-  的 flex import 惰性化（`_flex_ops()` 缓存），于是该模块在无 flex 的 torch 上可导入，DSA 稠密 mask
+  的 flex import 惰性化（`flex_ops()` 缓存），于是该模块在无 flex 的 torch 上可导入，DSA 稠密 mask
   也因此能在本机跑用例；③ `capabilities.is_compiling()` 收掉 `torch.compiler.is_compiling` 在
   torch 2.2 缺失的问题（rope 的 bounds check 调用点），避免纯 torch 模块在新老版本上二选一。
   **测试口径变化**：`test_masks.py` / `test_rope.py` / `test_multimodal.py` 三处 `require_env('spmd_types')`
@@ -1137,40 +1138,43 @@ llmtuner 侧是 `datasets/multimodal/image.py`），本表的 llmtuner 列是唯
   撤下的原因值得记下：它是本批唯一需要新增配置面与类型面的东西，而那两项的收益（单机模拟多卡）在
   本仓的验证边界里仍属"未覆盖"，不如保持接口不变。
 
-- 2026-09-29 二十次增量（`_` 私有面的全仓审计与去私有化）：
-  (a) **审计口径**：脚本枚举 `llmtuner/` 全部模块级 `def`/`class`（排除 dunder），逐个问
-  ①是否被其它模块 import/调用（那就不是"模块私有"）、②是否与上游同名（是则保留上游拼写，
-  见 §10 映射）、③是否 PyTorch/HF 协议要求的方法名。审计前 102 个前导 `_` 符号（含
-  `scatter_add.py` 里那个匿名 `def _`）。
-  (b) **去私有化 6 个（真跨模块使用）**：`datasets/packing/conversions.py` 的
-  `_packing_output_is_full` / `_text_sequence_to_packing_input` / `_packing_output_to_text_sequence`
-  → 去前缀（`packing/build.py` 导入它们——上游把这些放在单一 `packing.py` 里，所以上游的
-  `_` 是真的私有；llmtuner 拆包后就成了假私有），`datasets/packing/iterators.py` 的
-  `_DocumentAwareConcatThenSplitIterDataset` / `_SplitTextSequenceDocuments` → 去前缀（同上；
-  它们的 iterator 伙伴 `_DocumentAwareConcatThenSplitIterator` 只在本模块用，保留 `_`），
-  `parallel/pipeline_parallel/apply.py` 的 `_scalar_loss_fn` → `scalar_loss_fn`
-  （`trainer/builder.py`、`trainer/pp_steps.py` 与两个 PP 集成测试都在调它）。
-  另把 `models/common/scatter_add.py` 中 `@register_fake` 的匿名 `def _` 命名为
-  `deterministic_scatter_add_fake`（PyTorch 的注册钩子不需要匿名名，堆栈里也能读）。
-  (c) **方法层同轮一并处理**：109 个私有方法里 13 个被"别的模块"调用（脚本按
-  `obj._name` 调用与跨模块 `def _name` 覆盖两种情形统计）。其中 5 个与上游同名
-  （`checkpointer/base.py` 的 `_should_save`/`_purge_stale_checkpoints`/`_create_checkpoint_id`
-  是 base 与 backend 之间的 template-method 契约，`optimizer.py` 的 `_post_init`/`_validate_params`
-  被 `ema.py` 的子类复用），按"上游拼写优先"保留；另 **6 个 llmtuner 自有的去私有化**：
-  `Trainer._seed_everything`→`seed_everything`、`._example_model`→`example_model`、
-  `._loss_vocab_kwargs`→`loss_vocab_kwargs`、`._loss_sum`→`loss_sum`、
-  `._param_context`→`param_context`（trainer 拆成 trainer/builder/validate/pp_steps/batch 后
-  同包互调，单测也直接调它们）、`FeedForward._split_gate_up`→`split_gate_up`
-  （`async_linear.DistGEMMFeedForward` 子类与单测调用）。集成测试里各自定义的*本地参考实现*
-  `_loss_sum` 保持原名（它们是测试内的私有模型，不是被审对象；脚本首轮误改已回退）。
-  (d) **保留面及其理由（写进 symbol guide 第五条横切约定）**：模块级 `_` = 本模块实现细节，
-  跨模块使用的必须公开；三类例外保留——协议要求的方法名、上游同名的私有 helper（模块级 34 个、
-  方法级 5 个）、基类给子类/同包协作者的 protected 方法。类内 `self._x` 属性属于封装，不在本条
-  范围。审计后跨模块却仍带 `_` 的只剩上游同名的那批（脚本复查：模块级仅 2 处字符串/同名误报）。
-  (e) 验证：审计脚本复查「跨模块使用的模块级私有符号」= 0（仅剩两处误报：capabilities 条目里
-  对 `_disable_dynamo_lru_cache` 的字符串引用、另一个同名 `_resolve`）；`ruff check`（F821
-  覆盖改名后的引用）与 `tests/unit_tests` 全量通过（248 passed / 56 skipped / 9 failed，失败集
-  不变）。
+- 2026-09-29 二十次增量（`_` 私有面：全仓审计 + 两批去私有化）：
+  (a) **新规则**（写进 symbol guide 第五条横切约定）：模块级 helper / 数据类**默认公开**；
+  前导 `_` 只保留三种——① 框架协议要求的名字（`scatter_add.py` 的 `_backward`/`_setup_context`
+  是 `torch.library.custom_op` + autograd 的契约）；② 与"公开包装"配对的低层核心
+  （`accelerator/dist.py` 的 `_broadcast_object_list`/`_all_gather_object`/`_gather_object`：
+  同名的公开版返回 list，私有版收 out-list，去前缀会重名）；③ 类内 protected 方法
+  （子类/同包协作者的 template-method 钩子）。类内 `self._x` 属性属于封装，不在本条范围。
+  (b) **模块级：95 → 5 个前导 `_`**。审计脚本枚举全部模块级 `def`/`class` 后，按"跨模块使用
+  → 必须公开"先处理了 6 个（`packing/{conversions,iterators}` 的 5 个 + `parallel/
+  pipeline_parallel/apply.py::scalar_loss_fn`，见下一条十六次/二十次记录），随后按新规则把
+  其余 90 个一并公开（含 32 个上游同名 helper：`_yarn_inv_freq`→`yarn_inv_freq`、
+  `_maybe_check_max_pos`→`maybe_check_max_pos`、`_RouterGateLinearFunction`→
+  `RouterGateLinearFunction`、`_get_default_save_ops`→`get_default_save_ops`、
+  `_maybe_enable_async_tp`→`maybe_enable_async_tp`、`_get_pipeline_metadata`→
+  `get_pipeline_metadata`、`_EMAParamOptimizer`→`EMAParamOptimizer`、
+  `_BackendCheckpointStorage`→`BackendCheckpointStorage` 等），并顺带把两处"去前缀会读歪"
+  的改成更准确的名字：`hf/flops.py::_MoE`→`MoEGeometry`（避免与模型类的 `MoE` 混淆）、
+  `checkpointer/torch_checkpointing.py::_Backend`→`BackendConfig`（避免与 torch 的
+  `Backend` 枚举混淆）、`components/metrics.py::_Derived`→`DerivedMetrics`。
+  同时 `scatter_add.py` 中 `@register_fake` 的匿名 `def _` 命名为
+  `deterministic_scatter_add_fake`。**上游同名 helper 的拼写分叉是有意的**：symbol guide §10
+  的映射行仍以"llmtuner 公开名 ↔ 上游 `_name`"记录（`docs/` 里历史条目保留旧名，读法见本条）。
+  (c) **方法级：109 → 103 个前导 `_`**。13 个被"别的模块"调用的私有方法里，6 个 llmtuner 自有的
+  公开（`Trainer.seed_everything`/`example_model`/`loss_vocab_kwargs`/`loss_sum`/`param_context`、
+  `FeedForward.split_gate_up`），5 个上游同名 protected 钩子按规则③保留
+  （`checkpointer/base.py` 的 `_should_save`/`_purge_stale_checkpoints`/`_create_checkpoint_id`、
+  `optimizer.py` 的 `_post_init`/`_validate_params`）。
+  (d) **两处踩坑留档**：① 集成测试里各自定义的*本地参考实现* `_loss_sum` 一度被脚本误改
+  （会造成 `loss_sum = loss_sum(...)` 自遮蔽），已回退——测试内的私有模型不在审计范围；
+  ② 批量改名会顺带打中*第三方私有路径*：`from torch.distributed._functional_collectives import ...`
+  被改成 `functional_collectives`（3 个文件 + 1 个测试模块导入失败），已逐条还原为
+  `_functional_collectives`。教训：改名脚本必须排除 `模块.名字` 形式。
+  (e) 验证：脚本复查"跨模块使用却仍带 `_` 的模块级符号" = 0（仅剩 `capabilities.py` 里对
+  `disable_dynamo_lru_cache` 的字符串引用与另一个模块的同名 `resolve` 两处误报）；
+  `ruff check`（F821 覆盖全部改名后引用）、`git diff --check`、`compileall` 通过；
+  垫片环境下 44/49 目标模块可导入（5 个失败全是本机 `grain` 缺 `experimental` 的既有环境问题）；
+  `tests/unit_tests` = 248 passed / 56 skipped / 9 failed（失败集不变）。
 
 - 检查后续漂移：`git -C <torchtitan> log f35966713..HEAD -- torchtitan/`。
 - 2026-09-23 映射修订：上游 `distributed/linear.py` 已删除、内容迁入

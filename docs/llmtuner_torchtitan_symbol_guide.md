@@ -72,7 +72,7 @@ step 1 恢复 optimizer、scheduler、dataloader 和 train state 后完成并保
 | `resolve_model_class` | 上游模型 registry | llmtuner 使用 HF auto mapping，不维护模型注册表 | 通过（适配） |
 | `HFTransformerModel.__init__` | transformers backend wrapper + 各原生 Decoder | 暴露 `tok_embeddings/layers/norm/lm_head/rotary_emb` 五部件；不复制参数注册 | 通过（适配） |
 | GQA 构造校验 | `models/common/attention.py::GQAttention.Config.__post_init__` | llmtuner 在 wrapper 边界校验 head 正数和 `Q heads % KV heads == 0` | 通过；Transformers 5.14 本身会漏掉后一项 |
-| `_uses_dsa` + `attention/masks.build_dense_attention_mask` | 上游 `_uses_dsa` + `HFTransformerModel._build_dense_attention_mask` | **2026-09-28（十九次增量）稠密路径已移植**：`get_attention_masks` 对 `index_topk`（DSA 特征）模型返回 `[1,1,T,T]` 的 0/-inf additive mask（`block_causal` 与 flex modifier 同语义，有等价比对用例），flex 仍跑并把稠密 mask 当 `score_mask`（HF 的 flex 集成按 mask 类型分支）；CP × DSA 显式 `NotImplementedError`（CP 的 mask 通道只切 BlockMask，稠密张量要手工 Q 切分，未验证不给近似） | 通过（适配） |
+| `uses_dsa` + `attention/masks.build_dense_attention_mask` | 上游 `_uses_dsa` + `HFTransformerModel._build_dense_attention_mask` | **2026-09-28（十九次增量）稠密路径已移植**：`get_attention_masks` 对 `index_topk`（DSA 特征）模型返回 `[1,1,T,T]` 的 0/-inf additive mask（`block_causal` 与 flex modifier 同语义，有等价比对用例），flex 仍跑并把稠密 mask 当 `score_mask`（HF 的 flex 集成按 mask 类型分支）；CP × DSA 显式 `NotImplementedError`（CP 的 mask 通道只切 BlockMask，稠密张量要手工 Q 切分，未验证不给近似） | 通过（适配） |
 | `experts_implementation` 旋钮 | 上游 `TitanMoeModelConfig.experts_implementation` + wrapper 应用 | 2026-09-24 起 `ModelConfig.experts_implementation`（默认 `native`）经 config 门面传到 HF config，wrapper 校验"可设置或 raise"（上游同语义），非法值先 raise；EP>1 无意义（swap 整块替换） | 通过 |
 | `named_children` | 上游 `Decoder` 的自然子树 | HF CausalLM 多套一层 `model`，llmtuner 只改遍历视图，不改 state_dict FQN | 通过；FSDP/TP/PP 合约测试覆盖 |
 | `tp_plan` | HF `_tp_plan` + 上游 sharding config | llmtuner 重写路径前缀供手写 plan 引擎消费 | 通过（适配） |
@@ -104,8 +104,8 @@ step 1 恢复 optimizer、scheduler、dataloader 和 train state 后完成并保
 | `attention.qkv.QKVLinear` | `FusedQKVLinear`/QKV 部分 | llmtuner 注入 plain linear 并用 state_dict hook 拆合 HF Q/K/V，**通过（适配）** |
 | `QKVLinear._split_qkv_on_save/_merge_qkv_on_load` | 上游 fused QKV state hooks | llmtuner 额外兼容 DTensor gather 与原始 FQN，round-trip 测试覆盖，**通过**。上游 1e4b1f686 把 QKV 转换移入 HF adapters；llmtuner 不跟随——checkpoint 以 HF `wq/wk/wv` 名义存取是本地契约 |
 | `RoPEConfig`, `RoPE`, `ComplexRoPE`, `CosSinRoPE` | `models/common/rope.py` | 去 Module/Config 协议，缓存为普通 buffer，**通过** |
-| `_yarn_inv_freq` | 同名函数 | 已包含 YaRN `low==0/low==high` 和显式 factor 启用修复，**通过** |
-| `_maybe_check_max_pos` | 上游 RoPE bounds check | async assert，compile 时跳过，**通过**。上游 7e7f271e0 已删除 DTensor positions 包装；llmtuner 本无此路径 |
+| `yarn_inv_freq` | 上游 `_yarn_inv_freq` | 已包含 YaRN `low==0/low==high` 和显式 factor 启用修复，**通过** |
+| `maybe_check_max_pos` | 上游 `_maybe_check_max_pos` | async assert，compile 时跳过，**通过**。上游 7e7f271e0 已删除 DTensor positions 包装；llmtuner 本无此路径 |
 | mask modifier 系列 | `models/common/attention.py` 对应 mask helpers | llmtuner 拆成 `attention/masks.py`；公式一致，**通过** |
 | `create_varlen_metadata_for_document` | 上游同名 helper | llmtuner 支持固定容量和动态路径，**通过** |
 | `create_attention_mask` | `flex_attention.create_block_mask` 调用点 | llmtuner 缓存 compile，并兼容 Torch 2.10 缺少 `separate_full_blocks`，**通过（适配）** |
@@ -115,7 +115,7 @@ step 1 恢复 optimizer、scheduler、dataloader 和 train state 后完成并保
 | llmtuner 符号 | TorchTitan 对应符号 | 差异与正确性 |
 |---|---|---|
 | `PartialBiasRowwiseLinear` | 上游 9e159aed7 已删除：bias 的 I→P 转换并入新 `RowParallelLinear`；llmtuner 同名类语义本就一致，保留（仅测试使用），**通过** |
-| `RouterGateLinear`, `_RouterGateLinearFunction` | `models/common/linear.py` 同名实现 | 前向 FP32 输出、后向 FP32 GEMM；CUDA bf16 使用 `out_dtype`，其他设备安全提升，**通过** |
+| `RouterGateLinear`, `RouterGateLinearFunction` | `models/common/linear.py` 的 `RouterGateLinearFunction`（原 `_RouterGateLinearFunction`） | 前向 FP32 输出、后向 FP32 GEMM；CUDA bf16 使用 `out_dtype`，其他设备安全提升，**通过** |
 | `TokenChoiceTopKRouter.forward` | `models/common/routers.py` router + 上游 `models/deepseek_v3/moe.py` 的 group-limited `_select_experts` | llmtuner 参数化而非 Config 构建，保留 softmax/sigmoid、group limit、route norm，**通过（适配）**。上游 e07084202 抽出可覆写 hooks，llmtuner 以 `_select_experts` 为覆写 seam，数学一致。2026-09-24 起 `_debug_force_load_balance` 调试开关已移植（构造参数，round-robin `(t*K+k)%E`，gating 值仍取真实 score，bias/group 限制均绕过——与上游逐字一致）。2026-09-28 十六次增量：`_select_experts_within_groups` 与上游 `deepseek_v3/moe.py` 逐行等价（组分为组内 top-2 之和、`topk` 选组、`scatter` 掩码、越组 `-inf`、`flatten` 后 `topk`），差别只在校验前移到 `__init__`（上游在 forward 里 raise）；llmtuner 把该路由并入共享 router 的依据是 HF 把 `n_group`/`topk_group` 放在同一条 config 路径上 |
 | `RoutedExperts.forward`, `MoE.forward` | 上游同名逻辑 | llmtuner 专家权重是 EP swap 后的本地切片，不是上游 SPMD DTensor，**通过（适配）**。2026-09-24 起 `MoE.set_padding_mask` 一次性暂存通道（上游 d34a13fdf 同源）：mask（True=padding）只过滤负载均衡统计（`tokens_per_expert_E`、aux loss f/p、quantile 直方图），routing 决策/dispatch/expert compute 始终跑完整 token 流，无 mask 逐位不变；CP/TP 由 `shard_padding_mask_for_cp/tp` 与 token 流同序切分。**2026-09-28 复核（十六次增量）**：`RoutedExperts` 只持 `GroupedExperts` + dispatcher（上游持 `w13`/`w2` 两个 `GroupedLinear` + 激活 + `output_postprocess`，后者上游也只有用例引用）；`tokens_per_expert_E` 从 router 移到 MoE（上游 hook 读 `moe.router.tokens_per_expert_E`，llmtuner 读 `moe.tokens_per_expert_E`，同 `persistent=False`）；MoE-under-TP 的三个 `_maybe_*_across_tp` 方法由块边界 AG/RS 对偶（`TPMoeSequenceBoundary`）与 tp×ep 直接消费 T/tp 分片替代，故本类不设；`expert_bias_E` 由 MoE 按 quantile 路由注册（上游由 `KimiLatentMoE` 子类删后重注册）；AC 下的重复计数不去重——上游对 NO_REENTRANT 做 `// 2` 是因为它还供 expert-usage 指标，而 llmtuner 的 `update_expert_bias` 用 `sign(mean − x)`，任何正的均匀缩放不改变更新方向且不记录该指标 |
 | `QuantileBalancedTopKRouter`, `QuantileBalancer`, `register_moe_quantile_balancing_hook` | 上游 f8bb599a7 同名实现 | 训练时 biased top-(K+1)：前 K dispatch、第 K+1 个 biased 分为 cutoff；1000-bin int32 直方图（non-persistent）按 token 分片轴 all-reduce 后取 `top_k/num_experts` 分位数（bin 内插值），mean-centred 覆写 `expert_bias_E`；与 sign-based bias 互斥（同层构造 raise、跨层 hook raise、全 quantile 时 LB hook 自动不注册）；`ParallelConfig.moe_quantile_balancing` 启用，**通过（适配）** |
@@ -187,8 +187,8 @@ step 1 恢复 optimizer、scheduler、dataloader 和 train state 后完成并保
 | `split_model_into_stages` | 同文件 stage split | 删除模块用 `Identity`，每 stage 保留 rotary，兼容 Torch 2.10 `PipelineStage`，**通过（适配）** |
 | `apply_pp`, `build_pipeline_schedule` | `distributed/pipeline_parallel.py` | llmtuner 直接消费 HF 五部件契约，**通过（适配）** |
 | `apply_pp(first_stage_module_fqns=...)`, `prepend_first_stage_modules` | 同文件 `pipeline_with_first_stage_modules` | 额外顶层模块并入 stage 0：仅作用自动切分，存在的 FQN 按序前插，已占有/重复 FQN raise、缺失跳过，显式 `module_fqns_per_model_part` 给定时忽略并告警（同上游委托语义）；`split_model_into_stages` 配套把 wrapper `named_children()` 不呈现的额外顶层模块在非属主 stage 置 `Identity`（上游 "pruned on other stages" 语义），装五部件的容器经"包含已呈现部件"判定跳过。stage FQN 稳定、默认 None 逐位不变，**通过（适配）** |
-| `apply_ac`, selective helpers, `_apply_memory_budget`, `_disable_dynamo_lru_cache` | `distributed/activation_checkpoint.py` | FullAC/SelectiveAC 已移植，**通过**；两处 `early_stop` 已于 2026-09-27 跟随上游 #4836 同步为 `True`（此前为上游 #1580 的 `False` workaround）。MemoryBudgetAC 已移植为 `mode='memory_budget'` + `MemoryBudgetACConfig`（设 `torch._functorch.config.activation_memory_budget`，需 compile，torch 无 knob 时 loud-raise），见 §9.1；RegionAC 未移植（配置即 `NotImplementedError`）。`_disable_dynamo_lru_cache` 亦已移植（同上，上游在每个 policy 的 `apply` 开头调用），并经 `has("dynamo_lru_cache")` 能力门：torch 2.2.2 有 `torch._C._dynamo.eval_frame` 而无 `_set_lru_cache`，此时记 info 后继续。AC 也跑在 PP 路径上（2026-09-27：`stages.py` 的 `ac` 行 `on_pp=True`，逐 chunk 折层，与上游把 `ac_config` 交给每个 model part 的 `parallelize` 同构）。FullAC 的 `determinism_check`/`debug` 旋钮未暴露（固定默认值），登记于此 |
-| `apply_compile`, `_maybe_enable_async_tp`, `maybe_regional_inductor_backend`, `maybe_regional_inductor` | `distributed/compile.py` 同名函数 | 四件全移植为 `parallel/compile.py` + `CompileConfig`（`training.compile_config`，默认全关 = 旧整体 compile 逐位不变）：逐 block compile 用 `Module.compile` 就地（`per_block=True`）；async TP 设 `_micro_pipeline_tp` + symm-mem 注册（按 group 名去重），配置期拒无 compile/tp=1，装配期对无 mesh/旧 torch loud-raise；regional_inductor 仅 `aot_eager`×flex 触发（wrapper `uses_flex_attention` 判定，annotation 在 `flex_attention_hf`，inductor_configs 传空），flex×其他 backend `ValueError`、torch 无该模块 `NotImplementedError`；`capture_scalar_outputs` 按上游条件（`iter_moe_layers` 非空）设置，dense 不动。上游的 `skip_fwd_side_effects_in_bwd_under_checkpoint` 与 FakeTensorMode monkeypatch 未移植（登记于 upstream map），**通过（适配）** |
+| `apply_ac`, selective helpers, `apply_memory_budget`, `disable_dynamo_lru_cache` | `distributed/activation_checkpoint.py` | FullAC/SelectiveAC 已移植，**通过**；两处 `early_stop` 已于 2026-09-27 跟随上游 #4836 同步为 `True`（此前为上游 #1580 的 `False` workaround）。MemoryBudgetAC 已移植为 `mode='memory_budget'` + `MemoryBudgetACConfig`（设 `torch._functorch.config.activation_memory_budget`，需 compile，torch 无 knob 时 loud-raise），见 §9.1；RegionAC 未移植（配置即 `NotImplementedError`）。`_disable_dynamo_lru_cache` 亦已移植（同上，上游在每个 policy 的 `apply` 开头调用），并经 `has("dynamo_lru_cache")` 能力门：torch 2.2.2 有 `torch._C._dynamo.eval_frame` 而无 `_set_lru_cache`，此时记 info 后继续。AC 也跑在 PP 路径上（2026-09-27：`stages.py` 的 `ac` 行 `on_pp=True`，逐 chunk 折层，与上游把 `ac_config` 交给每个 model part 的 `parallelize` 同构）。FullAC 的 `determinism_check`/`debug` 旋钮未暴露（固定默认值），登记于此 |
+| `apply_compile`, `maybe_enable_async_tp`, `maybe_regional_inductor_backend`, `maybe_regional_inductor` | `distributed/compile.py` 同名函数 | 四件全移植为 `parallel/compile.py` + `CompileConfig`（`training.compile_config`，默认全关 = 旧整体 compile 逐位不变）：逐 block compile 用 `Module.compile` 就地（`per_block=True`）；async TP 设 `_micro_pipeline_tp` + symm-mem 注册（按 group 名去重），配置期拒无 compile/tp=1，装配期对无 mesh/旧 torch loud-raise；regional_inductor 仅 `aot_eager`×flex 触发（wrapper `uses_flex_attention` 判定，annotation 在 `flex_attention_hf`，inductor_configs 传空），flex×其他 backend `ValueError`、torch 无该模块 `NotImplementedError`；`capture_scalar_outputs` 按上游条件（`iter_moe_layers` 非空）设置，dense 不动。上游的 `skip_fwd_side_effects_in_bwd_under_checkpoint` 与 FakeTensorMode monkeypatch 未移植（登记于 upstream map），**通过（适配）** |
 
 ## 6. 数据系统
 
@@ -220,11 +220,11 @@ step 1 恢复 optimizer、scheduler、dataloader 和 train state 后完成并保
 | `cross_entropy_loss`, `LossParallelCrossEntropy` | `components/loss.py` | 以 logits shape 选择 vocab-parallel（上游按 spmd tp size 选）；非法 label async 拒绝。2026-09-28 十三次增量逐行复核：forward 的三个 TP all-reduce（max/sumexp/gather）、shard 边界公式、`_shard_local_labels` 的映射与 `backward` 的融合导数（`out_of_range - 1` 那一步）与上游逐行一致。差异登记：上游 `cross_entropy_loss` 有 `reduction: sum|none` 参数，llmtuner 固定 `"sum"`（`"none"` 只在 `LossParallelCrossEntropy.apply`/`compute_logprobs` 里显式用），无消费者故不补；上游的 `spmd_typecheck` 静态断言不移植（llmtuner 无 spmd 曲面）；类名去私有化。**通过（适配）** |
 | `vocab_shard_bounds`, `next_token_targets` | 上游公式散在 loss/训练器 | llmtuner 提取成共享 helper，**通过（适配）**。`vocab_shard_bounds` 的 `chunk_size=ceil(V/tp)`、`min(V, ...)` 双侧夹取与上游 forward 内的内联公式逐行同构 |
 | `chunked_lm_head_cross_entropy` | 上游 `ChunkedLossWrapper` | 自行 backward 以控制 logits 峰值，**通过**。允许不整除的短尾 chunk（sum 归约下数值等价）。**2026-09-28 十三次增量补登记三条结构差异**：(1) 上游 wrapper 支持**多输出**（tuple pred/labels，服务 dMTP 一类多输出模型），llmtuner 只接单个 `(T, H)`；llmtuner 无此类模型，故无消费者；(2) 上游 `__call__` 返回 `(loss, metrics)` 并有 `_combine_chunk_metrics` 逐 chunk 指标合并，llmtuner 只返回求和 loss；(3) 上游用预分配缓冲的 `GradAccumulator`（就地拷贝），llmtuner 用 list + `torch.cat`（多一次 `T*H` 拷贝）。另有性能差异登记：不合并 lm_head 的 FSDP reshard/grad-sync（上游在 chunk 循环期间禁用），chunked×FSDP 下每 chunk 多一次 all-gather/reduce-scatter，数值等价 |
-| `compute_logprobs`, `mse_loss` | 上游对应 loss | 直接自由函数，无 BaseLoss。2026-09-23 起分片路径的 `return_entropy` 真正生效：entropy 经 `_vocab_parallel_entropy` 免 gather 计算（上游 a3d59d316 同源），**通过**。严格性差异登记：`tp_group` 已给但 `global_vocab_size=None` 时静默走全词表路径（上游 raise），当前无调用者触发。2026-09-28 十三次增量补登记：两者在 llmtuner **均无生产调用者**（上游的 `compute_logprobs` 只服务 `rl/`，`mse_loss` 只被 flux 的 `MSELoss` 选到，两者都在裁剪面内），仓内唯一引用是 `tests/integration_tests/vocab_parallel_loss_equivalence.py`，故按"移植曲面"保留而非删除 |
+| `compute_logprobs`, `mse_loss` | 上游对应 loss | 直接自由函数，无 BaseLoss。2026-09-23 起分片路径的 `return_entropy` 真正生效：entropy 经 `vocab_parallel_entropy` 免 gather 计算（上游 a3d59d316 同源），**通过**。严格性差异登记：`tp_group` 已给但 `global_vocab_size=None` 时静默走全词表路径（上游 raise），当前无调用者触发。2026-09-28 十三次增量补登记：两者在 llmtuner **均无生产调用者**（上游的 `compute_logprobs` 只服务 `rl/`，`mse_loss` 只被 flux 的 `MSELoss` 选到，两者都在裁剪面内），仓内唯一引用是 `tests/integration_tests/vocab_parallel_loss_equivalence.py`，故按"移植曲面"保留而非删除 |
 | `OptimizersContainer` | `components/optimizer/optimizer.py` | 删除 OptimizerWrapper；多 PP part 容器直接实现 Optimizer/Stateful surface。2026-09-28 十二次增量复核：构造算法（分组/首个 pattern 命中/`_build_impl_kwargs`/`step`/flat FQN state dict）与上游同构，三条登记差异——上游第四种 `implementation="fused_opt_states_bf16"`（bf16 Adam 状态 + load post-hook 复原 dtype，价值全在 CUDA fused 核）与 `optimizer_factory_kwargs_by_name`（无消费者）均已入 D 表；`DistMuon` 工厂属早已登记为范围外的 `distributed/flex_shard/`；`default_adamw` 便捷构造（上游 `lr=8e-4`/betas (0.9,0.95)/wd 0.1）未移植，其调用者只有 torchft recipe 与 RL 示例。MoE 负载均衡/quantile hook 的注册点从容器挪到 `trainer/builder.py`（上游由各模型代码注册），hook 本体在 `models/common/balancing.py`。优于上游：`_validate_params` 点名未被认领的参数并检出重复认领（上游仅一条 assert），`step` 的 closure 断言改 `ValueError`。**同轮修掉一个 CPU 真 bug**：llmtuner/上游都把 `fused` 放进 param group（支持组级覆盖），而 torch 只在**构造参数**上校验设备，于是 CPU 上默认 `implementation="fused"` 构造通过、首步 `optimizer.step()` 崩在 `aten::_fused_adamw_`；上游 GPU-only 不会遇到。现按设备解析：torch 没有该设备的 fused 核时降级为 for-loop 并记 info（CUDA/XPU 与上游逐字相同；CPU 上 for-loop 与 foreach 实测逐位一致），**通过（适配）** |
 | `init_optim_state` | `components/optimizer/utils.py` | 已支持部分参数已有 Adam state，并保持首次真实 step=1，**通过** |
 | flat state dict helpers | 同文件 | FQN flat format，支持 nested state，**通过** |
-| `_wsd_factor`, `LRSchedulersContainer`, `build_lr_scheduler` | `components/optimizer/lr_scheduler.py` | 去 Configurable，数学与 state 语义保留，**通过**。默认值分叉登记：上游 `decay_ratio=None`（默认）表示 warmup 后贯穿余程 decay；llmtuner 无 None，默认 `0.0` 表示永不 decay（config docstring 声明为有意设计）。另新增 `total_steps < training_steps` 拒绝（上游会跑出负 lr）。2026-09-28 十二次增量复核：WSD 公式逐行一致（同样的 0-based `+1` 修正、`stable_steps = total + 1 - warmup - decay`、三种 decay 形状与 `min_lr_factor` 缩放），差异仅形状（`_wsd_factor` 提到模块级、`build_lr_scheduler` 自由函数取代嵌套闭包与 `Config.build`）与两处小新增：`load_state_dict({})` 空字典 no-op（上游会 KeyError）、`LRSchedulersContainer(total_steps=...)` 作为曲线长度断言 seam（上游无此属性） |
+| `wsd_factor`, `LRSchedulersContainer`, `build_lr_scheduler` | `components/optimizer/lr_scheduler.py` | 去 Configurable，数学与 state 语义保留，**通过**。默认值分叉登记：上游 `decay_ratio=None`（默认）表示 warmup 后贯穿余程 decay；llmtuner 无 None，默认 `0.0` 表示永不 decay（config docstring 声明为有意设计）。另新增 `total_steps < training_steps` 拒绝（上游会跑出负 lr）。2026-09-28 十二次增量复核：WSD 公式逐行一致（同样的 0-based `+1` 修正、`stable_steps = total + 1 - warmup - decay`、三种 decay 形状与 `min_lr_factor` 缩放），差异仅形状（`_wsd_factor` 提到模块级、`build_lr_scheduler` 自由函数取代嵌套闭包与 `Config.build`）与两处小新增：`load_state_dict({})` 空字典 no-op（上游会 KeyError）、`LRSchedulersContainer(total_steps=...)` 作为曲线长度断言 seam（上游无此属性） |
 
 ### 7.2 Checkpoint
 
@@ -481,23 +481,18 @@ helper 在前文涉及关键算法时单列。成组条目（`config/`、`traine
   兼 `ValueError`）、`UnsupportedCombinationError`（组合拒绝，兼
   `NotImplementedError`）、`EnvironmentUnsupportedError`（依赖缺失、文案带解锁条件，
   兼 `NotImplementedError`）；可选包缺失保持 `ImportError`。
-- **命名与私有面**：模块级前导 `_` 只表示"这个模块的实现细节"，因此**凡跨模块 import
-  或调用的符号一律不带 `_`**；反之，只被本模块使用的 helper 就该带 `_`（把它做成公开名
-  会把实现细节冻成 API）。三类例外保留前导 `_`：① PyTorch/HF 协议要求的方法名
-  （`_setup_context`、`_backward`、`_apply`、`_load_from_state_dict`…）；② 与上游同名的
-  私有 helper（它们是映射表的锚点，见 §10 —— 34 个）；③ 基类给子类/同包协作者用的
-  protected 方法（`checkpointer/base.py` 的 `_should_save` 等）。类内 `self._attr`
-  之类的实例状态不受本条约束（那是封装，不是命名问题）。
-  2026-09-29（二十次增量）按此审计过一遍 `llmtuner/`：模块级 95 个前导 `_` 符号（其中 34
-  个上游同名）、109 个私有方法。**模块级**：6 个真正被跨模块使用的已去私有化
-  （`packing/{conversions,iterators}` 的 5 个 + `pipeline_parallel/apply.py::scalar_loss_fn`），
-  `models/common/scatter_add.py` 里 `register_fake` 的匿名 `def _` 命名为
-  `deterministic_scatter_add_fake`。**方法级**：13 个被"其它模块"调用的私有方法里，5 个与上游
-  同名（`checkpointer/base.py` 的 `_should_save`/`_purge_stale_checkpoints`/`_create_checkpoint_id`、
-  `optimizer.py` 的 `_post_init`/`_validate_params`）保留原拼写，另外 6 个 llmtuner 自有的去私有化
-  （`Trainer.seed_everything`/`example_model`/`loss_vocab_kwargs`/`loss_sum`/`param_context`、
-  `FeedForward.split_gate_up`）。审计后**跨模块使用却仍带 `_` 的符号只剩上游同名的那批**
-  （脚本复查：模块级 2 处字符串/同名误报、方法级 5 个上游同名）。
+- **命名与私有面**：模块级 helper / 数据类**默认公开**（本仓是学习/参考实现，读者应当能直接
+  import 任何一层；模块级私有名一旦被跨模块或测试引用就是在说谎）。前导 `_` 只保留三种：
+  ① 框架协议要求的名字（`scatter_add.py` 的 `_backward`/`_setup_context` 是
+  `torch.library.custom_op` + autograd 的契约）；② 与"公开包装"配对的低层核心——
+  `accelerator/dist.py` 的 `_broadcast_object_list`/`_all_gather_object`/`_gather_object`
+  同名公开版返回 list、私有版收 out-list，去前缀会重名；③ 类内 protected 方法（子类或同包
+  协作者用的 template-method 钩子，如 `checkpointer/base.py` 的 `_should_save` 族与
+  `optimizer.py::_post_init`/`_validate_params`）。类内 `self._x` 属性属于封装，不在本条范围。
+  2026-09-29（二十次增量）按此做完整个 `llmtuner/`：模块级前导 `_` 从 95 个降到 **5 个**
+  （3 个同名校验核 + 2 个协议名），方法级从 109 降到 103（6 个 llmtuner 自有的跨模块方法公开，
+  5 个上游同名钩子保留）。**与上游同名的 helper 现在名字不同**（llmtuner 无前缀、上游带 `_`），
+  §10 的映射行按"llmtuner 公开名 ↔ 上游名"读；`docs/` 里二十次增量之前的历史条目保留旧名。
 
 ## 11. 上游同步检查清单
 

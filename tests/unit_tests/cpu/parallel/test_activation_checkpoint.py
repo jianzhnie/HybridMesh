@@ -55,8 +55,8 @@ from llmtuner.models.hf.model import HFTransformerModel
 from llmtuner.parallel import activation_checkpoint as ac_mod
 from llmtuner.parallel.activation_checkpoint import (
     VALID_AC_MODES,
-    _get_default_save_ops,
     apply_ac,
+    get_default_save_ops,
     mm_recompute_shapes,
     selective_policy,
 )
@@ -487,7 +487,7 @@ def test_default_save_ops_omits_topk() -> None:
     checkpoint rejects ("Tensor cached ... has been mutated"), so saving topk
     would break every MoE model rather than protect it.
     """
-    save_ops = _get_default_save_ops()
+    save_ops = get_default_save_ops()
 
     assert torch.ops.aten.topk.default not in save_ops
     # Non-vacuity: the set is not just empty.

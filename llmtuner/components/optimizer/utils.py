@@ -107,11 +107,11 @@ def get_flat_optim_state_dict(optim: torch.optim.Optimizer) -> dict[str, Any]:
 
     The optimizer state must already exist; call ``init_optim_state`` first.
     """
-    fqn_sd = _optim_state_dict_to_fqn_keys(optim.state_dict())
+    fqn_sd = optim_state_dict_to_fqn_keys(optim.state_dict())
 
     flat: dict[str, Any] = {}
     for fqn, state in fqn_sd["state"].items():
-        _flatten_state_nested(state, f"state.{fqn}", flat)
+        flatten_state_nested(state, f"state.{fqn}", flat)
     for param_group in fqn_sd["param_groups"]:
         for fqn in param_group["params"]:
             for key, value in param_group.items():
@@ -130,10 +130,10 @@ def load_flat_optim_state_dict(
     first. Keys in ``flat_sd`` that this optimizer does not own are ignored, so a
     single flat dict covering several optimizers can be passed to each of them.
     """
-    optim.load_state_dict(_unflatten_optim_state_dict(optim, flat_sd))
+    optim.load_state_dict(unflatten_optim_state_dict(optim, flat_sd))
 
 
-def _optim_state_dict_to_fqn_keys(optim_sd: dict[str, Any]) -> dict[str, Any]:
+def optim_state_dict_to_fqn_keys(optim_sd: dict[str, Any]) -> dict[str, Any]:
     """Re-key an optimizer state dict from integer param ids to FQNs.
 
     Relies on ``param_names`` in each param group, which PyTorch populates when
@@ -167,7 +167,7 @@ def _optim_state_dict_to_fqn_keys(optim_sd: dict[str, Any]) -> dict[str, Any]:
     return {"state": new_state, "param_groups": new_param_groups}
 
 
-def _unflatten_optim_state_dict(
+def unflatten_optim_state_dict(
     optim: torch.optim.Optimizer, flat_sd: dict[str, Any]
 ) -> dict[str, Any]:
     """Rebuild an integer-keyed optimizer state dict from a flat, FQN-keyed one.
@@ -192,7 +192,7 @@ def _unflatten_optim_state_dict(
                         param_state[state_name] = flat_sd[flat_key]
                     else:
                         # State value is itself a nested dict (e.g. Shampoo).
-                        nested = _reconstruct_nested(flat_sd, flat_key)
+                        nested = reconstruct_nested(flat_sd, flat_key)
                         if nested:
                             param_state[state_name] = nested
                 if param_state:
@@ -218,19 +218,19 @@ def _unflatten_optim_state_dict(
     return {"state": state, "param_groups": param_groups}
 
 
-def _flatten_state_nested(
+def flatten_state_nested(
     state: dict[str, Any], prefix: str, out: dict[str, Any]
 ) -> None:
     """Flatten a (possibly nested) per-param state dict into dotted keys."""
     for key, value in state.items():
         flat_key = f"{prefix}.{key}"
         if isinstance(value, dict):
-            _flatten_state_nested(value, flat_key, out)
+            flatten_state_nested(value, flat_key, out)
         else:
             out[flat_key] = value
 
 
-def _reconstruct_nested(flat_sd: dict[str, Any], prefix: str) -> dict[str, Any]:
+def reconstruct_nested(flat_sd: dict[str, Any], prefix: str) -> dict[str, Any]:
     """Rebuild the nested dict stored under ``prefix`` in a flat state dict."""
     result: dict[str, Any] = {}
     prefix_dot = prefix + "."

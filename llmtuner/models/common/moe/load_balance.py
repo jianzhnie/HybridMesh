@@ -8,7 +8,7 @@ the loss). Corpus-level balance is the separate auxiliary-loss-free path in
 
 Vendored from torchtitan ``models/common/moe.py``. What changed: the
 ``spmd_types`` blocks are gone (no runtime effect), and the Partial -> Invariant
-reduction is the ``_PartialToInvariantAllReduce`` autograd Function (all-reduce
+reduction is the ``PartialToInvariantAllReduce`` autograd Function (all-reduce
 forward, identity backward) instead of ``spmd.redistribute`` -- the same
 semantics, which ``torch.distributed.nn.all_reduce`` would NOT give: its
 backward is a second all-reduce, multiplying the injected gradient by the group
@@ -28,7 +28,7 @@ from ..aux_loss import AuxLoss
 __all__ = ["MicrobatchWiseLoadBalanceLoss"]
 
 
-class _PartialToInvariantAllReduce(torch.autograd.Function):
+class PartialToInvariantAllReduce(torch.autograd.Function):
     """All-reduce in forward, identity in backward (Partial -> Invariant).
 
     The reduced sum is identical on every rank of the group, and every rank
@@ -115,7 +115,7 @@ class MicrobatchWiseLoadBalanceLoss(AuxLoss):
             group = spmd_mesh_group(axis)
             if group is None:
                 continue
-            partial_E = _PartialToInvariantAllReduce.apply(partial_E, group)
+            partial_E = PartialToInvariantAllReduce.apply(partial_E, group)
         return partial_E
 
     def forward(

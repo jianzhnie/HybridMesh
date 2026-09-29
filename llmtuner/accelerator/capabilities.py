@@ -34,7 +34,7 @@ from llmtuner.errors import EnvironmentUnsupportedError
 __all__ = ["CAPABILITIES", "has", "is_compiling", "require"]
 
 
-def _hasattr_torch(module: str, attr: str) -> Callable[[], bool]:
+def hasattr_torch(module: str, attr: str) -> Callable[[], bool]:
     """Probe factory: ``hasattr(<torch submodule attr chain>, attr)``."""
 
     def probe() -> bool:
@@ -47,7 +47,7 @@ def _hasattr_torch(module: str, attr: str) -> Callable[[], bool]:
     return probe
 
 
-def _importable(module: str, attr: str | None = None) -> Callable[[], bool]:
+def importable(module: str, attr: str | None = None) -> Callable[[], bool]:
     """Probe factory: the module imports (and optionally exposes ``attr``)."""
 
     def probe() -> bool:
@@ -60,7 +60,7 @@ def _importable(module: str, attr: str | None = None) -> Callable[[], bool]:
     return probe
 
 
-def _dynamo_lru_cache_knob() -> bool:
+def dynamo_lru_cache_knob() -> bool:
     """Whether dynamo exposes ``eval_frame._set_lru_cache``.
 
     The knob is private, so it is looked up on the import's own attribute
@@ -78,7 +78,7 @@ def _dynamo_lru_cache_knob() -> bool:
     return getattr(eval_frame, "_set_lru_cache", None) is not None
 
 
-def _grouped_mm_runs() -> bool:
+def grouped_mm_runs() -> bool:
     """Whether ``torch._grouped_mm`` can run here.
 
     Probed by doing it, rather than by checking the device or the torch
@@ -106,7 +106,7 @@ def _grouped_mm_runs() -> bool:
     return True
 
 
-class _Capability:
+class Capability:
     """One registry entry: probe, provenance, unlock hint, consumers."""
 
     def __init__(
@@ -125,32 +125,32 @@ class _Capability:
         self.consumers = consumers
 
 
-CAPABILITIES: dict[str, _Capability] = {
+CAPABILITIES: dict[str, Capability] = {
     # -- compile-time knobs (consumers: parallel/compile.py) -------------------
-    "dynamo_capture_scalar_outputs": _Capability(
-        _hasattr_torch("torch._dynamo.config", "capture_scalar_outputs"),
+    "dynamo_capture_scalar_outputs": Capability(
+        hasattr_torch("torch._dynamo.config", "capture_scalar_outputs"),
         what="torch._dynamo.config.capture_scalar_outputs",
         since="torch 2.7 (dynamo config flag)",
         hint="Upgrade torch, or run the token-choice MoE without compile.",
         consumers="parallel/compile.py (token-choice MoE dispatch compile)",
     ),
-    "inductor_micro_pipeline_tp": _Capability(
-        _hasattr_torch("torch._inductor.config", "_micro_pipeline_tp"),
+    "inductor_micro_pipeline_tp": Capability(
+        hasattr_torch("torch._inductor.config", "_micro_pipeline_tp"),
         what="torch._inductor.config._micro_pipeline_tp",
         since="torch 2.8 (inductor micro-pipeline TP pass)",
         hint="Upgrade torch, or run without async TP.",
         consumers="parallel/compile.py (compile_config.enable_async_tensor_parallel)",
     ),
-    "fx_regional_inductor": _Capability(
-        _importable("torch.fx.passes.regional_inductor", "regional_inductor"),
+    "fx_regional_inductor": Capability(
+        importable("torch.fx.passes.regional_inductor", "regional_inductor"),
         what="torch.fx.passes.regional_inductor (+ torch._dynamo.backends.common)",
         since="torch 2.10 (fx regional-inductor pass)",
         hint="Upgrade torch, use backend='inductor', or run without compile.",
         consumers="parallel/compile.py (aot_eager backend on flex models)",
     ),
     # -- symmetric memory (consumers: parallel/compile.py, tensor_parallel) ----
-    "symm_mem": _Capability(
-        _importable("torch.distributed._symmetric_memory", "enable_symm_mem_for_group"),
+    "symm_mem": Capability(
+        importable("torch.distributed._symmetric_memory", "enable_symm_mem_for_group"),
         what="torch.distributed._symmetric_memory.enable_symm_mem_for_group",
         since="torch 2.8 (symmetric-memory collectives, CUDA-only)",
         hint="Upgrade torch, or run without async TP / symm-mem collectives.",
@@ -158,25 +158,25 @@ CAPABILITIES: dict[str, _Capability] = {
         "(fused symm-mem TP collectives), tensor_parallel/linear.py",
     ),
     # -- activation checkpointing (consumer: parallel/activation_checkpoint.py)
-    "functorch_activation_memory_budget": _Capability(
-        _hasattr_torch("torch._functorch.config", "activation_memory_budget"),
+    "functorch_activation_memory_budget": Capability(
+        hasattr_torch("torch._functorch.config", "activation_memory_budget"),
         what="torch._functorch.config.activation_memory_budget",
         since="torch 2.6 (functorch partitioner budget knob)",
         hint="Upgrade torch, or use activation_checkpoint_mode='full'/'selective'.",
         consumers="parallel/activation_checkpoint.py (mode='memory_budget')",
     ),
-    "dynamo_lru_cache": _Capability(
-        _dynamo_lru_cache_knob,
+    "dynamo_lru_cache": Capability(
+        dynamo_lru_cache_knob,
         what="torch._C._dynamo.eval_frame._set_lru_cache",
         since="private dynamo knob; absent from torch 2.2.2, present in the "
         "builds upstream targets",
         hint="Upgrade torch; without the knob, activation checkpointing runs "
         "without upstream's SAC + pipeline-parallel cache workaround.",
-        consumers="parallel/activation_checkpoint.py (_disable_dynamo_lru_cache)",
+        consumers="parallel/activation_checkpoint.py (disable_dynamo_lru_cache)",
     ),
     # -- model kernels (consumer: models/common/moe/experts.py) ----------------
-    "torch_grouped_mm": _Capability(
-        _grouped_mm_runs,
+    "torch_grouped_mm": Capability(
+        grouped_mm_runs,
         what="torch._grouped_mm",
         since="torch 2.7 (grouped GEMM, bf16; CPU-reachable but shape-constrained)",
         hint="Upgrade torch, or leave GroupedExperts on the looped-GEMM fallback.",

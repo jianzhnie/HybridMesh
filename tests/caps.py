@@ -32,7 +32,7 @@ def _has_spec(module: str) -> bool:
         return False
 
 
-def _importable(module: str) -> bool:
+def importable(module: str) -> bool:
     """Whether ``module`` imports (or was already injected, e.g. by a stub)."""
     if module in sys.modules:
         return True
@@ -76,15 +76,15 @@ CAPS: dict[str, Callable[[], bool]] = {
     # torch.distributed.tensor.DTensor (the DTensor/DTensorSpec import surface)
     "dtensor": lambda: _importable_attr("torch.distributed.tensor", "DTensor"),
     # the spmd_types shims the model/parallel layers import
-    "spmd_types": lambda: _importable("spmd_types"),
+    "spmd_types": lambda: importable("spmd_types"),
     # Grain data graph (datasets/)
-    "grain": lambda: _importable("grain.python"),
+    "grain": lambda: importable("grain.python"),
     # flex attention (BlockMask & friends)
     "flex_attention": lambda: _importable_attr(
         "torch.nn.attention.flex_attention", "create_block_mask"
     ),
     # torch.distributed.pipelining (PipelineStage, schedules)
-    "pipelining": lambda: _importable("torch.distributed.pipelining"),
+    "pipelining": lambda: importable("torch.distributed.pipelining"),
     # torch.distributed.checkpoint's HF storage surface the checkpointer reads
     "dcp": lambda: _importable_attr(
         "torch.distributed.checkpoint", "HuggingFaceStorageWriter"
@@ -94,7 +94,7 @@ CAPS: dict[str, Callable[[], bool]] = {
         "torch.utils.checkpoint", "CheckpointPolicy"
     ),
     # Weights & Biases logger
-    "wandb": lambda: _importable("wandb"),
+    "wandb": lambda: importable("wandb"),
     # torch optimizer state_dicts carry param_names (newer torch)
     "torch_param_names": _torch_param_names,
     # torch._functorch.partitioners (selective-AC default op list)

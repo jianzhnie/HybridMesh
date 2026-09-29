@@ -32,7 +32,7 @@ from .dist_utils import (
 TORCH_VERSION = torch.__version__
 
 
-def _digit_version(version: str) -> tuple:
+def digit_version(version: str) -> tuple:
     """Parse a version string into a comparable tuple of ints.
 
     Local replacement for ``mmengine.utils.digit_version``: each dotted
@@ -50,7 +50,7 @@ def _digit_version(version: str) -> tuple:
     return tuple(parts)
 
 
-def _get_reduce_op(name: str) -> torch_dist.ReduceOp:
+def get_reduce_op(name: str) -> torch_dist.ReduceOp:
     op_mappings = {
         'sum': torch_dist.ReduceOp.SUM,
         'product': torch_dist.ReduceOp.PRODUCT,
@@ -122,13 +122,13 @@ def all_reduce(data: Tensor,
         # pytorch does not support 'mean' operation so we fall back to support
         # it with 'sum' operation.
         if op.lower() == 'mean':
-            torch_dist.all_reduce(data_on_device, _get_reduce_op('sum'), group)
+            torch_dist.all_reduce(data_on_device, get_reduce_op('sum'), group)
 
             # use true_divide to handle torch1.6.0 throws an RuntimeError when
             # the type of `data_on_device` is int64
             data_on_device = torch.true_divide(data_on_device, world_size)
         else:
-            torch_dist.all_reduce(data_on_device, _get_reduce_op(op), group)
+            torch_dist.all_reduce(data_on_device, get_reduce_op(op), group)
 
         cast_data_device(data_on_device, input_device, out=data)
 
@@ -393,7 +393,7 @@ def sync_random_seed(group: ProcessGroup | None = None) -> int:
     return random_num.item()
 
 
-def _object_to_tensor(obj: Any) -> tuple[Tensor, Tensor]:
+def object_to_tensor(obj: Any) -> tuple[Tensor, Tensor]:
     """Serialize picklable python object to tensor."""
     byte_storage = torch.ByteStorage.from_buffer(pickle.dumps(obj))
     # Do not replace `torch.ByteTensor` or `torch.LongTensor` with torch.tensor
@@ -404,7 +404,7 @@ def _object_to_tensor(obj: Any) -> tuple[Tensor, Tensor]:
     return byte_tensor, local_size
 
 
-def _tensor_to_object(tensor: Tensor, tensor_size: int) -> Any:
+def tensor_to_object(tensor: Tensor, tensor_size: int) -> Any:
     """Deserialize tensor to picklable python object."""
     buf = tensor.cpu().numpy().tobytes()[:tensor_size]
     return pickle.loads(buf)
@@ -426,7 +426,7 @@ def _broadcast_object_list(object_list: list[Any],
     # Serialize object_list elements to tensors on src rank.
     if my_rank == src:
         tensor_list, size_list = zip(
-            *[_object_to_tensor(obj) for obj in object_list], strict=True)
+            *[object_to_tensor(obj) for obj in object_list], strict=True)
         object_sizes_tensor = torch.cat(size_list)
     else:
         object_sizes_tensor = torch.empty(len(object_list), dtype=torch.long)
@@ -488,7 +488,7 @@ def _broadcast_object_list(object_list: list[Any],
             if obj_view.device != torch.device('cpu'):
                 obj_view = obj_view.cpu()
             offset += obj_size
-            object_list[i] = _tensor_to_object(obj_view, obj_size)
+            object_list[i] = tensor_to_object(obj_view, obj_size)
 
 
 def broadcast_object_list(data: list[Any],
@@ -550,7 +550,7 @@ def broadcast_object_list(data: list[Any],
         if group is None:
             group = get_default_group()
 
-        if _digit_version(TORCH_VERSION) >= _digit_version(
+        if digit_version(TORCH_VERSION) >= digit_version(
                 '1.8.0') and not is_npu_available():
             torch_dist.broadcast_object_list(data, src, group)
         else:
@@ -611,7 +611,7 @@ def all_reduce_dict(data: dict[str, Tensor],
         tensor_shapes = [data[k].shape for k in keys]
         tensor_sizes = [data[k].numel() for k in keys]
 
-        if _digit_version(TORCH_VERSION) == _digit_version('1.5.0'):
+        if digit_version(TORCH_VERSION) == digit_version('1.5.0'):
             # `torch.cat` in torch1.5 can not concatenate different types so
             # we fallback to convert them all to float type.
             flatten_tensor = torch.cat(
@@ -658,7 +658,7 @@ def _all_gather_object(object_list: list[Any],
     if torch_dist.distributed_c10d._rank_not_in_group(group):
         return
 
-    input_tensor, local_size = _object_to_tensor(obj)
+    input_tensor, local_size = object_to_tensor(obj)
     group_backend = get_backend(group)
     current_device = torch.device('cpu')
     is_nccl_backend = group_backend == torch_dist.Backend.NCCL
@@ -704,7 +704,7 @@ def _all_gather_object(object_list: list[Any],
         if tensor.device != torch.device('cpu'):
             tensor = tensor.cpu()
         tensor_size = object_size_list[i]
-        object_list[i] = _tensor_to_object(tensor, tensor_size)
+        object_list[i] = tensor_to_object(tensor, tensor_size)
 
 
 def all_gather_object(data: Any,
@@ -772,7 +772,7 @@ def all_gather_object(data: Any,
 
     gather_list = [None] * world_size
 
-    if _digit_version(TORCH_VERSION) >= _digit_version('1.8.0'):
+    if digit_version(TORCH_VERSION) >= digit_version('1.8.0'):
         torch_dist.all_gather_object(gather_list, data, group)
     else:
         _all_gather_object(gather_list, data, group)
@@ -780,7 +780,7 @@ def all_gather_object(data: Any,
     return gather_list
 
 
-def _validate_output_list_for_rank(my_rank: int, dst: int,
+def validate_output_list_for_rank(my_rank: int, dst: int,
                                    gather_list: list | None) -> None:
     """Validate whether ``gather_list`` is None in non-dst ranks."""
     if dst == my_rank:
@@ -817,8 +817,8 @@ def _gather_object(obj: Any,
 
     # Ensure object_gather_list is specified appopriately.
     my_rank = get_rank()
-    _validate_output_list_for_rank(my_rank, dst, object_gather_list)
-    input_tensor, local_size = _object_to_tensor(obj)
+    validate_output_list_for_rank(my_rank, dst, object_gather_list)
+    input_tensor, local_size = object_to_tensor(obj)
     group_backend = get_backend(group)
     current_device = torch.device('cpu')
     is_nccl_backend = group_backend == torch_dist.Backend.NCCL
@@ -870,7 +870,7 @@ def _gather_object(obj: Any,
     for i, tensor in enumerate(output_tensors):
         tensor = tensor.type(torch.uint8)
         tensor_size = object_size_list[i]
-        object_gather_list[i] = _tensor_to_object(tensor, tensor_size)
+        object_gather_list[i] = tensor_to_object(tensor, tensor_size)
 
 
 def gather_object(data: Any,
@@ -929,7 +929,7 @@ def gather_object(data: Any,
 
     gather_list = [None] * world_size if get_rank(group) == dst else None
 
-    if _digit_version(TORCH_VERSION) >= _digit_version('1.8.0'):
+    if digit_version(TORCH_VERSION) >= digit_version('1.8.0'):
         torch_dist.gather_object(data, gather_list, dst, group)
     else:
         _gather_object(data, gather_list, dst, group)
@@ -978,7 +978,7 @@ def collect_results(results: list,
 
     if device == 'gpu' or device == 'npu':
         assert tmpdir is None, f'tmpdir should be None when device is {device}'
-        return _collect_results_device(results, size)
+        return collect_results_device(results, size)
     else:
         return collect_results_cpu(results, size, tmpdir)
 
@@ -1072,7 +1072,7 @@ def collect_results_cpu(result_part: list,
         return ordered_results
 
 
-def _collect_results_device(result_part: list, size: int) -> list | None:
+def collect_results_device(result_part: list, size: int) -> list | None:
     """Collect results under gpu or npu mode."""
     rank, world_size = get_dist_info()
     if world_size == 1:
@@ -1126,10 +1126,10 @@ def collect_results_gpu(result_part: list, size: int) -> list | None:
         ['foo', 24, {1: 2}, {'a': 'b'}]  # rank 0
         None  # rank 1
     """
-    return _collect_results_device(result_part, size)
+    return collect_results_device(result_part, size)
 
 
-def _all_reduce_coalesced(tensors: list[torch.Tensor],
+def all_reduce_coalesced(tensors: list[torch.Tensor],
                           bucket_size_mb: int = -1,
                           op: str = 'sum',
                           group: ProcessGroup | None = None) -> None:
@@ -1214,7 +1214,7 @@ def all_reduce_params(params: list | Generator[torch.Tensor, None, None],
         return
     params_data = [param.data for param in params]
     if coalesce:
-        _all_reduce_coalesced(params_data, bucket_size_mb, op=op, group=group)
+        all_reduce_coalesced(params_data, bucket_size_mb, op=op, group=group)
     else:
         for tensor in params_data:
             all_reduce(tensor, op=op, group=group)

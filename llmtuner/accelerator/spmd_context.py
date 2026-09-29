@@ -66,7 +66,7 @@ def spmd_sparse_mesh() -> DeviceMesh | None:
     return getattr(_MESH_TLS, "sparse_mesh", None)
 
 
-def _spmd_mesh_stack() -> list[DeviceMesh | None]:
+def spmd_mesh_stack() -> list[DeviceMesh | None]:
     stack = getattr(_MESH_TLS, "mesh_stack", None)
     if stack is None:
         stack = []
@@ -76,7 +76,7 @@ def _spmd_mesh_stack() -> list[DeviceMesh | None]:
 
 def current_spmd_mesh() -> DeviceMesh | None:
     """Return the current runtime mesh, or ``None`` if unset."""
-    stack = _spmd_mesh_stack()
+    stack = spmd_mesh_stack()
     if not stack:
         return None
     return stack[-1]
@@ -108,7 +108,7 @@ def spmd_mesh_group(axis_name: str) -> torch.distributed.ProcessGroup | None:
 @contextlib.contextmanager
 def set_current_spmd_mesh(mesh: DeviceMesh | None) -> Iterator[None]:
     """Set TorchTitan and spmd_types current mesh state for one runtime region."""
-    stack = _spmd_mesh_stack()
+    stack = spmd_mesh_stack()
     if mesh is None:
         stack.append(mesh)
         try:

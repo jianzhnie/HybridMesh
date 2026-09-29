@@ -61,7 +61,7 @@ __all__ = ["EMA"]
 logger = get_logger(__name__)
 
 
-class _EMAParamOptimizer(Optimizer):
+class EMAParamOptimizer(Optimizer):
     """Holds ``state[t]["ema_params"]`` per tensor (parameter or buffer) for
     one model part.
 
@@ -80,7 +80,7 @@ class _EMAParamOptimizer(Optimizer):
 
     def step(self, closure=None) -> None:
         raise RuntimeError(
-            "_EMAParamOptimizer must not be step()-ed; call "
+            "EMAParamOptimizer must not be step()-ed; call "
             "EMA.step(current_step) instead."
         )
 
@@ -134,18 +134,18 @@ class EMA(OptimizersContainer):
         self.update_every_n_steps = update_every_n_steps
         self.model_parts = model_parts
 
-        self._param_optimizers: list[_EMAParamOptimizer] = []
+        self._param_optimizers: list[EMAParamOptimizer] = []
         all_params: list[nn.Parameter] = []
         for model in model_parts:
             named_params = [
                 (name, p) for name, p in model.named_parameters() if p.requires_grad
             ]
-            self._param_optimizers.append(_EMAParamOptimizer(named_params))
+            self._param_optimizers.append(EMAParamOptimizer(named_params))
             all_params.extend(p for _, p in named_params)
         self._validate_params(all_params)
 
         self._buffer_patterns = [re.compile(p) for p in buffer_patterns]
-        self._buffer_optimizers: list[_EMAParamOptimizer] = []
+        self._buffer_optimizers: list[EMAParamOptimizer] = []
         if self._buffer_patterns:
             total_matched = 0
             for model in model_parts:
@@ -165,7 +165,7 @@ class EMA(OptimizersContainer):
                             "falls below one."
                         )
                 total_matched += len(named_buffers)
-                self._buffer_optimizers.append(_EMAParamOptimizer(named_buffers))
+                self._buffer_optimizers.append(EMAParamOptimizer(named_buffers))
             if total_matched == 0:
                 logger.warning(
                     "EMA buffer_patterns=%s matched no buffers across any "
@@ -178,7 +178,7 @@ class EMA(OptimizersContainer):
         # iterate self.optimizers and merge each one's FQN-keyed flat dict, so
         # folding _buffer_optimizers in here is what gives buffer EMA the same
         # "ema" checkpoint key as parameters.
-        self.optimizers: list[_EMAParamOptimizer] = (
+        self.optimizers: list[EMAParamOptimizer] = (
             self._param_optimizers + self._buffer_optimizers
         )
         low_precision = sorted(
@@ -261,7 +261,7 @@ class EMA(OptimizersContainer):
 
     def _update_group(
         self,
-        ema_opt: "_EMAParamOptimizer",
+        ema_opt: "EMAParamOptimizer",
         tensors: list[torch.Tensor],
         decay: float,
     ) -> None:

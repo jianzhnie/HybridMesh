@@ -50,7 +50,7 @@ logger = get_logger(__name__)
 __all__ = ["build_lr_scheduler", "LRSchedulersContainer"]
 
 
-def _wsd_factor(
+def wsd_factor(
     current_step: int,
     *,
     warmup_steps: int,
@@ -235,7 +235,7 @@ def build_lr_scheduler(
     stable_steps = total_steps + 1 - warmup_steps - decay_steps
 
     lr_lambda = functools.partial(
-        _wsd_factor,
+        wsd_factor,
         warmup_steps=warmup_steps,
         stable_steps=stable_steps,
         decay_steps=decay_steps,

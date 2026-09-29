@@ -45,7 +45,7 @@ if TYPE_CHECKING:
 __all__ = ["build_dataloader"]
 
 
-def _multimodal_registry(dataset_name: str):
+def multimodal_registry(dataset_name: str):
     """The multimodal recipe table, collator and packer, imported lazily.
 
     The import stays inside the call: the multimodal subtree pulls in
@@ -75,7 +75,7 @@ def _multimodal_registry(dataset_name: str):
     return MM_DATASETS, MultiModalCollator, build_mm_sample_packing
 
 
-def _text_recipe(dataloader_config, *, dataset_name: str, tokenizer):
+def text_recipe(dataloader_config, *, dataset_name: str, tokenizer):
     """The text recipe plus how to pack and collate it.
 
     Both recipes are built the same way and differ only in kind: the
@@ -170,7 +170,7 @@ def build_dataloader(
         and dataset_name not in DATASETS
     )
     if is_multimodal:
-        MM_DATASETS, collator, build_packing = _multimodal_registry(dataset_name)
+        MM_DATASETS, collator, build_packing = multimodal_registry(dataset_name)
 
     # Imported here, not at module scope: building the tokenizer pulls in
     # ``tokenizers``/``jinja2``, and a random-token run should not have to
@@ -199,7 +199,7 @@ def build_dataloader(
         tokenizer = HuggingFaceTokenizer(
             tokenizer_path=dataloader_config.tokenizer_path
         )
-        recipe, build_packing, packing_kwargs, collator = _text_recipe(
+        recipe, build_packing, packing_kwargs, collator = text_recipe(
             dataloader_config, dataset_name=dataset_name, tokenizer=tokenizer
         )
     context = DatasetBuildContext(

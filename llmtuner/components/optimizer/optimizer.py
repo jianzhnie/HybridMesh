@@ -86,7 +86,7 @@ logger = get_logger(__name__)
 __all__ = ["OptimizersContainer"]
 
 
-def _fused_kernel_device_types() -> frozenset[str]:
+def fused_kernel_device_types() -> frozenset[str]:
     """Device types torch ships fused Adam/AdamW kernels for.
 
     torch keeps this list internally (``torch.optim.adam``); asking it beats
@@ -186,7 +186,7 @@ class OptimizersContainer(Optimizer, Stateful):
                 f"Unknown optimizer implementation {implementation!r}; expected "
                 "one of 'fused', 'foreach', 'for-loop'."
             )
-        has_fused_kernel = device_type in _fused_kernel_device_types()
+        has_fused_kernel = device_type in fused_kernel_device_types()
         if implementation == "fused" and not has_fused_kernel:
             # See the module docstring: the flag is a preference, and the
             # default one has to leave a CPU run working.

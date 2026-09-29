@@ -32,7 +32,7 @@ __all__ = [
 
 
 @spmd.register_local_autograd_function
-class _RouterGateLinearFunction(torch.autograd.Function):
+class RouterGateLinearFunction(torch.autograd.Function):
     """Router projection with FP32 output and backward GEMMs."""
 
     @staticmethod
@@ -108,7 +108,7 @@ class RouterGateLinear(nn.Linear):
         super().__init__(dim, num_experts, bias=bias)
 
     def forward(self, input: torch.Tensor) -> torch.Tensor:
-        output_TE = _RouterGateLinearFunction.apply(input, self.weight)
+        output_TE = RouterGateLinearFunction.apply(input, self.weight)
         if self.bias is not None:
             output_TE = output_TE + self.bias.float()
         return output_TE

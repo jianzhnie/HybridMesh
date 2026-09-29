@@ -135,7 +135,7 @@ class SelectiveACConfig:
     Ported from torchtitan's ``SelectiveAC.Config``: ``preserve_rng_state``,
     ``determinism_check`` and ``debug`` are the same knobs with the same
     defaults. The save set itself is not configurable (it is
-    ``activation_checkpoint._get_default_save_ops``); these are the per-run
+    ``activation_checkpoint.get_default_save_ops``); these are the per-run
     knobs around it.
 
     Two deviations from upstream, both forced by what llmtuner runs:

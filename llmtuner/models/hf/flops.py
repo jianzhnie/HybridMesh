@@ -44,7 +44,7 @@ def quadratic_attention_flops_per_token(
     return 6 * num_heads * (qk_head_dim + v_head_dim) * attended_tokens
 
 
-class _MoE(NamedTuple):
+class MoEGeometry(NamedTuple):
     """The MoE geometry of a config, and which layers route."""
 
     num_experts: int
@@ -54,7 +54,7 @@ class _MoE(NamedTuple):
     layers: frozenset[int]
 
 
-# ``_moe_geometry`` has three outcomes: no MoE (``None``), a resolved geometry, or
+# ``moe_geometry`` has three outcomes: no MoE (``None``), a resolved geometry, or
 # a declared MoE whose layers/widths the config does not determine -- which makes
 # the whole FLOPs count unresolvable rather than approximate.
 _UNRESOLVED = object()
@@ -96,31 +96,31 @@ def flops_per_token(arch: PretrainedConfig, *, seq_len: int) -> int:
     friends, whose projections a per-family or model-based count would have to
     supply).
     """
-    hidden = _int_attr(arch, "hidden_size")
-    num_layers = _int_attr(arch, "num_hidden_layers")
-    vocab_size = _int_attr(arch, "vocab_size")
-    num_heads = _int_attr(arch, "num_attention_heads")
+    hidden = int_attr(arch, "hidden_size")
+    num_layers = int_attr(arch, "num_hidden_layers")
+    vocab_size = int_attr(arch, "vocab_size")
+    num_heads = int_attr(arch, "num_attention_heads")
     if None in (hidden, num_layers, vocab_size, num_heads):
         return 0
 
-    head_dims = _attention_head_dims(arch, hidden=hidden, num_heads=num_heads)
+    head_dims = attention_head_dims(arch, hidden=hidden, num_heads=num_heads)
     if head_dims is None:
         return 0
     qk_head_dim, v_head_dim = head_dims
 
-    moe = _moe_geometry(arch, num_layers=num_layers)
+    moe = moe_geometry(arch, num_layers=num_layers)
     if moe is _UNRESOLVED:
         return 0
 
-    attended = _attention_windows(arch, num_layers=num_layers)
+    attended = attention_windows(arch, num_layers=num_layers)
     if attended is None:
         return 0
 
-    dense_intermediate = _int_attr(arch, "intermediate_size")
+    dense_intermediate = int_attr(arch, "intermediate_size")
     if moe is None and dense_intermediate is None:
         return 0
 
-    attention_params = _attention_param_term(
+    attention_params = attention_param_term(
         arch,
         hidden=hidden,
         num_heads=num_heads,
@@ -134,7 +134,7 @@ def flops_per_token(arch: PretrainedConfig, *, seq_len: int) -> int:
     for layer in range(num_layers):
         matmul_flops += attention_params
         if moe is not None and layer in moe.layers:
-            matmul_flops += _moe_ffn_param_term(hidden=hidden, moe=moe)
+            matmul_flops += moe_ffn_param_term(hidden=hidden, moe=moe)
         else:
             matmul_flops += 3 * 2 * hidden * dense_intermediate
 
@@ -153,30 +153,30 @@ def flops_per_token(arch: PretrainedConfig, *, seq_len: int) -> int:
     return 3 * matmul_flops + attention_flops
 
 
-def _int_attr(arch: PretrainedConfig, name: str) -> int | None:
+def int_attr(arch: PretrainedConfig, name: str) -> int | None:
     """An int attribute, or ``None`` when absent or not an int."""
     value = getattr(arch, name, None)
     return value if isinstance(value, int) else None
 
 
-def _first_int_attr(arch: PretrainedConfig, *names: str) -> int | None:
+def first_int_attr(arch: PretrainedConfig, *names: str) -> int | None:
     """The first of ``names`` the config spells as an int (families differ)."""
     for name in names:
-        value = _int_attr(arch, name)
+        value = int_attr(arch, name)
         if value is not None:
             return value
     return None
 
 
-def _attention_head_dims(
+def attention_head_dims(
     arch: PretrainedConfig, *, hidden: int, num_heads: int
 ) -> tuple[int, int] | None:
     """``(qk_head_dim, v_head_dim)``, or ``None`` when the config cannot say."""
-    v_head_dim = _first_int_attr(arch, "v_head_dim")
-    qk_head_dim = _first_int_attr(arch, "qk_head_dim")
+    v_head_dim = first_int_attr(arch, "v_head_dim")
+    qk_head_dim = first_int_attr(arch, "qk_head_dim")
     if qk_head_dim is None:
-        nope = _int_attr(arch, "qk_nope_head_dim")
-        rope = _int_attr(arch, "qk_rope_head_dim")
+        nope = int_attr(arch, "qk_nope_head_dim")
+        rope = int_attr(arch, "qk_rope_head_dim")
         qk_head_dim = None if nope is None or rope is None else nope + rope
     if qk_head_dim is not None or v_head_dim is not None:
         # MLA: half the pair is not enough to size the projections either.
@@ -184,7 +184,7 @@ def _attention_head_dims(
             return None
         return qk_head_dim, v_head_dim
 
-    head_dim = _int_attr(arch, "head_dim")
+    head_dim = int_attr(arch, "head_dim")
     if head_dim is None:
         if hidden % num_heads:
             return None
@@ -192,7 +192,7 @@ def _attention_head_dims(
     return head_dim, head_dim
 
 
-def _attention_param_term(
+def attention_param_term(
     arch: PretrainedConfig,
     *,
     hidden: int,
@@ -206,12 +206,12 @@ def _attention_param_term(
     are built from (``q_lora_rank``/``kv_lora_rank``), which would otherwise be
     a guessed parameter count.
     """
-    num_kv_heads = _int_attr(arch, "num_key_value_heads") or num_heads
-    q_lora_rank = _int_attr(arch, "q_lora_rank")
+    num_kv_heads = int_attr(arch, "num_key_value_heads") or num_heads
+    q_lora_rank = int_attr(arch, "q_lora_rank")
     if q_lora_rank is not None:
-        kv_lora_rank = _int_attr(arch, "kv_lora_rank")
-        qk_rope_head_dim = _int_attr(arch, "qk_rope_head_dim")
-        qk_nope_head_dim = _int_attr(arch, "qk_nope_head_dim")
+        kv_lora_rank = int_attr(arch, "kv_lora_rank")
+        qk_rope_head_dim = int_attr(arch, "qk_rope_head_dim")
+        qk_nope_head_dim = int_attr(arch, "qk_nope_head_dim")
         if None in (kv_lora_rank, qk_rope_head_dim, qk_nope_head_dim):
             return None
         # ``q_b_proj`` widens to the full QK width; ``kv_b_proj`` splits its
@@ -229,28 +229,28 @@ def _attention_param_term(
     return 2 * (q_proj + kv_proj + o_proj)
 
 
-def _moe_geometry(
+def moe_geometry(
     arch: PretrainedConfig, *, num_layers: int
-) -> _MoE | None | object:
+) -> MoEGeometry | None | object:
     """The MoE geometry and its routed layers, ``None`` if there is no MoE.
 
     Returns :data:`_UNRESOLVED` for a declared MoE the config does not pin down
     -- that is the call sites' signal that the whole count must be suppressed.
     """
-    num_experts = _first_int_attr(
+    num_experts = first_int_attr(
         arch, "num_experts", "n_routed_experts", "num_local_experts"
     )
     if num_experts is None:
         return None
-    top_k = _first_int_attr(arch, "num_experts_per_tok", "top_k")
+    top_k = first_int_attr(arch, "num_experts_per_tok", "top_k")
     if top_k is None:
         return _UNRESOLVED
 
     # Dense layers: an explicit prefix (DeepSeek), an explicit index list
     # (Qwen3-MoE), or every-Nth (both, via ``moe_layer_freq``/``decoder_sparse_step``).
-    first_dense = _int_attr(arch, "first_k_dense_replace") or 0
-    sparse_step = _int_attr(arch, "decoder_sparse_step") or 1
-    moe_freq = _int_attr(arch, "moe_layer_freq") or 1
+    first_dense = int_attr(arch, "first_k_dense_replace") or 0
+    sparse_step = int_attr(arch, "decoder_sparse_step") or 1
+    moe_freq = int_attr(arch, "moe_layer_freq") or 1
     mlp_only = getattr(arch, "mlp_only_layers", None) or ()
     layers = frozenset(
         layer
@@ -266,20 +266,20 @@ def _moe_geometry(
     # Every expert's width: the MoE field, or the single width the config uses
     # for every FFN when no layer is dense (Mixtral, OLMoE, GPT-OSS).
     uniform_width = not first_dense and not mlp_only and sparse_step == 1
-    expert_intermediate = _int_attr(arch, "moe_intermediate_size")
+    expert_intermediate = int_attr(arch, "moe_intermediate_size")
     if expert_intermediate is None and uniform_width:
-        expert_intermediate = _int_attr(arch, "intermediate_size")
+        expert_intermediate = int_attr(arch, "intermediate_size")
     if expert_intermediate is None:
         return _UNRESOLVED
 
-    shared_intermediate = _int_attr(arch, "shared_expert_intermediate_size")
+    shared_intermediate = int_attr(arch, "shared_expert_intermediate_size")
     if shared_intermediate is None:
-        n_shared = _int_attr(arch, "n_shared_experts") or 0
+        n_shared = int_attr(arch, "n_shared_experts") or 0
         shared_intermediate = n_shared * expert_intermediate
 
-    if len(layers) != num_layers and _int_attr(arch, "intermediate_size") is None:
+    if len(layers) != num_layers and int_attr(arch, "intermediate_size") is None:
         return _UNRESOLVED
-    return _MoE(
+    return MoEGeometry(
         num_experts=num_experts,
         top_k=top_k,
         expert_intermediate=expert_intermediate,
@@ -288,7 +288,7 @@ def _moe_geometry(
     )
 
 
-def _moe_ffn_param_term(*, hidden: int, moe: _MoE) -> int:
+def moe_ffn_param_term(*, hidden: int, moe: MoEGeometry) -> int:
     """A MoE layer's matmul cost, in units of ``2 * in * out``.
 
     Router + ``top_k`` routed experts + *all* shared experts: the routed
@@ -302,13 +302,13 @@ def _moe_ffn_param_term(*, hidden: int, moe: _MoE) -> int:
     return 2 * (router + routed + shared)
 
 
-def _attention_windows(
+def attention_windows(
     arch: PretrainedConfig, *, num_layers: int
 ) -> list[int | None] | None:
     """Per-layer attention window (``None`` = full), or ``None`` if unresolved."""
     layer_types = getattr(arch, "layer_types", None)
     if layer_types is None:
-        sliding_window = _int_attr(arch, "sliding_window")
+        sliding_window = int_attr(arch, "sliding_window")
         # ``use_sliding_window=False`` is the explicit opt-out; a window that is
         # declared and not opted out of is what the model's own attention reads.
         if sliding_window is not None and getattr(arch, "use_sliding_window", True):
@@ -326,12 +326,12 @@ def _attention_windows(
         if layer_type in ("attention", "full_attention"):
             windows.append(None)
         elif layer_type == "sliding_attention":
-            window = _int_attr(arch, "sliding_window")
+            window = int_attr(arch, "sliding_window")
             if window is None:
                 return None
             windows.append(window)
         elif layer_type == "chunked_attention":
-            chunk = _int_attr(arch, "attention_chunk_size")
+            chunk = int_attr(arch, "attention_chunk_size")
             if chunk is None:
                 return None
             windows.append(chunk)

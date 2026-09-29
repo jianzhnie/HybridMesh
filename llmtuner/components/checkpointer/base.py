@@ -123,7 +123,7 @@ def purge_thread(
         logger.info("Destroying the purge thread.")
 
 
-def _shares_storage(a: torch.Tensor, b: torch.Tensor) -> bool:
+def shares_storage(a: torch.Tensor, b: torch.Tensor) -> bool:
     """Whether ``a`` and ``b`` are backed by the same storage.
 
     For ``DTensor`` the local shard is compared via ``_local_tensor`` rather
@@ -180,7 +180,7 @@ class ModelWrapper(Stateful):
                 or cached.dtype != value.dtype
             ):
                 self.cached_state_dict[key] = value
-            elif not _shares_storage(cached, value):
+            elif not shares_storage(cached, value):
                 cached.copy_(value)
         return self.cached_state_dict
 

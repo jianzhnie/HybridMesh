@@ -27,7 +27,7 @@ from llmtuner.models.common.rope import (
     CosSinRoPE,
     RoPE,
     RoPEConfig,
-    _yarn_inv_freq,
+    yarn_inv_freq,
 )
 
 DIM = 64
@@ -245,6 +245,6 @@ def test_yarn_factor_of_one_is_a_no_op() -> None:
 
 def test_yarn_truncate_controls_fractional_cutoffs() -> None:
     """truncate=True floors/ceils the beta cutoffs; False keeps them fractional."""
-    truncated = _yarn_inv_freq(DIM, 10000.0, 4.0, 32.0, 1.0, 64, True)
-    fractional = _yarn_inv_freq(DIM, 10000.0, 4.0, 32.0, 1.0, 64, False)
+    truncated = yarn_inv_freq(DIM, 10000.0, 4.0, 32.0, 1.0, 64, True)
+    fractional = yarn_inv_freq(DIM, 10000.0, 4.0, 32.0, 1.0, 64, False)
     assert not torch.equal(truncated, fractional)

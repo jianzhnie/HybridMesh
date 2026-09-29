@@ -71,7 +71,7 @@ class IndexedJsonlSource:
             self.patterns = tuple(self.patterns)
 
 
-class _IndexedJsonlDataSource:
+class IndexedJsonlDataSource:
     """The offset index :func:`build_source` builds for an ``IndexedJsonlSource``.
 
     Separate from the source so the index is built once per ``build_source()``
@@ -80,7 +80,7 @@ class _IndexedJsonlDataSource:
     """
 
     def __init__(self, patterns: tuple[str, ...]) -> None:
-        self._paths = _file_patterns_to_paths(patterns)
+        self._paths = file_patterns_to_paths(patterns)
         self._path_ids = array("I")
         self._byte_offsets = array("Q")
         # TODO(data-jsonl-sidecar): Startup rescans every JSONL file per rank and
@@ -111,7 +111,7 @@ class _IndexedJsonlDataSource:
             return json.loads(file.readline())
 
 
-def _reject_duplicated_hf_fields(load_dataset_kwargs: dict[str, Any]) -> None:
+def reject_duplicated_hf_fields(load_dataset_kwargs: dict[str, Any]) -> None:
     """Refuse kwargs that shadow the sources' first-class Hugging Face fields."""
     duplicated = {"split", "name", "revision", "streaming"} & (
         load_dataset_kwargs.keys()
@@ -134,10 +134,10 @@ class HuggingFaceRandomAccessSource:
     load_dataset_kwargs: dict[str, Any] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
-        _reject_duplicated_hf_fields(self.load_dataset_kwargs)
+        reject_duplicated_hf_fields(self.load_dataset_kwargs)
 
 
-class _HuggingFaceRandomAccessDataSource:
+class HuggingFaceRandomAccessDataSource:
     """The materialized dataset :func:`build_source` builds for a
     ``HuggingFaceRandomAccessSource``."""
 
@@ -167,7 +167,7 @@ class HuggingFaceStreamingSource:
     load_dataset_kwargs: dict[str, Any] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
-        _reject_duplicated_hf_fields(self.load_dataset_kwargs)
+        reject_duplicated_hf_fields(self.load_dataset_kwargs)
 
 
 def build_source(
@@ -197,7 +197,7 @@ def build_source(
     drop rows.
     """
     if isinstance(source, IndexedJsonlSource):
-        return _IndexedJsonlDataSource(source.patterns)
+        return IndexedJsonlDataSource(source.patterns)
     if isinstance(source, HuggingFaceRandomAccessSource):
         dataset = datasets.load_dataset(
             source.path,
@@ -212,7 +212,7 @@ def build_source(
                 "random-access Hugging Face source requires one Dataset; "
                 f"got {type(dataset).__qualname__}"
             )
-        return _HuggingFaceRandomAccessDataSource(dataset)
+        return HuggingFaceRandomAccessDataSource(dataset)
     if isinstance(source, HuggingFaceStreamingSource):
         dataset = datasets.load_dataset(
             source.path,
@@ -233,7 +233,7 @@ def build_source(
             raise TypeError(
                 "Hugging Face streaming source does not support exact resume"
             )
-        return _HuggingFaceStreamingIterDataset(
+        return HuggingFaceStreamingIterDataset(
             # Split before the shuffle window, not after: every rank must draw
             # from its own stream, or two ranks would shuffle the same rows
             # into different orders and train on the same data twice.
@@ -252,7 +252,7 @@ def build_source(
     raise TypeError(f"unhandled source type {type(source).__qualname__}")
 
 
-class _HuggingFaceStreamingIterDataset(grain.IterDataset):
+class HuggingFaceStreamingIterDataset(grain.IterDataset):
     """The built node :func:`build_source` produces for a
     ``HuggingFaceStreamingSource``.
 
@@ -274,14 +274,14 @@ class _HuggingFaceStreamingIterDataset(grain.IterDataset):
         super().__init__()
 
     def __iter__(self) -> grain.DatasetIterator:
-        return _HuggingFaceCursorIterator(
+        return HuggingFaceCursorIterator(
             self._dataset,
             repeat=self._repeat,
             shuffle=self._shuffle,
         )
 
 
-def _file_patterns_to_paths(patterns: tuple[str, ...]) -> tuple[str, ...]:
+def file_patterns_to_paths(patterns: tuple[str, ...]) -> tuple[str, ...]:
     """Return sorted, unique absolute paths matched by file patterns.
 
     Every pattern must match at least one file. Duplicate resolved paths are
@@ -298,7 +298,7 @@ def _file_patterns_to_paths(patterns: tuple[str, ...]) -> tuple[str, ...]:
     return tuple(paths)
 
 
-class _HuggingFaceCursorIterator(grain.DatasetIterator):
+class HuggingFaceCursorIterator(grain.DatasetIterator):
     """Exposes a Hugging Face streaming cursor to Grain checkpoint recursion."""
 
     def __init__(

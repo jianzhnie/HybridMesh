@@ -69,7 +69,7 @@ __all__ = ["HFTransformerModel"]
 
 
 
-def _flex_supported() -> str:
+def flex_supported() -> str:
     """The attention implementation this machine can actually run.
 
     Flex attention lowers through inductor, and inductor has no CPU target, so
@@ -115,7 +115,7 @@ def flex_attention_hf(module, query, key, value, attention_mask, **kwargs):
     return out, None
 
 
-def _uses_dsa(config) -> bool:
+def uses_dsa(config) -> bool:
     """True if the model uses DeepSeek-style sparse attention (DSA).
 
     DSA models (e.g. GLM-5, model_type 'glm_moe_dsa') run an auxiliary
@@ -153,7 +153,7 @@ def first_present(module: nn.Module, names: tuple[str, ...], what: str) -> str:
     )
 
 
-def _collapse_batch_dims(
+def collapse_batch_dims(
     inputs: torch.Tensor, labels: torch.Tensor
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Flatten a ``(B, T)`` batch into the ``(B*T,)`` shape the forward takes.
@@ -173,7 +173,7 @@ def _collapse_batch_dims(
     return inputs.reshape(-1), labels.reshape(-1)
 
 
-def _document_shift(labels: torch.Tensor, *, seq_len: int) -> torch.Tensor:
+def document_shift(labels: torch.Tensor, *, seq_len: int) -> torch.Tensor:
     """Next-token targets within a row, ``IGNORE_INDEX`` at each row end.
 
     The synthetic source hands over labels equal to its inputs, so the shift is
@@ -204,7 +204,7 @@ class HFTransformerModel(nn.Module):
         # resolved once here rather than per forward. The mask family is decided
         # in ``get_attention_masks``, which is the one place that knows both the
         # model and the batch's positions.
-        self._uses_dsa = _uses_dsa(config)
+        self.uses_dsa = uses_dsa(config)
         num_heads = getattr(config, "num_attention_heads", None)
         num_kv_heads = getattr(config, "num_key_value_heads", None)
         num_kv_heads = num_heads if num_kv_heads is None else num_kv_heads
@@ -221,7 +221,7 @@ class HFTransformerModel(nn.Module):
                 f"num_attention_heads ({num_heads}) must be divisible by "
                 f"num_key_value_heads ({num_kv_heads})"
             )
-        config._attn_implementation = _flex_supported()
+        config._attn_implementation = flex_supported()
         AttentionInterface._global_mapping[_ATTN_IMPLEMENTATION] = flex_attention_hf
 
         model_cls = resolve_model_class(config)
@@ -519,7 +519,7 @@ class HFTransformerModel(nn.Module):
 
         if isinstance(input_dict, Batch):
             # Rows are independent documents of length T.
-            labels = _document_shift(
+            labels = document_shift(
                 input_dict.labels, seq_len=input_dict.labels.shape[-1]
             )
             inputs = input_dict.input_ids
@@ -532,7 +532,7 @@ class HFTransformerModel(nn.Module):
             # load-balancing statistics (see forward's ``padding_mask``).
             padding_mask = input_dict.get("padding_mask")
 
-        inputs, labels = _collapse_batch_dims(inputs, labels)
+        inputs, labels = collapse_batch_dims(inputs, labels)
         if positions is not None:
             positions = positions.reshape(-1)
         if padding_mask is not None:
@@ -647,14 +647,14 @@ class HFTransformerModel(nn.Module):
         compute full attention.
 
         A DSA model gets a dense 4D additive mask instead: its own attention
-        code reads the mask as a tensor (see ``_uses_dsa``). ``attn_mask_type``
+        code reads the mask as a tensor (see ``uses_dsa``). ``attn_mask_type``
         means the same thing there -- plain causal vs causal-and-same-document
         -- so the two families cannot disagree about what "block_causal" allows.
         """
         block_causal = (
             getattr(self.model.config, "attn_mask_type", "causal") == "block_causal"
         )
-        if self._uses_dsa:
+        if self.uses_dsa:
             return build_dense_attention_mask(
                 positions,
                 dtype=self.tok_embeddings.weight.dtype,
@@ -699,7 +699,7 @@ class HFTransformerModel(nn.Module):
         it as ``attention_masks`` -- Q-sharded by ``shard_attention_mask_for_cp``
         for kv_allgather, full-length and unsharded for ulysses.
         """
-        if self._uses_dsa:
+        if self.uses_dsa:
             # A dense mask is built, not modded, and CP shards masks by
             # rewriting a BlockMask's indices (shard_attention_mask_for_cp takes
             # a BlockMask and nothing else). Sharding the dense tensor instead

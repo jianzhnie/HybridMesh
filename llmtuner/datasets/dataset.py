@@ -176,19 +176,19 @@ def build_dataset(
     to be added here -- and the union below stops type-checking until it is.
     """
     if isinstance(node, SingleDataset):
-        return _build_single(
+        return build_single(
             node,
             context=context,
             dataset_iteration_policy=dataset_iteration_policy,
         )
     if isinstance(node, DatasetMix):
-        return _build_mix(
+        return build_mix(
             node,
             context=context,
             dataset_iteration_policy=dataset_iteration_policy,
         )
     if isinstance(node, DatasetConcat):
-        return _build_concat(
+        return build_concat(
             node,
             context=context,
             dataset_iteration_policy=dataset_iteration_policy,
@@ -196,7 +196,7 @@ def build_dataset(
     raise TypeError(f"unhandled dataset type {type(node).__qualname__}")
 
 
-def _build_single(
+def build_single(
     node: SingleDataset,
     *,
     context: DatasetBuildContext,
@@ -343,7 +343,7 @@ class DatasetMix:
     datasets: tuple[WeightedDataset, ...]
 
 
-def _build_mix(
+def build_mix(
     node: DatasetMix,
     *,
     context: DatasetBuildContext,
@@ -384,7 +384,7 @@ class DatasetConcat:
     datasets: tuple[SingleDataset | DatasetMix | DatasetConcat, ...]
 
 
-def _build_concat(
+def build_concat(
     node: DatasetConcat,
     *,
     context: DatasetBuildContext,
