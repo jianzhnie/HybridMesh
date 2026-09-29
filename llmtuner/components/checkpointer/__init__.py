@@ -61,12 +61,16 @@ _EXPORT_SOURCES = {
     "BaseCheckpointManager": "base",
     "CheckpointStorage": "base",
     "ModelWrapper": "base",
-    "DATALOADER": "base",
-    "EMA": "base",
-    "LR_SCHEDULER": "base",
-    "MODEL": "base",
-    "OPTIMIZER": "base",
-    "TRAIN_STATE": "base",
+    # The state keys are resolved from their own dependency-free module rather
+    # than through ``base``: the keys belong there, and a re-export chain was
+    # one more place for the two to disagree.
+    "DATALOADER": "checkpoint_keys",
+    "EMA": "checkpoint_keys",
+    "LR_SCHEDULER": "checkpoint_keys",
+    "MODEL": "checkpoint_keys",
+    "OPTIMIZER": "checkpoint_keys",
+    "SAFETENSORS_INDEX": "checkpoint_keys",
+    "TRAIN_STATE": "checkpoint_keys",
     "AsyncMode": "dcp",
     "CheckpointManager": "dcp",
     "canonical_fqn": "utils",

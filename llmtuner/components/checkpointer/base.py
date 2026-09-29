@@ -60,34 +60,17 @@ from torch.distributed.tensor import DTensor
 from ...accelerator import dist_utils
 from ...utils.gc import GarbageCollection
 from ...utils.logger_utils import get_logger
-from . import checkpoint_keys, filesystem
-from .checkpoint_keys import (
-    DATALOADER as DATALOADER,
-)
-from .checkpoint_keys import (
-    EMA as EMA,
-)
-from .checkpoint_keys import (
-    LR_SCHEDULER as LR_SCHEDULER,
-)
-from .checkpoint_keys import (
-    MODEL as MODEL,
-)
-from .checkpoint_keys import (
-    OPTIMIZER as OPTIMIZER,
-)
-from .checkpoint_keys import (
-    TRAIN_STATE as TRAIN_STATE,
-)
+from . import filesystem
+from .checkpoint_keys import EMA, LR_SCHEDULER, MODEL, OPTIMIZER
 
 logger = get_logger(__name__)
 
-# The state keys are defined in ``checkpointer/checkpoint_keys.py`` so that
-# ``llmtuner/config/`` can read them without importing this package. The import
-# above re-exports them under their long-standing names, and ``__all__`` is
-# taken from that module rather than repeated here -- one list, one place.
-__all__ = list(checkpoint_keys.__all__)
-
+__all__ = [
+    "BaseCheckpointManager",
+    "CheckpointStorage",
+    "EXPORT_DTYPE_MAP",
+    "ModelWrapper",
+]
 
 def purge_thread(
     purge_queue: queue.Queue[str | None],
@@ -308,12 +291,17 @@ class BaseCheckpointManager(ABC):
         lr_scheduler: Any,
         ema: Any | None = None,
         states: dict[str, Any],
+        folder: str,
     ) -> None:
         """Assemble the state dict and the load/save policy every backend shares.
 
         A backend calls this first and then adds its own storage; a backend that
         finds ``self.enable`` false must return without doing anything else, so
         ``--no-checkpoint.enable`` costs no storage setup and no error paths.
+
+        ``folder`` is the run's dump folder; the checkpoint's own subfolder
+        (``config.folder``) is joined here, so both backends write and log the
+        same destination.
 
         The state keys go in this order on purpose. ``model`` first, then
         ``optimizer`` passed through unwrapped -- it is an ``OptimizersContainer``
@@ -328,6 +316,8 @@ class BaseCheckpointManager(ABC):
         if not self.enable:
             return
 
+        self.folder = filesystem.join(folder, config.folder)
+        self.interval = config.interval
         self.states = states
         states.update(
             {

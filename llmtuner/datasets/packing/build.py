@@ -13,7 +13,7 @@ from ..dataset import (
     as_iter_dataset,
     build_dataset,
 )
-from ..types import DatasetBuildContext, DatasetIterationPolicy
+from ..types import DatasetBuildContext, DatasetIterationPolicy, require_positive
 from .conversions import (
     packing_output_is_full,
     packing_output_to_text_sequence,
@@ -91,8 +91,7 @@ def build_first_fit_packing(
     ``num_packing_bins`` is how many candidate rows are kept open; more bins can
     reduce padding, but buffer more samples.
     """
-    if num_packing_bins <= 0:
-        raise ValueError("num_packing_bins must be positive")
+    require_positive("num_packing_bins", num_packing_bins)
 
     dataset_graph = build_dataset(
         dataset,
@@ -137,4 +136,3 @@ def build_first_fit_packing(
             max_context_length=context.max_context_length,
         )
     )
-

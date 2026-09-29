@@ -26,7 +26,7 @@ from torch.distributed.checkpoint.stateful import Stateful
 from ..components.tokenizer import BaseTokenizer
 from .collators import Collator, TextCollator, TrainerBatch
 from .dataset import as_iter_dataset
-from .types import DatasetBuildContext
+from .types import DatasetBuildContext, require_positive
 
 __all__ = [
     "BaseDataLoader",
@@ -46,6 +46,23 @@ class DataloaderExhaustedError(Exception):
     """An exception that indicates dataloader exhaustion."""
 
     pass
+
+
+def require_same_dp_degree(saved_dp_world_size: int, dp_world_size: int) -> None:
+    """Reject a resume whose checkpoint was written under another DP degree.
+
+    Every loader keys its saved state by the *global* batch's split, so a
+    different degree means the checkpoint describes a different slice layout:
+    resuming would train on a different sample split with nothing to show for it
+    (the loss is normalized by the same token count either way).
+
+    Lives here because this module owns the resume contract; the synthetic
+    loader implements the same one and was raising its own copy of the message.
+    """
+    if saved_dp_world_size != dp_world_size:
+        raise ValueError(
+            "cannot resume after changing the effective data-parallel degree"
+        )
 
 
 class BaseDataLoader(Stateful, ABC):
@@ -99,8 +116,8 @@ class GrainDataLoader(BaseDataLoader):
         into the build context for the packing nodes to read, and the collators
         ignore it.
         """
-        if max_num_documents is not None and max_num_documents <= 0:
-            raise ValueError("max_num_documents must be positive")
+        if max_num_documents is not None:
+            require_positive("max_num_documents", max_num_documents)
         if read_options is None:
             read_options = grain.ReadOptions()
         # The graph is built before this loader exists and may already have been
@@ -174,10 +191,7 @@ class GrainDataLoader(BaseDataLoader):
             raise ValueError(
                 f"unsupported GrainDataLoader state version {state_dict['version']}"
             )
-        if state_dict["dp_world_size"] != self._dp_world_size:
-            raise ValueError(
-                "cannot resume after changing the effective data-parallel degree"
-            )
+        require_same_dp_degree(state_dict["dp_world_size"], self._dp_world_size)
         if self._rank_id not in state_dict:
             raise ValueError(
                 f"checkpoint is missing dataloader state for {self._rank_id}"

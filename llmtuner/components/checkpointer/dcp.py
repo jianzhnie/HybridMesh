@@ -63,13 +63,10 @@ if TYPE_CHECKING:
 
 from ...utils.logger_utils import get_logger
 from .base import (
-    DATALOADER,
-    EMA,
-    LR_SCHEDULER,
-    MODEL,
     BaseCheckpointManager,
     purge_thread,
 )
+from .checkpoint_keys import DATALOADER, EMA, LR_SCHEDULER, MODEL, SAFETENSORS_INDEX
 
 logger = get_logger(__name__)
 
@@ -174,12 +171,11 @@ class CheckpointManager(BaseCheckpointManager):
             lr_scheduler=lr_scheduler,
             ema=ema,
             states=states,
+            folder=folder,
         )
         if not self.enable:
             return
 
-        self.folder = filesystem.join(folder, config.folder)
-        self.interval = config.interval
         self._storage = FilesystemCheckpointStorage()
 
         self.sd_adapter = sd_adapter
@@ -571,9 +567,7 @@ class CheckpointManager(BaseCheckpointManager):
 
     def _is_valid_checkpoint(self, checkpoint_dir: str) -> bool:
         return self._is_resumable_checkpoint(checkpoint_dir) or (
-            self._storage.isfile(
-                filesystem.join(checkpoint_dir, "model.safetensors.index.json")
-            )
+            self._storage.isfile(filesystem.join(checkpoint_dir, SAFETENSORS_INDEX))
         )
 
     def _flattened_model_states_sd(

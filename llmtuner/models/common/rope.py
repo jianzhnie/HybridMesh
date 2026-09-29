@@ -24,6 +24,7 @@ Shape suffix legend (per module):
 from __future__ import annotations
 
 import math
+from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from typing import Literal
 
@@ -127,13 +128,14 @@ class RoPEConfig:
     truncate: bool = True
 
 
-class RoPE(nn.Module):
+class RoPE(nn.Module, ABC):
     """Rotary position embedding, with the cache format left to subclasses.
 
     Concrete subclasses pick a cache layout -- complex exponentials
     (``ComplexRoPE``) or concatenated cos/sin (``CosSinRoPE``) -- and therefore
     how the rotation is applied. Everything else (cache sizing, position
-    lookup, broadcast shape) is shared here.
+    lookup, broadcast shape) is shared here. The three hooks below are abstract:
+    the class holds no rotation of its own, so it is not instantiable.
     """
 
     def __init__(self, config: RoPEConfig):
@@ -143,10 +145,11 @@ class RoPE(nn.Module):
         # would only bloat checkpoints and risk it going stale on a reload.
         self.register_buffer("cache", self._precompute_cache(), persistent=False)
 
+    @abstractmethod
     def _precompute_cache(self) -> torch.Tensor:
         """Build the reusable cache for all positions up to ``max_context_length``."""
-        raise NotImplementedError
 
+    @abstractmethod
     def _reshape_cache(
         self,
         query: torch.Tensor,
@@ -158,9 +161,9 @@ class RoPE(nn.Module):
             query: Query tensor with shape ``[T, N, H]``.
             positions: Optional position IDs with shape ``[T]``.
         """
-        raise NotImplementedError
 
     @staticmethod
+    @abstractmethod
     def apply_rotary_emb(
         query: torch.Tensor,
         key: torch.Tensor | None,
@@ -182,7 +185,6 @@ class RoPE(nn.Module):
             Rotated query tensor when ``key`` is ``None``; otherwise rotated
             query and key tensors with the same shapes and dtypes as inputs.
         """
-        raise NotImplementedError
 
     def forward(
         self,

@@ -371,15 +371,6 @@ class OptimizersContainer(Optimizer, Stateful):
             init_optim_state(optimizer)
             load_flat_optim_state_dict(optimizer, state_dict)
 
-    def init_cache_state_dict(self) -> None:
-        """Initialize cached state dict for TorchFT. No-op for base class.
-
-        Present because upstream's subclasses override it and the training loop
-        would call it unconditionally; keeping the no-op means such a caller
-        does not have to know which container it holds.
-        """
-        pass
-
     def _post_init(self, all_params: list[nn.Parameter]) -> None:
         # ``Optimizer.__init__`` is what populates ``param_groups`` and sets up
         # the hook machinery that ``register_step_pre_hook`` needs. The empty

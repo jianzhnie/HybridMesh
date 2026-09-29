@@ -61,11 +61,10 @@ if TYPE_CHECKING:
 
 from ...utils.logger_utils import get_logger
 from .base import (
-    MODEL,
-    OPTIMIZER,
     BaseCheckpointManager,
     purge_thread,
 )
+from .checkpoint_keys import MODEL, OPTIMIZER
 
 logger = get_logger(__name__)
 
@@ -344,6 +343,7 @@ class TorchCheckpointingManager(BaseCheckpointManager):
             lr_scheduler=lr_scheduler,
             ema=ema,
             states=states,
+            folder=folder,
         )
         if not self.enable:
             return
@@ -354,7 +354,6 @@ class TorchCheckpointingManager(BaseCheckpointManager):
         self.save_future: Future[Any] | None = None
         self.purge_thread: threading.Thread | None = None
 
-        self.folder = filesystem.join(folder, config.folder)
         # Checked here, not only in the storage adapter: a save runs no path
         # probe when retention is off, so it would otherwise reach the backend
         # and be mangled by ``Path`` rather than failing.
@@ -368,8 +367,6 @@ class TorchCheckpointingManager(BaseCheckpointManager):
                     "not yet supported by torch_checkpointing. Use the DCP "
                     "checkpoint manager for remote storage."
                 )
-
-        self.interval = config.interval
 
         save_config = (
             sync_save_config(backend, use_barrier=False)

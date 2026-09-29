@@ -83,7 +83,7 @@ from ..dataset import (
     is_not_none,
 )
 from ..sources import HuggingFaceStreamingSource
-from ..types import DatasetBuildContext, DatasetIterationPolicy
+from ..types import DatasetBuildContext, DatasetIterationPolicy, require_positive
 from .image import calculate_vision_tokens, process_image, resize_to_pixel_budget
 from .text import insert_vision_placeholders
 
@@ -413,8 +413,7 @@ def build_mm_sample_packing(
     ``num_packing_bins`` is how many candidate rows are kept open; more bins can
     reduce padding, but retain more media.
     """
-    if num_packing_bins <= 0:
-        raise ValueError("num_packing_bins must be positive")
+    require_positive("num_packing_bins", num_packing_bins)
 
     dataset_graph = build_dataset(
         dataset,

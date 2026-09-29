@@ -14,6 +14,7 @@ from typing import Any
 
 from torch.distributed.checkpoint import HuggingFaceStorageReader
 
+from ...components.checkpointer.checkpoint_keys import SAFETENSORS_INDEX
 from ...utils.logger_utils import get_logger
 
 logger = get_logger(__name__)
@@ -30,7 +31,7 @@ class HFTransformerStateDictAdapter:
 
         if hf_assets_path is None:
             return
-        index_path = os.path.join(hf_assets_path, "model.safetensors.index.json")
+        index_path = os.path.join(hf_assets_path, SAFETENSORS_INDEX)
         if not os.path.isfile(index_path):
             # HuggingFaceStorageReader also supports a single model.safetensors.
             return

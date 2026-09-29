@@ -24,8 +24,8 @@ from typing import Any
 
 import torch
 
-from .loader import BaseDataLoader
-from .types import Batch
+from .loader import BaseDataLoader, require_same_dp_degree
+from .types import Batch, require_positive
 
 __all__ = [
     "Batch",
@@ -126,8 +126,7 @@ class RandomTokenDataLoader(BaseDataLoader):
         dp_rank: int = 0,
         dp_world_size: int = 1,
     ) -> None:
-        if dp_world_size <= 0:
-            raise ValueError("dp_world_size must be positive")
+        require_positive("dp_world_size", dp_world_size)
         if not 0 <= dp_rank < dp_world_size:
             raise ValueError(
                 f"dp_rank must be in [0, {dp_world_size}), got {dp_rank}"
@@ -172,13 +171,9 @@ class RandomTokenDataLoader(BaseDataLoader):
     def load_state_dict(self, state_dict: dict[str, Any]) -> None:
         if not state_dict:
             return
-        # Same reasoning as ``GrainDataLoader``: a checkpoint written under a
-        # different DP degree describes a different global batch, so resuming
-        # would silently train on a different sample split.
-        if state_dict.get("dp_world_size") != self._dp_world_size:
-            raise ValueError(
-                "cannot resume after changing the effective data-parallel degree"
-            )
+        require_same_dp_degree(
+            state_dict.get("dp_world_size"), self._dp_world_size
+        )
         resume_at = state_dict.get("steps", 0)
         if resume_at < self._position:
             raise ValueError(
