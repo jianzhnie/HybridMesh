@@ -164,7 +164,7 @@ def _reference_trajectory(cfg: LLMTunerConfig) -> list[float]:
             logits = model(batch.input_ids[row].reshape(-1))
             loss = cross_entropy_loss(logits, targets[row].reshape(-1))
             # Normalized BEFORE backward, as the trainer's PP body does -- the
-            # schedule's ``_scalar_loss_fn`` divides by this same count. Not
+            # schedule's ``scalar_loss_fn`` divides by this same count. Not
             # cosmetic: ``clip_grad_norm_`` below reads the gradient, so
             # dividing afterwards would clip a gradient ``num_valid`` times too
             # large against an absolute threshold. The divisor is the whole

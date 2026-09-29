@@ -467,7 +467,7 @@ helper 在前文涉及关键算法时单列。成组条目（`config/`、`traine
 | `accelerator/monitoring.py` | device/memory/FLOPS helpers | C；部分意图可参考 `tools/utils.py` |
 | `accelerator/spmd_context.py` | SPMD mesh 上下文 | C，pip `spmd_types` 适配 |
 
-四条横切约定，适用于上表所有模块：
+五条横切约定，适用于上表所有模块：
 
 - **公开面**：稳定面 = `llmtuner.LLMTunerConfig` / `llmtuner.Trainer` /
   `llmtuner.config.*` / CLI；集成面与内部分级见 design doc §3.4。
@@ -481,6 +481,18 @@ helper 在前文涉及关键算法时单列。成组条目（`config/`、`traine
   兼 `ValueError`）、`UnsupportedCombinationError`（组合拒绝，兼
   `NotImplementedError`）、`EnvironmentUnsupportedError`（依赖缺失、文案带解锁条件，
   兼 `NotImplementedError`）；可选包缺失保持 `ImportError`。
+- **命名与私有面**：模块级前导 `_` 只表示"这个模块的实现细节"，因此**凡跨模块 import
+  或调用的符号一律不带 `_`**；反之，只被本模块使用的 helper 就该带 `_`（把它做成公开名
+  会把实现细节冻成 API）。三类例外保留前导 `_`：① PyTorch/HF 协议要求的方法名
+  （`_setup_context`、`_backward`、`_apply`、`_load_from_state_dict`…）；② 与上游同名的
+  私有 helper（它们是映射表的锚点，见 §10 —— 34 个）；③ 基类给子类/同包协作者用的
+  protected 方法（`checkpointer/base.py` 的 `_should_save` 等）。类内 `self._attr`
+  之类的实例状态不受本条约束（那是封装，不是命名问题）。
+  2026-09-29 按此审计过一遍 `llmtuner/` 的模块级函数与类：95 个前导 `_` 符号里，
+  6 个真正被跨模块使用（`packing/{conversions,iterators}` 的 5 个 + `pipeline_parallel/
+  apply.py::scalar_loss_fn`）已去私有化，`models/common/scatter_add.py` 里 `register_fake`
+  的匿名 `def _` 命名为 `deterministic_scatter_add_fake`；其余按"上游同名 34 个 / 仅本模块
+  使用"保留，审计后**已无跨模块使用的私有模块级符号**（脚本复查只剩两处字符串/同名误报）。
 
 ## 11. 上游同步检查清单
 

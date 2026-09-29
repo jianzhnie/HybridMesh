@@ -538,7 +538,7 @@ llmtuner 侧是 `datasets/multimodal/image.py`），本表的 llmtuner 列是唯
   1. **vocab-parallel loss 四处接线**（D 类 `lm_head` 缺口的第一步，纯 no-op）：
      `Trainer._loss_vocab_kwargs()`（TP mesh + 模型自身 HF config 的 `vocab_size`，
      新增 `HFTransformerModel.vocab_size` 属性）驱动 `Trainer._loss_sum`、
-     `chunked_lm_head_cross_entropy`、PP 的 `_scalar_loss_fn` 与 Validator 路径；
+     `chunked_lm_head_cross_entropy`、PP 的 `scalar_loss_fn`（2026-09-29 去私有化，原名 `_scalar_loss_fn`）与 Validator 路径；
      选择仍按形状（`components/loss.py`），所以 lm_head 复制的今天每条路径都走
      普通 CE，逐位不变。测试：`test_chunked_loss.py` 增 1 例（分片参数下值与三份
      梯度不变）、`test_trainer.py` 增 2 例（缺 TP 轴/缺词表 → 空 kwargs）、
@@ -907,8 +907,8 @@ llmtuner 侧是 `datasets/multimodal/image.py`），本表的 llmtuner 列是唯
   (a) `packing.py`（3 hunk / 28 行）：只有两处 `Config.build()` → `build_*_packing()` 自由函数，
   grain 图本身逐字相同——`length_struct`/`padding_struct`（`labels` 填 `IGNORE_INDEX`、`padding_mask`
   填 `True`）、`meta_features=("labels","positions")`、`seed`/`shuffle_bins`/`num_packing_bins`/
-  `max_sequences_per_bin`、`_DocumentAwareConcatThenSplitIterDataset/Iterator`（含 remainder
-  `get_state/set_state`）、`_next_document_chunk_end`/`_packing_output_is_full` 全部无差异。
+  `max_sequences_per_bin`、`DocumentAwareConcatThenSplitIterDataset/Iterator`（2026-09-29 去私有化，原名带 `_` 前缀；含 remainder
+  `get_state/set_state`）、`_next_document_chunk_end`/`packing_output_is_full`（后者 2026-09-29 去私有化）全部无差异。
   (b) `collators.py`（4/21）：`TextCollator` 的载荷逐字相同（zeros + `torch.cat` + 超长 raise +
   `positions[num_tokens:].remainder_(max_context_length)` + `num_valid_tokens=(labels !=
   IGNORE_INDEX).sum()`）。差异只有类型面：上游 `TrainingMicrobatch`/`TokenizedTrainingMicrobatch`
@@ -1136,6 +1136,35 @@ llmtuner 侧是 `datasets/multimodal/image.py`），本表的 llmtuner 列是唯
   `config/parallel.py` / `trainer/builder.py` 回到原状，该能力继续按 D 表登记为缺口（上面那两行）。
   撤下的原因值得记下：它是本批唯一需要新增配置面与类型面的东西，而那两项的收益（单机模拟多卡）在
   本仓的验证边界里仍属"未覆盖"，不如保持接口不变。
+
+- 2026-09-29 二十次增量（`_` 私有面的全仓审计与去私有化）：
+  (a) **审计口径**：脚本枚举 `llmtuner/` 全部模块级 `def`/`class`（排除 dunder），逐个问
+  ①是否被其它模块 import/调用（那就不是"模块私有"）、②是否与上游同名（是则保留上游拼写，
+  见 §10 映射）、③是否 PyTorch/HF 协议要求的方法名。审计前 102 个前导 `_` 符号（含
+  `scatter_add.py` 里那个匿名 `def _`）。
+  (b) **去私有化 6 个（真跨模块使用）**：`datasets/packing/conversions.py` 的
+  `_packing_output_is_full` / `_text_sequence_to_packing_input` / `_packing_output_to_text_sequence`
+  → 去前缀（`packing/build.py` 导入它们——上游把这些放在单一 `packing.py` 里，所以上游的
+  `_` 是真的私有；llmtuner 拆包后就成了假私有），`datasets/packing/iterators.py` 的
+  `_DocumentAwareConcatThenSplitIterDataset` / `_SplitTextSequenceDocuments` → 去前缀（同上；
+  它们的 iterator 伙伴 `_DocumentAwareConcatThenSplitIterator` 只在本模块用，保留 `_`），
+  `parallel/pipeline_parallel/apply.py` 的 `_scalar_loss_fn` → `scalar_loss_fn`
+  （`trainer/builder.py`、`trainer/pp_steps.py` 与两个 PP 集成测试都在调它）。
+  另把 `models/common/scatter_add.py` 中 `@register_fake` 的匿名 `def _` 命名为
+  `deterministic_scatter_add_fake`（PyTorch 的注册钩子不需要匿名名，堆栈里也能读）。
+  (c) **保留面及其理由（写进 symbol guide 第五条横切约定）**：模块级 `_` = 本模块实现细节；
+  跨模块使用的必须公开；三类例外保留——协议要求的方法名、上游同名的私有 helper（34 个）、
+  基类给子类/同包协作者的 protected 方法。类内 `self._x` 属于封装，不在本条范围。
+  顺带记录方法层的同类审计：115 个私有方法里有 11 个被"别的模块"调用，逐个看过都属
+  受保护成员（`checkpointer/base.py` 的 `_should_save`/`_purge_stale_checkpoints`/
+  `_create_checkpoint_id` 被子类覆盖或调用；`Trainer` 被拆成 trainer/builder/validate/pp_steps
+  后同包互调的 `_loss_sum`/`_param_context`/`_seed_everything` 等；`feed_forward.py::_split_gate_up`
+  被 `async_linear.DistGEMMFeedForward` 这个子类调用；`optimizer.py::_post_init`/`_validate_params`
+  被 `ema.py` 的子类调用），故保留。
+  (d) 验证：审计脚本复查「跨模块使用的模块级私有符号」= 0（仅剩两处误报：capabilities 条目里
+  对 `_disable_dynamo_lru_cache` 的字符串引用、另一个同名 `_resolve`）；`ruff check`（F821
+  覆盖改名后的引用）与 `tests/unit_tests` 全量通过（248 passed / 56 skipped / 9 failed，失败集
+  不变）。
 
 - 检查后续漂移：`git -C <torchtitan> log f35966713..HEAD -- torchtitan/`。
 - 2026-09-23 映射修订：上游 `distributed/linear.py` 已删除、内容迁入

@@ -15,13 +15,13 @@ from ..dataset import (
 )
 from ..types import DatasetBuildContext, DatasetIterationPolicy
 from .conversions import (
-    _packing_output_is_full,
-    _packing_output_to_text_sequence,
-    _text_sequence_to_packing_input,
+    packing_output_is_full,
+    packing_output_to_text_sequence,
+    text_sequence_to_packing_input,
 )
 from .iterators import (
-    _DocumentAwareConcatThenSplitIterDataset,
-    _SplitTextSequenceDocuments,
+    DocumentAwareConcatThenSplitIterDataset,
+    SplitTextSequenceDocuments,
 )
 
 
@@ -54,7 +54,7 @@ def build_concat_then_split_packing(
     )
     if context.max_num_documents is not None:
         dataset_graph = as_iter_dataset(dataset_graph, context=context)
-        return _DocumentAwareConcatThenSplitIterDataset(
+        return DocumentAwareConcatThenSplitIterDataset(
             dataset_graph,
             max_num_documents_per_row=context.max_num_documents,
             max_context_length=context.max_context_length,
@@ -62,7 +62,7 @@ def build_concat_then_split_packing(
         )
     dataset_graph = dataset_graph.map(
         partial(
-            _text_sequence_to_packing_input,
+            text_sequence_to_packing_input,
             max_context_length=context.max_context_length,
         )
     )
@@ -70,10 +70,10 @@ def build_concat_then_split_packing(
     dataset_graph = grain.experimental.ConcatThenSplitIterDataset(
         dataset_graph, length_struct=_row_lengths(context)
     )
-    dataset_graph = dataset_graph.filter(_packing_output_is_full)
+    dataset_graph = dataset_graph.filter(packing_output_is_full)
     return dataset_graph.map(
         partial(
-            _packing_output_to_text_sequence,
+            packing_output_to_text_sequence,
             max_context_length=context.max_context_length,
         )
     )
@@ -102,13 +102,13 @@ def build_first_fit_packing(
     dataset_graph = as_iter_dataset(dataset_graph, context=context)
     dataset_graph = grain.experimental.FlatMapIterDataset(
         dataset_graph,
-        _SplitTextSequenceDocuments(
+        SplitTextSequenceDocuments(
             max_context_length=context.max_context_length,
         ),
     )
     dataset_graph = dataset_graph.map(
         partial(
-            _text_sequence_to_packing_input,
+            text_sequence_to_packing_input,
             max_context_length=context.max_context_length,
         )
     )
@@ -133,7 +133,7 @@ def build_first_fit_packing(
     )
     return dataset_graph.map(
         partial(
-            _packing_output_to_text_sequence,
+            packing_output_to_text_sequence,
             max_context_length=context.max_context_length,
         )
     )

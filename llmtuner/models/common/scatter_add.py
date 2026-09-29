@@ -42,7 +42,10 @@ def deterministic_scatter_add(
 
 
 @deterministic_scatter_add.register_fake
-def _(out: torch.Tensor, index: torch.Tensor, src: torch.Tensor) -> torch.Tensor:
+def deterministic_scatter_add_fake(
+    out: torch.Tensor, index: torch.Tensor, src: torch.Tensor
+) -> torch.Tensor:
+    """The meta-device shape rule for the op (what FX tracing calls)."""
     return torch.empty_like(out)
 
 

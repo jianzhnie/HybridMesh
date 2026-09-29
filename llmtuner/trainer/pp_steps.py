@@ -75,7 +75,7 @@ def pp_forward_backward_body(
         which of the two it is looking at.
 
         The schedule's loss is the same summed next-token CE the non-PP body
-        computes (``pipeline_parallel/apply.py:_scalar_loss_fn``), so the return
+        computes (``pipeline_parallel/apply.py:scalar_loss_fn``), so the return
         keeps the caller's normalization unchanged: the sum over the last
         stage's micro-batches. That sum is over the last stage's *own* shard of
         the sequence, which is why the caller's denominator -- counted before

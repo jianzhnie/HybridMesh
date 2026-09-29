@@ -9,12 +9,12 @@ from ..dataset import (
 )
 
 
-def _packing_output_is_full(packing_output: dict[str, np.ndarray]) -> bool:
+def packing_output_is_full(packing_output: dict[str, np.ndarray]) -> bool:
     """Return whether concat-then-split filled the entire token batch."""
     return bool(np.all(np.asarray(packing_output["input_ids_segment_ids"]) != 0))
 
 
-def _text_sequence_to_packing_input(
+def text_sequence_to_packing_input(
     text_sequence: TextSequence,
     *,
     max_context_length: int,
@@ -39,7 +39,7 @@ def _text_sequence_to_packing_input(
     }
 
 
-def _packing_output_to_text_sequence(
+def packing_output_to_text_sequence(
     packing_output: dict[str, np.ndarray],
     *,
     max_context_length: int,

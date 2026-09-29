@@ -136,7 +136,7 @@ def build_trainer_state(self, cfg) -> None:
         matrix.ep_checkpoint(self.parallel_dims.ep)
     # Chunked loss + PP is rejected up front: under PP the last stage's
     # loss is computed inside the schedule
-    # (``pipeline_parallel/apply.py:_scalar_loss_fn``), which receives logits
+    # (``pipeline_parallel/apply.py:scalar_loss_fn``), which receives logits
     # from the stage forward. Rewiring that seam for hidden states plus a
     # per-chunk backward is a PP-side change, so the combination loud-raises
     # here rather than training on a silently un-chunked (or wrong) loss.

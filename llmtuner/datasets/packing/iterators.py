@@ -12,7 +12,7 @@ from ..dataset import (
 )
 
 
-class _DocumentAwareConcatThenSplitIterDataset(grain.IterDataset):
+class DocumentAwareConcatThenSplitIterDataset(grain.IterDataset):
     """Concat-then-split packing with a document-segment capacity."""
 
     def __init__(
@@ -164,7 +164,7 @@ class _DocumentAwareConcatThenSplitIterator(grain.DatasetIterator):
             self._remainder_offset = state["remainder_offset"]
 
 
-class _SplitTextSequenceDocuments(grain.experimental.FlatMapTransform):
+class SplitTextSequenceDocuments(grain.experimental.FlatMapTransform):
     """Expose context-sized document chunks to Grain's native packing limit."""
 
     def __init__(

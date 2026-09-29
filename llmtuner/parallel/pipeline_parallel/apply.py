@@ -67,7 +67,7 @@ class PipelineParallelSetup:
     has_last_stage: bool
 
 
-def _scalar_loss_fn(
+def scalar_loss_fn(
     pred: torch.Tensor, labels: torch.Tensor, **loss_kwargs
 ) -> torch.Tensor:
     """Summed next-token CE over one microbatch, as a bare scalar.
@@ -137,7 +137,7 @@ def make_schedule_loss_fn(
     def _schedule_loss_fn(
         pred: torch.Tensor, labels: torch.Tensor, **loss_kwargs: Any
     ) -> torch.Tensor:
-        return _scalar_loss_fn(
+        return scalar_loss_fn(
             pred,
             labels,
             global_valid_tokens=loss_kwargs.get(
@@ -410,14 +410,14 @@ def build_pipeline_schedule(
         schedule = schedule_class(
             stages,
             n_microbatches=num_microbatches,
-            loss_fn=_scalar_loss_fn,
+            loss_fn=scalar_loss_fn,
             scale_grads=False,
         )
     else:
         schedule = schedule_class(
             stages[0],
             n_microbatches=num_microbatches,
-            loss_fn=_scalar_loss_fn,
+            loss_fn=scalar_loss_fn,
             scale_grads=False,
         )
     # Torch 2.10's public ``step`` accepts a whole batch and splits tensor
