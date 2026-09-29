@@ -251,15 +251,7 @@ def build_map_dataset(
     for filter_fn in node.post_filters:
         dataset = dataset.filter(filter_fn)
 
-    # Shuffle globally, then give each DP rank a disjoint slice.
-    if dataset_iteration_policy.shuffle:
-        dataset = dataset.shuffle(seed=dataset_iteration_policy.seed)
-    dataset = shard_for_dp(dataset, dataset_iteration_policy)
-    if dataset_iteration_policy.repeat:
-        # Grain preserves the epoch through sliced map indices, so the
-        # upstream shuffle uses seed + epoch on each repeat.
-        dataset = dataset.repeat()
-    return dataset
+    return apply_iteration_policy(dataset, dataset_iteration_policy)
 
 
 def build_iter_dataset(
@@ -316,6 +308,31 @@ def shard_for_dp(
     if dp_rank < remainder:
         shard_stop += 1
     return dataset[shard_start:shard_stop]
+
+
+def apply_iteration_policy(
+    dataset: grain.MapDataset,
+    dataset_iteration_policy: DatasetIterationPolicy,
+) -> grain.MapDataset:
+    """Apply the map-side iteration policy: shuffle, shard, repeat.
+
+    The order is the contract, so it lives in one place rather than at each
+    caller (a single-dataset graph and a concatenation of them):
+
+    * ``shuffle`` is global, so every rank computes the same permutation (a
+      per-rank shuffle would give each rank a different dataset);
+    * then ``shard_for_dp`` slices that permutation, which is why it takes the
+      policy rather than a bare rank;
+    * then ``repeat``. Grain preserves the epoch through sliced map indices, so
+      the upstream shuffle re-runs with seed + epoch on each repeat instead of
+      re-slicing the same order.
+    """
+    if dataset_iteration_policy.shuffle:
+        dataset = dataset.shuffle(seed=dataset_iteration_policy.seed)
+    dataset = shard_for_dp(dataset, dataset_iteration_policy)
+    if dataset_iteration_policy.repeat:
+        dataset = dataset.repeat()
+    return dataset
 
 
 @dataclass(frozen=True, kw_only=True, slots=True)
@@ -412,12 +429,4 @@ def build_concat(
         raise TypeError("DatasetConcat requires map-style children")
 
     dataset = grain.MapDataset.concatenate(cast(list[grain.MapDataset], children))
-
-    if dataset_iteration_policy.shuffle:
-        dataset = dataset.shuffle(seed=dataset_iteration_policy.seed)
-
-    dataset = shard_for_dp(dataset, dataset_iteration_policy)
-
-    if dataset_iteration_policy.repeat:
-        dataset = dataset.repeat()
-    return dataset
+    return apply_iteration_policy(dataset, dataset_iteration_policy)

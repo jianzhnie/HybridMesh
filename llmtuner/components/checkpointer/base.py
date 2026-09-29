@@ -60,29 +60,33 @@ from torch.distributed.tensor import DTensor
 from ...accelerator import dist_utils
 from ...utils.gc import GarbageCollection
 from ...utils.logger_utils import get_logger
-from . import filesystem
+from . import checkpoint_keys, filesystem
 from .checkpoint_keys import (
-    DATALOADER,
-    EMA,
-    LR_SCHEDULER,
-    MODEL,
-    OPTIMIZER,
-    TRAIN_STATE,
+    DATALOADER as DATALOADER,
+)
+from .checkpoint_keys import (
+    EMA as EMA,
+)
+from .checkpoint_keys import (
+    LR_SCHEDULER as LR_SCHEDULER,
+)
+from .checkpoint_keys import (
+    MODEL as MODEL,
+)
+from .checkpoint_keys import (
+    OPTIMIZER as OPTIMIZER,
+)
+from .checkpoint_keys import (
+    TRAIN_STATE as TRAIN_STATE,
 )
 
 logger = get_logger(__name__)
 
 # The state keys are defined in ``checkpointer/checkpoint_keys.py`` so that
-# ``llmtuner/config/`` can read them without importing this package; the
-# import above re-exports them under their long-standing names.
-__all__ = [
-    "DATALOADER",
-    "EMA",
-    "LR_SCHEDULER",
-    "MODEL",
-    "OPTIMIZER",
-    "TRAIN_STATE",
-]
+# ``llmtuner/config/`` can read them without importing this package. The import
+# above re-exports them under their long-standing names, and ``__all__`` is
+# taken from that module rather than repeated here -- one list, one place.
+__all__ = list(checkpoint_keys.__all__)
 
 
 def purge_thread(
@@ -135,6 +139,20 @@ def shares_storage(a: torch.Tensor, b: torch.Tensor) -> bool:
     if isinstance(b, DTensor):
         b = b._local_tensor
     return torch._C._is_alias_of(a, b)
+
+
+EXPORT_DTYPE_MAP: dict[str, torch.dtype] = {
+    "float16": torch.float16,
+    "float32": torch.float32,
+    "bfloat16": torch.bfloat16,
+}
+"""The dtypes a checkpoint may be exported in, by their config spelling.
+
+``cast_linear.TORCH_DTYPE_MAP`` holds the same three pairs for the lm_head's
+``compute_dtype``. They are deliberately separate tables: one names what the
+checkpointer can write, the other what the output projection can compute in,
+and the overlap is incidental (see the symbol guide's note on this).
+"""
 
 
 class ModelWrapper(Stateful):
@@ -280,6 +298,63 @@ class BaseCheckpointManager(ABC):
     ``step-007`` or ``step-x`` is ignored by step discovery rather than
     parsed into something that would then collide with ``step-7``.
     """
+
+    def __init__(
+        self,
+        config,
+        *,
+        model_parts: list[nn.Module],
+        optimizer: Any,
+        lr_scheduler: Any,
+        ema: Any | None = None,
+        states: dict[str, Any],
+    ) -> None:
+        """Assemble the state dict and the load/save policy every backend shares.
+
+        A backend calls this first and then adds its own storage; a backend that
+        finds ``self.enable`` false must return without doing anything else, so
+        ``--no-checkpoint.enable`` costs no storage setup and no error paths.
+
+        The state keys go in this order on purpose. ``model`` first, then
+        ``optimizer`` passed through unwrapped -- it is an ``OptimizersContainer``
+        whose ``state_dict`` is already flat and FQN-keyed (the format DCP needs
+        to reshard a pipeline checkpoint) and which materializes state before DCP
+        plans a load. ``lr_scheduler`` last, because a load runs in this order and
+        the scheduler's restore reads the optimizer's ``base_lrs``; without it a
+        resumed run's fresh scheduler restarts ``last_epoch`` at 0, so a warmup
+        or decay curve restarts on the step after a resume.
+        """
+        self.enable = config.enable
+        if not self.enable:
+            return
+
+        self.states = states
+        states.update(
+            {
+                MODEL: ModelWrapper(model_parts),
+                OPTIMIZER: optimizer,
+                LR_SCHEDULER: lr_scheduler,
+            }
+        )
+        if ema is not None:
+            states[EMA] = ema
+
+        # -- loading and saving policy --
+        self.load_only = config.load_only
+        self.exclude_from_loading = config.exclude_from_loading
+        self.initial_load_path = config.initial_load_path
+        self.initial_load_model_only = config.initial_load_model_only
+        self.initial_load_in_hf = config.initial_load_in_hf
+        self.initial_load_in_hf_quantized = config.initial_load_in_hf_quantized
+
+        self.enable_first_step_checkpoint = config.enable_first_step_checkpoint
+        self.last_save_model_only = config.last_save_model_only
+        self.last_save_in_hf = config.last_save_in_hf
+        self.export_dtype = EXPORT_DTYPE_MAP[config.export_dtype]
+
+        # -- retention policy (the threads that enforce it are the backend's) --
+        self.keep_latest_k = config.keep_latest_k
+        self.purge_exempt = config.purge_exempt
 
     # A disabled manager returns early from ``__init__``, and a failed manager
     # raises partway through it, so in neither case do the attributes below

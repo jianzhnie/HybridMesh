@@ -1176,6 +1176,55 @@ llmtuner 侧是 `datasets/multimodal/image.py`），本表的 llmtuner 列是唯
   垫片环境下 44/49 目标模块可导入（5 个失败全是本机 `grain` 缺 `experimental` 的既有环境问题）；
   `tests/unit_tests` = 248 passed / 56 skipped / 9 failed（失败集不变）。
 
+- 2026-09-29 二十一次增量（全仓去冗余/去重复复查）：
+  (a) **脚本先扫一遍**，四类检查都跑过，结论是"没有大块重复"：
+  AST 归一化后**没有两个函数体相同**（只有 1 语句的 `__dir__`/`log` 之类）；同名函数跨模块的
+  那些是**有意的分派**（`trainer/trainer.py` 的方法一行委托给 `batch.py`/`validate.py`/
+  `pp_steps.py` 的自由函数，供测试 monkeypatch；`checkpointer/base.py` 声明协议、
+  `dcp.py`/`torch_checkpointing.py` 各自实现）；常量字面量只有 `components/checkpointer/`
+  的 state-key `__all__` 与 `checkpoint_keys.py` 重复（见 (c)）。
+  (b) **五份复制粘贴的懒索引实现 → 一份**：`llmtuner/__init__.py`、`accelerator/__init__.py`、
+  `parallel/__init__.py`、`components/checkpointer/__init__.py`、`models/common/__init__.py`
+  各自重复 `_EXPORT_SOURCES.get(...)` + `AttributeError` 文案 + `importlib.import_module` 相对导入 +
+  `__dir__` 排序。抽成 `utils/lazy_exports.py`（`export_names` / `resolve_export`），各索引只留
+  自己的"名字 → 子模块"表（这张表才是可发现的东西）与两行 `__getattr__`/`__dir__`。
+  `llmtuner/__init__.py` 的 `Trainer` 特例也改用同一张表。验证：五个索引逐一解析成功
+  （`accelerator.get_dist_info`/`parallel.apply_tp`/`models.common.SwiGLU`/`checkpointer.canonical_fqn`），
+  每个索引对未知名字仍抛 `AttributeError`（不静默返回 `None`）。
+  (c) **删死代码 7 个**（`accelerator/device.py` 里无任何消费者的 mmengine 面）：
+  `is_cuda_available`、`is_mlu_available`、`is_musa_available`、`is_mps_available`、
+  `is_dipu_available`、`get_max_cuda_memory`、`get_max_musa_memory`（连带不再需要的
+  `importlib.util` 导入与那段"逐厂商谓词"注释），模块 docstring 改写为"哪些留下了、为什么，
+  其余按本仓对 vendored-but-unused 代码的一贯做法删掉"。保留 `is_npu_available`（`dist.py`
+  在用）与 `is_npu_support_full_precision`。
+  (d) **两个 checkpoint 后端的 `__init__` 去重 20 行 ×2**：`dcp.CheckpointManager` 与
+  `TorchCheckpointingManager` 逐字重复的"策略装配"（`self.states` 三键排序 + `load_only`/
+  `exclude_from_loading`/`initial_load_*`/`last_save_*`/`export_dtype`/`keep_latest_k`/
+  `purge_exempt` 共 12 个字段）提到新增的 `BaseCheckpointManager.__init__`；两个后端现在
+  `super().__init__(...)` 后只做自己的存储部分（并各自 `if not self.enable: return`）。
+  `EXPORT_DTYPE_MAP` 随之从 `dcp.py` 挪到 `base.py`——此前 `torch_checkpointing.py` 反向
+  `from .dcp import EXPORT_DTYPE_MAP`，一个后端依赖另一个后端的常量。验证方式（本机 checkpointer
+  测试全被 `dp/dtensor` 门控跳过）：用 AST 比对各后端构造路径上"被赋值的 `self.属性` 集合"，
+  `dcp` 22/22、`torch_checkpointing` 24/24，无缺无多；`torch_checkpointing` 里仍在用的
+  `OPTIMIZER` 等导入保留。
+  (e) **单一事实来源**：`components/checkpointer/base.py` 的 `__all__` 改为
+  `list(checkpoint_keys.__all__)`（state-key 名字此前在 `base.py` 与 `checkpoint_keys.py`
+  各写一遍），re-export 用 `X as X` 形式让 linter 认账。
+  (f) **两处同文件内的重复块提到了有名字的 helper**：① `datasets/dataset.py` 的
+  "shuffle → `shard_for_dp` → repeat" 三件套在 `build_map_dataset` 与 `build_concat` 里各写一遍
+  （连注释都重复），提成 `apply_iteration_policy(dataset, policy)`（顺序即契约，注释随之搬进
+  helper）；② `datasets/multimodal/image.py` 的 `resize_to_pixel_budget` 把 `smart_resize` 的
+  整段预算算术（aspect 上限检查 + 取整 + 两个 beta 分支）又抄了一遍，改为委托 `smart_resize`
+  （自己只留"先把短边放大到 factor"这步与返回形状的 padding 槽）。
+  验证：① 用 AST 比对，新旧调用点的那三段语句**逐字相同**；② 把新旧两个 `resize_to_pixel_budget`
+  各自从源码里 AST 取出、在 36 组参数（含放大路径、上行/下行 beta 分支与报错路径）上跑，
+  结果逐一相同。
+  (g) **空 `__init__.py` 补文档**：`utils/`（列出 gc / logger_utils / lazy_exports 与"为什么是叶子层"）
+  与 `components/`（三个模块 + 一个子包的分工，以及 checkpointer 索引为什么懒）。
+  (h) 验证：`ruff check`、`git diff --check` 通过；`tests/unit_tests` = 248 passed / 56 skipped /
+  9 failed（失败集不变）；重跑"零引用符号"扫描只剩 `deterministic_scatter_add_fake`
+  ——那是 `@register_fake` 注册钩子，不是死代码。
+
 - 检查后续漂移：`git -C <torchtitan> log f35966713..HEAD -- torchtitan/`。
 - 2026-09-23 映射修订：上游 `distributed/linear.py` 已删除、内容迁入
   `models/common/dist_gemm.py`（改名 `AsyncAllGatherLinear`/`AsyncLinearReduceScatter`，

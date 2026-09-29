@@ -234,7 +234,7 @@ step 1 恢复 optimizer、scheduler、dataloader 和 train state 后完成并保
 | `CheckpointStorage` | 上游 backend storage seam | llmtuner Protocol，不依赖 Configurable，**通过（适配）** |
 | `BaseCheckpointManager` 生命周期方法 | 同名基类 | load/save/close、异步 drain、retention 集中在基类。2026-09-23 起 resume 优先于 initial_load_* 时记 info 日志（上游 810e62786）。2026-09-28 十一次增量复核：策略方法与上游逐行同构，两处适配登记——新增 `_initialized` 门（上游靠各类自己的 `hasattr`/`getattr` 容错部分构造，见 `dcp.CheckpointManager.__init__` 的 HF 选项拒绝）与 `enable` 短路（上游的 manager 只在配置了 checkpointer 时才构造）；`_should_purge` 的 rank 判定换 `dist_utils.is_main_process()`（非分布式下 `dist.get_rank()` 会 raise），**通过（适配）** |
 | `_parse_step/_find_load_step/_purge_stale_checkpoints` | 同名策略 | exact `step-N`、清理 staged/abandoned、保留豁免，**通过** |
-| `dcp.CheckpointManager` | `components/checkpointer/dcp.py` | 本地/remote DCP、HF export guard。2026-09-23 起异步写总时长经 `save_future` done-callback 记 info 日志（上游 d9ca9e55a，以 info 行替代 structured scalar）。2026-09-28 十一次增量复核：`_save`/`_load_checkpoint`/`dcp_save`/`_save_last_step`/`_flattened_model_states_sd` 与上游逐行同构，4 处 `assert` 改显式 `raise`、HF 选项的拒绝信息更具体（llmtuner 不随包发布 `sd_adapter`）；配置校验 13 条逐条搬到 `config/checkpoint.py`（另收上游 `dcp.Config.async_mode` 与 `training_engine.create_seed_checkpoint`），`initial_load_model_only` 无 `initial_load_path` 的上游告警故意不移植；上游 `SaveDone` 是零引用死类、不移植；`EXPORT_DTYPE_MAP` 与 `models/common/cast_linear.TORCH_DTYPE_MAP` 是同表两次书写（上游只有 config 一份），登记为已知重复，**通过（适配）** |
+| `dcp.CheckpointManager` | `components/checkpointer/dcp.py` | 本地/remote DCP、HF export guard。2026-09-23 起异步写总时长经 `save_future` done-callback 记 info 日志（上游 d9ca9e55a，以 info 行替代 structured scalar）。2026-09-28 十一次增量复核：`_save`/`_load_checkpoint`/`dcp_save`/`_save_last_step`/`_flattened_model_states_sd` 与上游逐行同构，4 处 `assert` 改显式 `raise`、HF 选项的拒绝信息更具体（llmtuner 不随包发布 `sd_adapter`）；配置校验 13 条逐条搬到 `config/checkpoint.py`（另收上游 `dcp.Config.async_mode` 与 `training_engine.create_seed_checkpoint`），`initial_load_model_only` 无 `initial_load_path` 的上游告警故意不移植；上游 `SaveDone` 是零引用死类、不移植；`EXPORT_DTYPE_MAP` 2026-09-29（二十一次增量）从 `dcp.py` 移到 `base.py`（两个后端都要它，原先 `torch_checkpointing` 反向 import `dcp`），它与 `models/common/cast_linear.TORCH_DTYPE_MAP` 仍是两张同表（一张写 checker 能导出的 dtype、一张写 lm_head 能计算的 dtype，重叠是巧合），登记为已知重复，**通过（适配）** |
 | `TorchCheckpointingManager` | 同名 backend | optional dependency 延迟导入，保存统一经过 backend。2026-09-28 十一次增量：删除死成员 `staging_future`（只被 `__init__` 置 None、`_close` 读一次，全仓无赋值点；上游该类无此成员），HF 导出路径（`sharded/` + barrier + consolidate）与上游同构；后端未安装故仍属静态复核，**通过（适配）** |
 | `FilesystemCheckpointStorage`、`async_save_config` | 上游 `_FilesystemCheckpointStorage`、`_async_save_config` | 去私有化：测试需要这两个 seam（storage 契约/本地 IO、异步配置分支），符合"非必需不加 `_`"的取向，**通过（适配）** |
 | `canonical_fqn` | `components/checkpointer/utils.py` | A1，移除 checkpoint wrapper segment，**通过** |
@@ -460,10 +460,11 @@ helper 在前文涉及关键算法时单列。成组条目（`config/`、`traine
 | `trainer/train.py` | parse/main | B，根 `train.py` |
 | `trainer/trainer.py` + `builder.py`（装配段）/ `validate.py` / `pp_steps.py` / `batch.py` / `seed.py` | 完整训练生命周期 | B，根 `trainer.py` + `training_engine.py` |
 | `components/checkpointer/checkpoint_keys.py` | checkpoint state key 常量 | C |
-| `accelerator/device.py` | 设备发现、backend 选择、厂商谓词、峰值显存查询 | C |
+| `accelerator/device.py` | 设备发现、backend 选择、pin-memory 判定、NPU 谓词；**2026-09-29 二十一次增量**删掉无消费者的 mmengine 面（`is_cuda_available`/`is_mlu_available`/`is_musa_available`/`is_mps_available`/`is_dipu_available`/`get_max_cuda_memory`/`get_max_musa_memory`） | C |
 | `components/checkpointer/filesystem.py` | path/storage helpers | A1，`tools/filesystem.py` |
 | `utils/gc.py` | `GarbageCollection` | B，`tools/utils.py` |
 | `utils/logger_utils.py` | `get_logger`（彩色 formatter + 发射时 rank 过滤）、`get_distributed_rank` | C |
+| `utils/lazy_exports.py` | `export_names` / `resolve_export`：五个包索引共用的 PEP 562 懒加载实现（2026-09-29 二十一次增量，此前是五份复制） | C |
 | `accelerator/monitoring.py` | device/memory/FLOPS helpers | C；部分意图可参考 `tools/utils.py` |
 | `accelerator/spmd_context.py` | SPMD mesh 上下文 | C，pip `spmd_types` 适配 |
 

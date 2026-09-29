@@ -25,6 +25,10 @@ trainer layers and close an import cycle. Topology construction
 ``dist_utils.init_dist_pytorch``.
 """
 
+from __future__ import annotations
+
+from ..utils.lazy_exports import export_names, resolve_export
+
 _EXPORT_SOURCES = {
     # dist.py
     "all_gather": "dist",
@@ -56,18 +60,13 @@ _EXPORT_SOURCES = {
     "master_only": "dist_utils",
 }
 
-__all__ = sorted(_EXPORT_SOURCES)
+__all__ = export_names(_EXPORT_SOURCES)
 
 
 def __getattr__(name: str):
     """Resolve toolbox names on first touch (PEP 562 lazy re-export)."""
-    source = _EXPORT_SOURCES.get(name)
-    if source is None:
-        raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
-    import importlib
-
-    return getattr(importlib.import_module(f".{source}", __name__), name)
+    return resolve_export(__name__, _EXPORT_SOURCES, name)
 
 
 def __dir__() -> list[str]:
-    return sorted(__all__)
+    return export_names(_EXPORT_SOURCES)

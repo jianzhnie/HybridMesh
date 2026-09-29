@@ -20,6 +20,8 @@ the stage split and ``apply.py`` builds the schedule over this rank's stages.
 
 from __future__ import annotations
 
+from ..utils.lazy_exports import export_names, resolve_export
+
 # Lazy (PEP 562): ``matrix`` is read by ``llmtuner/config``, which must stay
 # importable without the engine layer (context_parallel pulls in the model
 # stack and its spmd surface). Eager re-exports would make any submodule
@@ -32,18 +34,13 @@ _EXPORT_SOURCES = {
     "parallelize_hf_transformers": "parallelize",
 }
 
-__all__ = sorted(_EXPORT_SOURCES)
+__all__ = export_names(_EXPORT_SOURCES)
 
 
 def __getattr__(name: str):
     """Resolve an ``apply_*`` entry point on first touch (PEP 562)."""
-    source = _EXPORT_SOURCES.get(name)
-    if source is None:
-        raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
-    import importlib
-
-    return getattr(importlib.import_module(f".{source}", __name__), name)
+    return resolve_export(__name__, _EXPORT_SOURCES, name)
 
 
 def __dir__() -> list[str]:
-    return sorted(__all__)
+    return export_names(_EXPORT_SOURCES)

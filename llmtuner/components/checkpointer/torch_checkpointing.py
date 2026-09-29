@@ -61,15 +61,11 @@ if TYPE_CHECKING:
 
 from ...utils.logger_utils import get_logger
 from .base import (
-    EMA,
-    LR_SCHEDULER,
     MODEL,
     OPTIMIZER,
     BaseCheckpointManager,
-    ModelWrapper,
     purge_thread,
 )
-from .dcp import EXPORT_DTYPE_MAP
 
 logger = get_logger(__name__)
 
@@ -341,7 +337,14 @@ class TorchCheckpointingManager(BaseCheckpointManager):
         sd_adapter: Any | None = None,
         storage_config: Any | None = None,
     ) -> None:
-        self.enable = config.enable
+        super().__init__(
+            config,
+            model_parts=model_parts,
+            optimizer=optimizer,
+            lr_scheduler=lr_scheduler,
+            ema=ema,
+            states=states,
+        )
         if not self.enable:
             return
 
@@ -367,33 +370,6 @@ class TorchCheckpointingManager(BaseCheckpointManager):
                 )
 
         self.interval = config.interval
-        self.states = states
-        self.states.update(
-            {
-                MODEL: ModelWrapper(model_parts),
-                OPTIMIZER: optimizer,
-                # After OPTIMIZER, deliberately: DCP loads in this order, and the
-                # scheduler's restore reads the optimizers' ``base_lrs``. Without
-                # it a resumed run's fresh scheduler restarts ``last_epoch`` at 0,
-                # so a warmup or decay curve restarts on the step after a resume.
-                LR_SCHEDULER: lr_scheduler,
-            }
-        )
-        if ema is not None:
-            self.states[EMA] = ema
-
-        self.load_only = config.load_only
-        self.exclude_from_loading = config.exclude_from_loading
-        self.initial_load_path = config.initial_load_path
-        self.initial_load_model_only = config.initial_load_model_only
-        self.initial_load_in_hf = config.initial_load_in_hf
-        self.initial_load_in_hf_quantized = config.initial_load_in_hf_quantized
-        self.enable_first_step_checkpoint = config.enable_first_step_checkpoint
-        self.last_save_model_only = config.last_save_model_only
-        self.last_save_in_hf = config.last_save_in_hf
-        self.export_dtype = EXPORT_DTYPE_MAP[config.export_dtype]
-        self.keep_latest_k = config.keep_latest_k
-        self.purge_exempt = config.purge_exempt
 
         save_config = (
             sync_save_config(backend, use_barrier=False)

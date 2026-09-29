@@ -27,8 +27,9 @@ mask helper is importable" and "nothing in this package is".
 
 from __future__ import annotations
 
-from importlib import import_module
 from typing import TYPE_CHECKING, Any
+
+from ...utils.lazy_exports import export_names, resolve_export
 
 if TYPE_CHECKING:
     # The static view of the lazy table below, for type checkers and IDEs.
@@ -99,11 +100,8 @@ __all__ = [
 
 
 def __getattr__(name: str) -> Any:
-    module = _EXPORTS.get(name)
-    if module is None:
-        raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
-    return getattr(import_module(f"{__name__}.{module}"), name)
+    return resolve_export(__name__, _EXPORTS, name)
 
 
 def __dir__() -> list[str]:
-    return sorted(__all__)
+    return export_names(_EXPORTS)

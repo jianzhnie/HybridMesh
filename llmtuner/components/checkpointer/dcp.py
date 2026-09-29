@@ -67,22 +67,11 @@ from .base import (
     EMA,
     LR_SCHEDULER,
     MODEL,
-    OPTIMIZER,
     BaseCheckpointManager,
-    ModelWrapper,
     purge_thread,
 )
 
 logger = get_logger(__name__)
-
-
-# Mirrors torchtitan's config-level dtype map, narrowed to the three values the
-# checkpoint config already restricts ``export_dtype`` to.
-EXPORT_DTYPE_MAP: dict[str, torch.dtype] = {
-    "float16": torch.float16,
-    "bfloat16": torch.bfloat16,
-    "float32": torch.float32,
-}
 
 
 class AsyncMode(str, enum.Enum):
@@ -178,45 +167,20 @@ class CheckpointManager(BaseCheckpointManager):
         folder: str,
         sd_adapter: Any | None = None,
     ) -> None:
-        self.enable = config.enable
+        super().__init__(
+            config,
+            model_parts=model_parts,
+            optimizer=optimizer,
+            lr_scheduler=lr_scheduler,
+            ema=ema,
+            states=states,
+        )
         if not self.enable:
             return
 
         self.folder = filesystem.join(folder, config.folder)
         self.interval = config.interval
         self._storage = FilesystemCheckpointStorage()
-
-        self.states = states
-        self.states.update(
-            {
-                MODEL: ModelWrapper(model_parts),
-                # Passed through, not wrapped: the optimizer is an
-                # ``OptimizersContainer``, whose ``state_dict`` is already flat
-                # and FQN-keyed (the format DCP needs to reshard a pipeline
-                # checkpoint) and which materializes state before DCP plans a
-                # load, so a resumed run's fresh optimizer has somewhere to put
-                # ``exp_avg``.
-                OPTIMIZER: optimizer,
-                # After OPTIMIZER, deliberately: DCP loads in this order, and
-                # the scheduler's restore reads the optimizers' ``base_lrs``.
-                LR_SCHEDULER: lr_scheduler,
-            }
-        )
-        if ema is not None:
-            self.states[EMA] = ema
-
-        # -- loading and saving policy --
-        self.load_only = config.load_only
-        self.exclude_from_loading = config.exclude_from_loading
-        self.initial_load_path = config.initial_load_path
-        self.initial_load_model_only = config.initial_load_model_only
-        self.initial_load_in_hf = config.initial_load_in_hf
-        self.initial_load_in_hf_quantized = config.initial_load_in_hf_quantized
-
-        self.enable_first_step_checkpoint = config.enable_first_step_checkpoint
-        self.last_save_model_only = config.last_save_model_only
-        self.last_save_in_hf = config.last_save_in_hf
-        self.export_dtype = EXPORT_DTYPE_MAP[config.export_dtype]
 
         self.sd_adapter = sd_adapter
         # llmtuner declares the HF safetensors options in its config but ships no
@@ -266,9 +230,7 @@ class CheckpointManager(BaseCheckpointManager):
         self.staging_future: Future | None = None
         self.save_future: Future | None = None
 
-        # -- retention policy --
-        self.keep_latest_k = config.keep_latest_k
-        self.purge_exempt = config.purge_exempt
+        # -- retention policy (the values came from the base class) --
         self.purge_thread: threading.Thread | None = None
         if self.keep_latest_k > 0:
             self.purge_queue: queue.Queue[str | None] = queue.Queue()
@@ -686,6 +648,5 @@ __all__ = [
     "CheckpointManager",
     "DATALOADER",
     "EMA",
-    "EXPORT_DTYPE_MAP",
     "LR_SCHEDULER",
 ]

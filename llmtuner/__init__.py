@@ -16,20 +16,25 @@ the stable face is the two names below plus ``llmtuner.config`` and the CLI.
 """
 
 from llmtuner.config import LLMTunerConfig
+from llmtuner.utils.lazy_exports import resolve_export
 
 __version__ = "0.1.0"
 
+#: Name -> submodule, for the one name this package keeps lazy. ``Trainer`` is
+#: the expensive half: ``trainer.trainer`` pulls in the whole
+#: ``torch.distributed`` stack (DTensor, pipelining), which ``import llmtuner``
+#: must not pay for and older torch builds do not have.
+_EXPORT_SOURCES = {
+    "Trainer": "trainer.trainer",
+}
+
 
 def __getattr__(name: str):
-    # Lazy import: trainer.trainer pulls in the full torch.distributed stack
-    # (DTensor, pipelining, ...), which is heavier than ``import llmtuner``
-    # should pay for and unavailable on older torch builds. Importing Trainer
-    # only on first access keeps the package import light.
-    if name == "Trainer":
-        from .trainer.trainer import Trainer
+    return resolve_export(__name__, _EXPORT_SOURCES, name)
 
-        return Trainer
-    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+
+def __dir__() -> list[str]:
+    return sorted(__all__)
 
 
 __all__ = ["LLMTunerConfig", "Trainer", "__version__"]

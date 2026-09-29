@@ -50,6 +50,8 @@ llmtuner fills in the first two plus whatever the caller passes in ``states``:
   the average from the just-loaded weights (see ``dcp.CheckpointManager``).
 """
 
+from ...utils.lazy_exports import export_names, resolve_export
+
 # Lazy (PEP 562): ``checkpoint_keys`` / ``filesystem`` live in this package and
 # are read by ``llmtuner/config``, which must stay importable without the
 # torch.distributed surface ``base``/``dcp`` pull in (DTensor & friends are
@@ -70,18 +72,13 @@ _EXPORT_SOURCES = {
     "canonical_fqn": "utils",
 }
 
-__all__ = sorted(_EXPORT_SOURCES)
+__all__ = export_names(_EXPORT_SOURCES)
 
 
 def __getattr__(name: str):
     """Resolve backend names on first touch (PEP 562 lazy re-export)."""
-    source = _EXPORT_SOURCES.get(name)
-    if source is None:
-        raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
-    import importlib
-
-    return getattr(importlib.import_module(f".{source}", __name__), name)
+    return resolve_export(__name__, _EXPORT_SOURCES, name)
 
 
 def __dir__() -> list[str]:
-    return sorted(__all__)
+    return export_names(_EXPORT_SOURCES)

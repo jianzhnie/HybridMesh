@@ -134,23 +134,10 @@ def resize_to_pixel_budget(
     if height < factor or width < factor:
         scale = max(factor / width, factor / height)
         width, height = int(width * scale), int(height * scale)
-
-    if max(height, width) / min(height, width) > 200:
-        raise ValueError(
-            f"Absolute aspect ratio must be smaller than 200, "
-            f"got {max(height, width) / min(height, width):.1f}"
-        )
-
-    h_bar = max(round(height / factor) * factor, factor)
-    w_bar = max(round(width / factor) * factor, factor)
-    if h_bar * w_bar > max_pixels:
-        beta = math.sqrt((height * width) / max_pixels)
-        h_bar = max(math.floor(height / beta / factor) * factor, factor)
-        w_bar = max(math.floor(width / beta / factor) * factor, factor)
-    elif h_bar * w_bar < min_pixels:
-        beta = math.sqrt(min_pixels / (height * width))
-        h_bar = math.ceil(height * beta / factor) * factor
-        w_bar = math.ceil(width * beta / factor) * factor
+    # The budget arithmetic is ``smart_resize`` -- this strategy only adds the
+    # "grow first so the rounding has somewhere to start" step and the padding
+    # slots of the return shape.
+    h_bar, w_bar = smart_resize(height, width, factor, min_pixels, max_pixels)
     return h_bar, w_bar, 0, 0
 
 
