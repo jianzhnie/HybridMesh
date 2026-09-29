@@ -9,9 +9,8 @@ models llmtuner wraps):
 * ``masks.py`` -- the flex-attention mask modifiers and the varlen metadata
   builder for packed documents.
 
-Unlike the other package indexes here, this one re-exports nothing on purpose.
-``masks.py`` imports ``torch.nn.attention.flex_attention`` at module scope, which
-not every torch build has; keeping the index inert is what lets
-``models.common`` (which re-exports ``qkv``) stay importable on a CPU-only or
-pre-flex build. Import the leaf you want.
+Unlike the other package indexes here, this one re-exports nothing at all: both
+nodes are imported by name from where they are used (the wrapper, the CP kernel,
+the tests), and an inert index is one less thing to keep in step. Import the
+leaf you want.
 """

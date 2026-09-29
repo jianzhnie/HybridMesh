@@ -1,4 +1,4 @@
-"""Flex-attention masks and packed-document metadata.
+"""Attention masks (flex and dense) and packed-document metadata.
 
 The vendored helpers were verified identical to torchtitan's originals at
 migration time (all five mask modifiers, both ``create_varlen_metadata``
@@ -11,20 +11,22 @@ document's first token -- and a mask that read a different boundary would still
 produce a plausible-looking BlockMask while letting tokens attend across
 documents. So the tests below evaluate the modifiers on an explicit index grid
 rather than trusting a shape.
+
+Only ``create_attention_mask`` (the compiled flex builder) needs
+``torch.nn.attention``; the modifiers, the metadata builder and the dense
+additive mask are plain tensor code, which is why this module carries no
+environment gate -- and why the dense mask is checked against the *modifiers*
+here rather than only against its own shape.
 """
 
 from __future__ import annotations
-
-from tests.caps import require_env
-
-require_env('spmd_types')
-
 
 import pytest
 import torch
 
 from llmtuner.models.common.attention.masks import (
     VarlenMetadata,
+    build_dense_attention_mask,
     create_varlen_metadata_for_document,
     get_causal_mask_mod,
     get_document_mask_mod,
@@ -233,3 +235,57 @@ def test_exceeding_the_reserved_padding_capacity_is_caught() -> None:
 )
 def test_round_up(value: int, multiple: int, expected: int) -> None:
     assert round_up(value, multiple) == expected
+
+
+# -- the dense additive mask (DSA models) ------------------------------------
+
+
+def test_the_dense_mask_is_a_4d_additive_tensor() -> None:
+    """DSA's modeling code calls ``.dim()`` on the mask and adds it to the
+    scores, so this has to be a plain ``[1, 1, T, T]`` tensor of 0.0/-inf --
+    a BlockMask is not an option there."""
+    mask = build_dense_attention_mask(
+        POSITIONS, dtype=torch.float32, block_causal=False
+    )
+
+    assert mask.shape == (1, 1, POSITIONS.numel(), POSITIONS.numel())
+    assert mask.dtype is torch.float32
+    assert set(mask.unique().tolist()) <= {0.0, float("-inf")}
+
+
+def test_the_dense_mask_keeps_the_requested_dtype() -> None:
+    """The mask is added to the attention scores, so building it in the model's
+    dtype keeps that addition free."""
+    mask = build_dense_attention_mask(
+        POSITIONS, dtype=torch.bfloat16, block_causal=True
+    )
+
+    assert mask.dtype is torch.bfloat16
+
+
+def test_the_dense_causal_mask_agrees_with_the_causal_modifier() -> None:
+    """One convention, two consumers: the dense mask must allow exactly the
+    positions the flex modifier allows, or a model would attend differently
+    depending on which mask family it was handed."""
+    mask = build_dense_attention_mask(
+        POSITIONS, dtype=torch.float32, block_causal=False
+    )
+
+    assert (mask[0, 0] == 0).equal(_eval(get_causal_mask_mod()))
+
+
+def test_the_dense_block_causal_mask_agrees_with_the_modifiers() -> None:
+    """The packed case: causal AND same-document, the composition the flex path
+    builds with ``and_masks``.
+
+    Evaluated on the same index grid as the modifiers, this is the check that
+    catches a dense mask built from the wrong boundary (e.g. document ids
+    derived from a cumulative count that is off by one).
+    """
+    mask = build_dense_attention_mask(
+        POSITIONS, dtype=torch.float32, block_causal=True
+    )
+    causal = _eval(get_causal_mask_mod())
+    same_document = _eval(get_document_mask_mod(POSITIONS))
+
+    assert (mask[0, 0] == 0).equal(causal & same_document)

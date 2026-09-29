@@ -30,6 +30,8 @@ from typing import Literal
 import torch
 import torch.nn as nn
 
+from ...accelerator.capabilities import is_compiling
+
 __all__ = [
     "ComplexRoPE",
     "CosSinRoPE",
@@ -47,7 +49,7 @@ def _maybe_check_max_pos(positions: torch.Tensor, *, max_valid_pos: int) -> None
     Uses ``torch._assert_async`` so the failure surfaces at a later kernel
     launch instead of blocking on a ``.item()`` call.
     """
-    if torch.compiler.is_compiling():
+    if is_compiling():
         return
     torch._assert_async(
         torch.all(positions <= max_valid_pos),

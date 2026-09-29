@@ -177,8 +177,8 @@ A2 分类（见上表），mesh 构建这一段记在该行的"改写点"里，�
 | 多轮对话 SFT 的 renderer 路径（4a0d8dab3） | **已适配为可选路径**（2026-09-25，§9.1 第 12 项）：不引入硬依赖、不复制 Configurable 外形。`datasets/text/renderer.py` 为可选导入适配层（`build_chat_renderer` + `RendererTokenizerWrapper`），`ChatProcessor(renderer=...)` 走多-turn renderer 分支，`--chat_renderer`/`--messages_field` 接线 `local_jsonl_sft`；未装 `renderers` 时启用 loud-raise（ImportError 带安装指引），默认关闭逐位不变。真实库数值**未验证**（本机无 renderers，单测以 fake 模块覆盖接口与 mask 移位语义）；解锁条件：pyproject 加 optional extra `renderers==0.1.11` 后装包复跑 |
 | `models/common/moe/dispatcher.py` 的 DeepEP/HybridEP 两个 dispatcher | 登记缺口（2026-09-25，§9.1 第 13 项）：CUDA-only（`deep_ep`/`hybridep` 内核 + GB200/NVLink72 假设）且 dispatch/combine 经上游 `distributed/deepep/` wrappers（1155 行）驱动，可选导入无法忠实表达契约，故不 vendor；`ParallelConfig.ep_token_dispatcher="deepep"/"hybridep"` 配置期 NotImplementedError（含解锁条件），swap 入口防御性同语义。解锁条件：vendor 上游 wrappers + pyproject 加 CUDA-only optional extra + CUDA 目标设备复跑数值。`AllToAllTokenDispatcher` 满足同一 dispatch/combine 契约 |
 | `models/common/moe/dispatcher.py` 的 `TorchAOTokenDispatcher` | **已适配为可选导入适配层**（2026-09-25，§9.1 第 13 项）：torchao 不进 pyproject、不复制上游 Config 嵌套。`TorchAOTokenDispatcher(num_experts, top_k, pad_multiple)` 继承 `AllToAllTokenDispatcher`，仅 `_permute`/`_unpermute` 改委托 torchao `permute_and_pad`（expert-major 重排 + 每组 pad 到 `pad_multiple`，EP=1 本地 padded permute 路径一并移植），构造期 lazy import，未装 torchao loud-raise ImportError（带 `pip install torchao` 指引）；`ParallelConfig.ep_token_dispatcher="torchao"` + `ep_torchao_pad_multiple`（默认 16=FP8）接线 `apply_ep` → swap，默认 `alltoall` 逐位不变。数值**环境未覆盖**（本机无 torchao/CUDA，单测以 sys.modules fake 覆盖 sentinel-row padding 契约与 EP=1 combine 等价性）；解锁条件：CUDA 目标设备装 torchao 复跑 |
-| DSA（DeepSeek sparse attention）的稠密 additive mask 路径 | 上游 `model.py` 的 `_build_dense_attention_mask` + indexer 支持；**2026-09-24 起 llmtuner wrapper 构造期对 `index_topk` fail-fast**（静默走 flex BlockMask 的错误语义已消除），稠密 mask 执行路径本身仍未移植，无消费者 |
-| 单进程模拟多卡的 debug 后端（`comm.backend` 的 `fake` / `real_pp_fake_spmd`，2026-09 新增的 `DistributedTopology`） | 登记缺口（2026-09-28，parallel_dims 走查）：上游用 torch 的 `backend="fake"` 建一个"逻辑世界"，可在单进程内模拟任意 world_size 的 mesh（`real_pp_fake_spmd` 再叠一个真实 PP 组，供 PP 边通信）；llmtuner 只有 `world_size == 1 → parallel_dims is None` 与真多卡两条路，单机并行验证走 gloo + torchrun 集成测试。解锁条件：torch 提供 `backend="fake"`（本机 2.2.2 无此 backend）+ 决定给 `accelerator/dist_utils.py` 加一条 debug 后端；届时 mesh 构造无需改动（`build_mesh` 已是 `world_size` 驱动） |
+| DSA（DeepSeek sparse attention）的稠密 additive mask 路径 | **已移植（2026-09-28，十九次增量）**：`models/common/attention/masks.py::build_dense_attention_mask` + `models/hf/model.py::get_attention_masks` 的 DSA 分支，与上游 `_build_dense_attention_mask` 逐行等价（causal / block_causal 两种 `attn_mask_type`）；flex 照旧运行并按 mask 类型当 `score_mask`（HF 集成分支）。**未覆盖**：真 DSA 模型端到端（transformers 的 DSA 家族需 torch≥2.4 才能建模型）与 CP×DSA（后者显式拒绝） |
+| 单进程模拟多卡的 debug 后端（`comm.backend` 的 `fake` / `real_pp_fake_spmd`，2026-09 新增的 `DistributedTopology`） | 登记缺口（2026-09-28，parallel_dims 走查）：上游用 torch 的 `backend="fake"` 建一个"逻辑世界"，可在单进程内模拟任意 world_size 的 mesh（`real_pp_fake_spmd` 再叠一个真实 PP 组，供 PP 边通信）；llmtuner 只有 `world_size == 1 → parallel_dims is None` 与真多卡两条路，单机并行验证走 gloo + torchrun 集成测试。解锁条件：torch 提供 `backend="fake"`（本机 2.2.2 无此 backend）+ 决定给 `accelerator/dist_utils.py` 加一条 debug 后端；届时 mesh 构造无需改动（`build_mesh` 已是 `world_size` 驱动）。2026-09-28 十九次增量曾按该方向实现（`init_distributed` + `NGPU`/`FAKE_PP_RANK`），**按用户要求整条撤下**：fake 后端与 `DistributedTopology` 都不引入，保留本条为登记缺口；同轮的另一项（DSA 稠密 mask）不受影响 |
 | vocab-sharded `lm_head` + 端到端 vocab-parallel loss | **D 类，两步走，第一步已完成（2026-09-27）**。第二步（模型侧）未实现：上游 HF 路径把 `lm_head` 的 weight/bias 沿 vocab 维 `S(0)` 切、输入从 sequence-parallel gather 回全长、输出 `S(-1)`（vocab 分片），core `cross_entropy_loss` 检测到分片后走 vocab-parallel CE（`hf_sharding.py` 的 `lm_head` 段）。llmtuner 仍把 HF plan 的 `colwise_gather_output` 解析为 None、`lm_head` 保持复制（`tensor_parallel/tp.py::resolve_plan`）。**第一步（loss 侧接线，已完成）**：`Trainer._loss_vocab_kwargs()` + `HFTransformerModel.vocab_size` 把 `tp_group`/`global_vocab_size` 送到四个调用点（`Trainer._loss_sum`、`chunked_lm_head_cross_entropy`、PP `_scalar_loss_fn`、Validator），`components/loss.py` 按形状分派，因此复制 head 下逐位不变；第二步（vocab-shard realizer + head 已分片但 loss 未被告知时 loud-raise）在多卡环境复跑后再做。
 
 **已从 D 移除（部分）**（2026-09-25）：`models/common/moe_sharding.py`——上游该文件是
@@ -1105,6 +1105,37 @@ llmtuner 侧是 `datasets/multimodal/image.py`），本表的 llmtuner 列是唯
   垫片环境下 9/9 目标模块可导入（含新 `flops.py`，且同一 Qwen3-MoE config 的 FLOPs 与拆分前
   逐位相同：1151827968）；`tests/unit_tests` 172 passed / 59 skipped / 9 failed（失败集不变）。
   `models/` 模块数 26→27，全仓 122→123 个 `.py`（99 实现模块）。
+
+- 2026-09-28 十九次增量（D 表该批的 DSA 稠密 mask 落地 + 三项可读性/健壮性改进）：
+  (a) **DSA 稠密 additive mask（移植）**：`models/common/attention/masks.py::build_dense_attention_mask`
+  （纯张量：`[1,1,T,T]`，0 允许 / -inf 屏蔽，`block_causal` 与 flex 的 causal+same-document 同义），
+  `models/hf/model.py::get_attention_masks` 对 `_uses_dsa(config)`（`index_topk`）走该分支——上游
+  `_build_dense_attention_mask` 的逐行等价物；`__init__` 里原来的构造期 `NotImplementedError` 换成
+  `self._uses_dsa = _uses_dsa(config)`。flex 路径不变：HF 的 flex 集成按 mask 类型分支，稠密张量当
+  `score_mask`（上游注释同义）。**同轮显式拒绝 CP × DSA**（`_get_cp_attention_masks`：
+  CP 的 mask 通道只接受 BlockMask，稠密张量要手工 Q 切分 + 过 load balancer，未验证不给近似）。
+  验证：新用例把稠密 mask 与 `get_causal_mask_mod` / `get_document_mask_mod` 在同一索引网格上比对
+  （`causal & same_document` 逐位相等），另有 dtype/shape/取值集合断言。
+  (b) 附带改进（同轮，均为可读性/可验证性）：① `models/common/__init__.py` 改成**惰性索引**
+  （PEP 562 + `_EXPORTS` 表 + TYPE_CHECKING 静态视图），兑现它自己文档里"命名一个节点不得导入它"
+  的承诺——此前 `import llmtuner.models.common.rope` 会连带 MoE 栈与 `DTensor`；② `attention/masks.py`
+  的 flex import 惰性化（`_flex_ops()` 缓存），于是该模块在无 flex 的 torch 上可导入，DSA 稠密 mask
+  也因此能在本机跑用例；③ `capabilities.is_compiling()` 收掉 `torch.compiler.is_compiling` 在
+  torch 2.2 缺失的问题（rope 的 bounds check 调用点），避免纯 torch 模块在新老版本上二选一。
+  **测试口径变化**：`test_masks.py` / `test_rope.py` / `test_multimodal.py` 三处 `require_env('spmd_types')`
+  门禁被证实是惰性的（它们只依赖纯 torch 代码）故移除，新增 `test_models_index.py`（惰性索引），
+  `test_masks.py` 增稠密 mask 段。顺带修掉一处此前被门禁掩盖的失效 import
+  （`test_models_common.py` 仍在 `from llmtuner.models.common import grouped_experts`）。
+  全量：**258 passed / 56 skipped / 9 failed**（失败集仍是那 9 项环境问题：7 profiler-OOM +
+  2 optimizer_config 缺 pipelining）；相比本轮之前 172 passed，多出的用例全部是此前被门禁
+  跳过、现在真跑起来的。
+  (c) **同轮试做、随后整条撤下的部分（留档）**：单进程 fake 后端（`init_distributed` +
+  `NGPU`/`FAKE_PP_RANK` + `DistributedTopology` 类型与 `parallelism.comm_backend` 配置字段）曾实现并在
+  本机验证通过（`NGPU=8` → 单进程逻辑世界 8、DeviceMesh 可建；`FAKE_PP_RANK=2`×pp=4 → 物化逻辑 rank 4），
+  但**按用户要求撤下**：不引入 `DistributedTopology`、不引入 `comm_backend`，`accelerator/dist_utils.py` /
+  `config/parallel.py` / `trainer/builder.py` 回到原状，该能力继续按 D 表登记为缺口（上面那两行）。
+  撤下的原因值得记下：它是本批唯一需要新增配置面与类型面的东西，而那两项的收益（单机模拟多卡）在
+  本仓的验证边界里仍属"未覆盖"，不如保持接口不变。
 
 - 检查后续漂移：`git -C <torchtitan> log f35966713..HEAD -- torchtitan/`。
 - 2026-09-23 映射修订：上游 `distributed/linear.py` 已删除、内容迁入

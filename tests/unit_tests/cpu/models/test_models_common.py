@@ -449,7 +449,7 @@ def test_the_grouped_mm_probe_follows_the_op(monkeypatch) -> None:
     op works even if the probe is hard-wired to ``True`` -- which is precisely
     the bug that would send every model down a branch that raises elsewhere.
     """
-    from llmtuner.models.common import grouped_experts as ge
+    from llmtuner.models.common.moe import experts as ge
 
     def _works(*args, **kwargs):
         return torch.zeros(8, 8, dtype=torch.bfloat16)

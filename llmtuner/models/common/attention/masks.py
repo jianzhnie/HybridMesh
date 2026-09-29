@@ -1,10 +1,22 @@
-"""Flex-attention mask builders and variable-length metadata.
+"""Attention masks: flex mask builders, a dense builder, and varlen metadata.
 
 Lifted from torchtitan ``models/common/attention.py`` -- the mask helpers and the
 packed-document metadata builder, none of which need that file's attention
 modules. A mask *modifier* is just a predicate over
 ``(batch, head, query_idx, key_idx)`` that flex compiles into a BlockMask, so it
 stands on its own.
+
+Two mask families, and the difference is the consumer:
+
+* a **BlockMask** (``create_attention_mask`` and the modifiers) for flex
+  attention, built from a modifier;
+* a **dense 4D additive tensor** (``build_dense_attention_mask``) for models
+  whose own attention code treats the mask as a plain tensor -- DSA models call
+  ``.dim()`` on it and add it to the scores.
+
+The flex import is deliberately lazy (see ``_flex_ops``): the modifiers, the
+metadata builder and the dense builder all work without ``torch.nn.attention``,
+so a CPU-only or pre-flex torch can still import this module and run those.
 
 Why a BlockMask at all, rather than ``is_causal=True``: the package feeds
 documents packed end-to-end into one sequence, so a causal mask alone would let
@@ -21,18 +33,21 @@ Shape legend, scoped to this file: ``T`` = tokens, ``D`` = model dimension.
 
 from __future__ import annotations
 
+import functools
 import inspect
-from typing import NamedTuple
+from collections.abc import Callable
+from typing import TYPE_CHECKING, NamedTuple
 
 import torch
-from torch.nn.attention.flex_attention import (
-    _mask_mod_signature,
-    and_masks,
-    create_block_mask,
-)
+
+if TYPE_CHECKING:
+    # Annotation-only, and a string at runtime (``from __future__ import
+    # annotations`` above): naming the flex signature in a type hint must not
+    # make this module require flex.
+    from torch.nn.attention.flex_attention import _mask_mod_signature
 
 __all__ = [
-    "and_masks",
+    "build_dense_attention_mask",
     "create_attention_mask",
     "create_varlen_metadata_for_document",
     "get_causal_mask_mod",
@@ -291,10 +306,60 @@ def create_varlen_metadata_for_document(
     )
 
 
-_CREATE_BLOCK_MASK_HAS_SEPARATE_FULL_BLOCKS = (
-    "separate_full_blocks" in inspect.signature(create_block_mask).parameters
-)
-_compiled_create_block_mask = torch.compile(create_block_mask)
+@functools.lru_cache(maxsize=1)
+def _flex_ops() -> tuple[Callable, Callable, bool]:
+    """``(create_block_mask, compiled, supports_separate_full_blocks)``.
+
+    Resolved once, on first use. The import and the ``torch.compile`` are both
+    things a consumer of the dense-mask or metadata helpers should not pay for
+    -- and on a torch build without flex they would fail at import.
+    """
+    from torch.nn.attention.flex_attention import create_block_mask
+
+    supports_separate_full_blocks = (
+        "separate_full_blocks" in inspect.signature(create_block_mask).parameters
+    )
+    return (
+        create_block_mask,
+        torch.compile(create_block_mask),
+        supports_separate_full_blocks,
+    )
+
+
+def build_dense_attention_mask(
+    positions: torch.Tensor,
+    *,
+    dtype: torch.dtype,
+    block_causal: bool,
+) -> torch.Tensor:
+    """A dense additive attention mask ``[1, 1, T, T]``: 0 allowed, -inf not.
+
+    For models that cannot take a flex ``BlockMask``: DeepSeek-style sparse
+    attention (DSA) calls ``.dim()`` on its incoming mask and adds it to the
+    scores before selecting the top-k keys, so the mask has to be a plain
+    tensor. ``HFTransformerModel.get_attention_masks`` returns this instead of a
+    BlockMask for those models; flex still runs, consuming the dense mask as its
+    ``score_mask`` (HF's flex integration branches on the mask type).
+
+    Args:
+        positions: per-token positions, shape ``[T]``, resetting to 0 at each
+            packed document start -- the same convention the modifiers and the
+            varlen metadata use, which is what keeps the three in agreement.
+        dtype: dtype of the returned mask, normally the embedding's, so the
+            addition to the attention scores costs no cast.
+        block_causal: also require the same document, mirroring
+            ``get_causal_mask_mod`` AND ``get_document_mask_mod``. ``False`` is
+            plain causality.
+    """
+    num_tokens = positions.shape[0]
+    idx = torch.arange(num_tokens, device=positions.device)
+    allowed = idx[:, None] >= idx[None, :]
+    if block_causal:
+        doc_ids = torch.cumsum((positions == 0).int(), dim=0) - 1
+        allowed = allowed & (doc_ids[:, None] == doc_ids[None, :])
+    mask = torch.zeros((num_tokens, num_tokens), device=positions.device, dtype=dtype)
+    mask.masked_fill_(~allowed, float("-inf"))
+    return mask.unsqueeze(0).unsqueeze(0)
 
 
 def create_attention_mask(*args, **kwargs):
@@ -305,11 +370,14 @@ def create_attention_mask(*args, **kwargs):
     produces the same BlockMask and is inexpensive relative to an 8B forward,
     so NPU uses it until that backend bug is fixed.
     """
-    if not _CREATE_BLOCK_MASK_HAS_SEPARATE_FULL_BLOCKS:
+    create_block_mask, compiled_create_block_mask, supports_separate_full_blocks = (
+        _flex_ops()
+    )
+    if not supports_separate_full_blocks:
         # PyTorch 2.10 (the current vLLM Ascend image) predates this tuning
         # knob. Its create_block_mask always uses the older combined layout.
         kwargs.pop("separate_full_blocks", None)
     device = kwargs.get("device")
     device_type = torch.device(device).type if device is not None else None
-    builder = create_block_mask if device_type == "npu" else _compiled_create_block_mask
+    builder = create_block_mask if device_type == "npu" else compiled_create_block_mask
     return builder(*args, **kwargs)

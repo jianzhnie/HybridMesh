@@ -19,11 +19,6 @@ comparing the two.
 
 from __future__ import annotations
 
-from tests.caps import require_env
-
-require_env('spmd_types')
-
-
 import pytest
 import torch
 

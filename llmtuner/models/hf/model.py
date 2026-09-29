@@ -54,6 +54,7 @@ from ...parallel.context_parallel import (
 from ...parallel.parallel_dims import ParallelDims
 from ...utils.logger_utils import get_logger
 from ..common.attention.masks import (
+    build_dense_attention_mask,
     create_attention_mask,
     get_causal_mask_mod,
     get_document_mask_mod,
@@ -119,11 +120,13 @@ def _uses_dsa(config) -> bool:
 
     DSA models (e.g. GLM-5, model_type 'glm_moe_dsa') run an auxiliary
     "indexer" sub-attention that scores all keys and selects the top-k per
-    query, expressing the selection as a dense additive mask. A flex
-    ``BlockMask`` has no ``.dim()`` and cannot be added elementwise, so DSA
-    needs a dense 4D tensor mask (torchtitan builds one in
-    ``_build_dense_attention_mask``). Detected by the DSA-specific
-    ``index_topk`` config attr.
+    query, expressing the selection as a dense additive mask. The indexer and
+    the main attention both consume the incoming mask as a *plain tensor* --
+    the modeling code calls ``.dim()`` on it and adds it to the scores -- so a
+    flex ``BlockMask`` cannot be used and the wrapper builds a dense 4D mask
+    instead (see ``masks.build_dense_attention_mask``; flex still runs, taking
+    it as its ``score_mask``). Detected by the DSA-specific ``index_topk``
+    config attr.
     """
     return getattr(config, "index_topk", None) is not None
 
@@ -197,16 +200,11 @@ class HFTransformerModel(nn.Module):
         super().__init__()
 
         config = unwrap_text_config(config)
-        if _uses_dsa(config):
-            # Fail fast rather than run silently wrong: llmtuner always builds a
-            # flex BlockMask, which DSA's indexer and main attention cannot
-            # consume (they call ``.dim()`` on the mask and add it to scores).
-            # Upstream's dense additive mask path is an unported D-class gap.
-            raise NotImplementedError(
-                f"{config.model_type}: DeepSeek-style sparse attention (DSA) "
-                "models are not supported -- they need a dense additive mask "
-                "path that llmtuner does not implement."
-            )
+        # DSA models take a dense additive mask instead of a flex BlockMask;
+        # resolved once here rather than per forward. The mask family is decided
+        # in ``get_attention_masks``, which is the one place that knows both the
+        # model and the batch's positions.
+        self._uses_dsa = _uses_dsa(config)
         num_heads = getattr(config, "num_attention_heads", None)
         num_kv_heads = getattr(config, "num_key_value_heads", None)
         num_kv_heads = num_heads if num_kv_heads is None else num_kv_heads
@@ -640,15 +638,29 @@ class HFTransformerModel(nn.Module):
         return inputs, labels, extra_kwargs
 
     def get_attention_masks(self, positions: torch.Tensor):
-        """Build the flex BlockMask for this batch.
+        """Build this batch's attention mask: a flex BlockMask, or a dense one.
 
         ``attn_mask_type`` selects between plain causal and causal-plus-same-
         document. The latter is the packed path: samples share one sequence, so
         attention must not cross a document boundary (positions reset to 0
         there). Both cases return a BlockMask -- with no mask at all flex would
         compute full attention.
+
+        A DSA model gets a dense 4D additive mask instead: its own attention
+        code reads the mask as a tensor (see ``_uses_dsa``). ``attn_mask_type``
+        means the same thing there -- plain causal vs causal-and-same-document
+        -- so the two families cannot disagree about what "block_causal" allows.
         """
-        if getattr(self.model.config, "attn_mask_type", "causal") == "block_causal":
+        block_causal = (
+            getattr(self.model.config, "attn_mask_type", "causal") == "block_causal"
+        )
+        if self._uses_dsa:
+            return build_dense_attention_mask(
+                positions,
+                dtype=self.tok_embeddings.weight.dtype,
+                block_causal=block_causal,
+            )
+        if block_causal:
             mask_mod = and_masks(
                 get_causal_mask_mod(),
                 get_document_mask_mod(positions),
@@ -687,6 +699,20 @@ class HFTransformerModel(nn.Module):
         it as ``attention_masks`` -- Q-sharded by ``shard_attention_mask_for_cp``
         for kv_allgather, full-length and unsharded for ulysses.
         """
+        if self._uses_dsa:
+            # A dense mask is built, not modded, and CP shards masks by
+            # rewriting a BlockMask's indices (shard_attention_mask_for_cp takes
+            # a BlockMask and nothing else). Sharding the dense tensor instead
+            # would mean slicing Q and keeping KV full by hand -- unverified,
+            # and silently wrong if the load balancer permutes the shard, so it
+            # is refused rather than guessed at.
+            raise NotImplementedError(
+                "Context parallel with a DSA (dense-mask) model is not "
+                "implemented: the CP mask path shards a flex BlockMask, and a "
+                "dense additive mask has to be sliced by hand. Unlock by "
+                "sharding the dense mask Q-axis (load balancer included) and "
+                "re-validating numerics on multiple ranks."
+            )
         if getattr(self.model.config, "attn_mask_type", "causal") == "block_causal":
             raise ValueError(
                 "Context parallel with packed sequences needs a prebuilt mask: "

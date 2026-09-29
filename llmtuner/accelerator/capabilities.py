@@ -31,7 +31,7 @@ import torch
 
 from llmtuner.errors import EnvironmentUnsupportedError
 
-__all__ = ["CAPABILITIES", "has", "require"]
+__all__ = ["CAPABILITIES", "has", "is_compiling", "require"]
 
 
 def _hasattr_torch(module: str, attr: str) -> Callable[[], bool]:
@@ -193,6 +193,18 @@ def probe(name: str) -> bool:
             f"unknown capability {name!r}; registered: {sorted(CAPABILITIES)}"
         )
     return bool(entry.probe())
+
+
+def is_compiling() -> bool:
+    """``torch.compiler.is_compiling()``, tolerated on builds that predate it.
+
+    The name is public from torch 2.3. Below that there is no compile pass at
+    all, so ``False`` is the honest answer rather than a crash -- which is what
+    a caller asking "am I being traced?" wants to hear. Answered here rather
+    than at each call site so the version difference has one home.
+    """
+    fn = getattr(torch.compiler, "is_compiling", None)
+    return bool(fn()) if fn is not None else False
 
 
 def has(capability: str) -> bool:

@@ -72,7 +72,7 @@ step 1 恢复 optimizer、scheduler、dataloader 和 train state 后完成并保
 | `resolve_model_class` | 上游模型 registry | llmtuner 使用 HF auto mapping，不维护模型注册表 | 通过（适配） |
 | `HFTransformerModel.__init__` | transformers backend wrapper + 各原生 Decoder | 暴露 `tok_embeddings/layers/norm/lm_head/rotary_emb` 五部件；不复制参数注册 | 通过（适配） |
 | GQA 构造校验 | `models/common/attention.py::GQAttention.Config.__post_init__` | llmtuner 在 wrapper 边界校验 head 正数和 `Q heads % KV heads == 0` | 通过；Transformers 5.14 本身会漏掉后一项 |
-| `_uses_dsa` + DSA 构造拒绝 | 上游 `_uses_dsa` + `_build_dense_attention_mask` 稠密 additive mask | 2026-09-24 起 wrapper 构造期对 `index_topk`（DSA 特征）fail-fast，不再静默走 flex BlockMask；稠密 mask 路径本身仍是 D 类缺口 | 通过（fail-fast 侧已对齐） |
+| `_uses_dsa` + `attention/masks.build_dense_attention_mask` | 上游 `_uses_dsa` + `HFTransformerModel._build_dense_attention_mask` | **2026-09-28（十九次增量）稠密路径已移植**：`get_attention_masks` 对 `index_topk`（DSA 特征）模型返回 `[1,1,T,T]` 的 0/-inf additive mask（`block_causal` 与 flex modifier 同语义，有等价比对用例），flex 仍跑并把稠密 mask 当 `score_mask`（HF 的 flex 集成按 mask 类型分支）；CP × DSA 显式 `NotImplementedError`（CP 的 mask 通道只切 BlockMask，稠密张量要手工 Q 切分，未验证不给近似） | 通过（适配） |
 | `experts_implementation` 旋钮 | 上游 `TitanMoeModelConfig.experts_implementation` + wrapper 应用 | 2026-09-24 起 `ModelConfig.experts_implementation`（默认 `native`）经 config 门面传到 HF config，wrapper 校验"可设置或 raise"（上游同语义），非法值先 raise；EP>1 无意义（swap 整块替换） | 通过 |
 | `named_children` | 上游 `Decoder` 的自然子树 | HF CausalLM 多套一层 `model`，llmtuner 只改遍历视图，不改 state_dict FQN | 通过；FSDP/TP/PP 合约测试覆盖 |
 | `tp_plan` | HF `_tp_plan` + 上游 sharding config | llmtuner 重写路径前缀供手写 plan 引擎消费 | 通过（适配） |
@@ -357,7 +357,7 @@ step 1 恢复 optimizer、scheduler、dataloader 和 train state 后完成并保
     FQN 稳定，默认 None 逐位不变；当前无消费者，见 §5.4）。
   - transformers_modeling_backend 复核（同目录全量盘点，结论：其余功能均有
     等价支持或已登记裁剪）曾登记三项，**均已于 2026-09-24 对齐**：
-    - DSA 模型：wrapper 构造期对 `index_topk` fail-fast（稠密 additive mask
+    - DSA 模型：2026-09-28 起走稠密 additive mask（此前是构造期 fail-fast）；CP×DSA 仍拒绝（稠密 additive mask
       路径仍不实现，但静默错误语义已消除，见 §3）。
     - `experts_implementation` 旋钮：已移植（`ModelConfig` 字段 + wrapper
       应用，"可设置或 raise"上游同语义，见 §3）。

@@ -523,18 +523,24 @@ def _qwen3_config():
     )
 
 
-def test_a_dsa_model_is_rejected_loudly() -> None:
-    """DSA needs a dense additive mask; a flex BlockMask would be silently wrong.
+def test_a_dsa_model_is_handed_a_dense_mask() -> None:
+    """DSA consumes its mask as a tensor, so it must not get a BlockMask.
 
-    ``index_topk`` is the DSA-specific config attr (torchtitan's ``_uses_dsa``).
-    The guard fires before class resolution, so any architecture object works
-    for this probe.
+    ``index_topk`` is the DSA-specific config attr (torchtitan's ``_uses_dsa``);
+    the modeling code then calls ``.dim()`` on the mask and adds it to the
+    scores, which a BlockMask cannot answer. The dense mask itself is pinned in
+    ``test_masks.py``, against the same modifiers the flex path uses.
     """
     config = _qwen3_config()
     config.index_topk = 16
+    model = HFTransformerModel(config)
 
-    with pytest.raises(NotImplementedError, match="sparse attention"):
-        HFTransformerModel(config)
+    mask = model.get_attention_masks(torch.arange(4))
+
+    assert isinstance(mask, torch.Tensor)
+    assert mask.shape == (1, 1, 4, 4)
+    assert mask[0, 0, 0, 0] == 0.0
+    assert mask[0, 0, 0, 3] == float("-inf")
 
 
 def test_an_unknown_experts_implementation_is_rejected() -> None:
