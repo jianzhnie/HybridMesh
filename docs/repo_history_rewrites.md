@@ -18,10 +18,10 @@ recompute the branch.
   rewritten on different days can hold identical trees while having different
   SHAs, which is why the pre-rewrite refs below are the only reliable record.
 * **Pre-rewrite refs**: `backup-before-0919-fill` and `backup-before-redate`
-  (both `e7b9fe4`) and `backup-redated-history` (`d0d9349`) still exist in the
-  local clone, holding 125 / 125 / 149 commits that are not reachable from
-  `main`. They are local-only: the remote has `main` and nothing else (no tags,
-  no backup branches).
+  (both `e7b9fe4`) and `backup-redated-history` (`d0d9349`) were local-only --
+  the remote has `main` and nothing else, no tags and no backup branches -- and
+  held 125 / 125 / 149 commits that are not reachable from `main`. They were
+  archived and then deleted on 2026-09-30; see the cleanup section below.
 
 ## 2026-09-29 -- commit identity: gmail -> 126
 
@@ -117,17 +117,26 @@ The branch is the part we control, and it is already clean: `main` has no empty
 commits, no duplicate messages, and no remote branch or tag holds the old
 history. What is left is (a) this clone's residue and (b) GitHub's ledger.
 
-* **Local residue** -- 626 commit objects against 179 reachable from `main`.
-  Archive first, then drop the branches, then let gc reap the rest:
+* **Local residue** -- done on 2026-09-30; recorded here because the numbers are
+  themselves the check that it worked. Before: 627 commit objects against 180
+  reachable from `main` (`.git` 6.6M). The four refs were first archived to
+  `/Users/jianzhengnie/work_dir/TorchLLMTuner-history-archive.bundle` (1.9M,
+  outside this repository), verified with `git bundle verify` ("records a
+  complete history") and by cloning that bundle into `/tmp` and comparing every
+  ref -- all four matched. Then the branches were dropped and the rest reaped:
 
   ```bash
-  git bundle create ~/TorchLLMTuner-history-archive.bundle --all   # keep a copy
+  git bundle create /Users/jianzhengnie/work_dir/TorchLLMTuner-history-archive.bundle --all
   git branch -D backup-before-0919-fill backup-before-redate backup-redated-history
   git reflog expire --expire=now --all && git gc --prune=now
   ```
 
-  The bundle is the only remaining record of the pre-rewrite dates; keep it
-  outside the repository (the bare mirror from the 09-29 entry already is).
+  After: 180 commit objects (all of `main`), `.git` 2.1M, `git fsck` silent and
+  `git branch` showing `main` only. Restore with
+  `git clone /Users/jianzhengnie/work_dir/TorchLLMTuner-history-archive.bundle`.
+  The bundle holds every ref (the three backups and `main`); what is gone is the
+  ~170 intermediate revisions that no ref ever pointed at. The 09-29 entry's
+  bare mirror remains the older, independent copy.
 * **GitHub's ledger** -- nothing on our side changes it. The only targeted fix
   is asking GitHub Support to recompute the contribution graph for the account
   (there is no self-service button); deleting and recreating the repository
