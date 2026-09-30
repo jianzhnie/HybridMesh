@@ -1,0 +1,47 @@
+#!/bin/sh
+# Refuse to rewrite published history.
+#
+# History rewrites are what put this repository's contribution graph out of
+# sync with its branch (docs/repo_history_rewrites.md has the measured
+# numbers): a force-push drops the old SHAs from the branch, but GitHub's
+# credit ledger keeps them, so the graph can neither drop the old versions nor
+# catch up with the new ones. A rewrite is free only before the commit is
+# pushed.
+#
+# Enable with:  git config core.hooksPath .githooks
+# Deliberate rewrite:  ALLOW_HISTORY_REWRITE=1 git push --force-with-lease ...
+#
+# Scope: a plain non-fast-forward push is already refused by git itself, before
+# any hook runs, so this covers the path that actually rewrites history --
+# `--force` and `--force-with-lease` -- and the case of pushing a rewritten
+# branch under a new name onto main.
+#
+# stdio: one line per ref being pushed, "<local ref> <local sha> <remote ref> <remote sha>"
+
+set -eu
+
+protected="refs/heads/main"
+status=0
+
+while read -r local_ref local_sha remote_ref remote_sha; do
+    [ "$remote_ref" = "$protected" ] || continue
+    # A new branch (remote sha is all zeros) has no published history to lose.
+    case "$remote_sha" in
+        0000000000000000000000000000000000000000) continue ;;
+    esac
+    # Fast-forward: the published tip must be reachable from what we send.
+    if ! git merge-base --is-ancestor "$remote_sha" "$local_sha" 2>/dev/null; then
+        if [ "${ALLOW_HISTORY_REWRITE:-0}" = "1" ]; then
+            echo "pre-push: rewriting $protected with ALLOW_HISTORY_REWRITE=1" >&2
+            continue
+        fi
+        echo "pre-push: refusing a non-fast-forward push to $protected." >&2
+        echo "pre-push: $remote_sha is not an ancestor of $local_sha." >&2
+        echo "pre-push: land the change as a new commit on top instead, or set" >&2
+        echo "pre-push: ALLOW_HISTORY_REWRITE=1 if the rewrite is intended" >&2
+        echo "pre-push: (see docs/repo_history_rewrites.md for the cost)." >&2
+        status=1
+    fi
+done
+
+exit "$status"
