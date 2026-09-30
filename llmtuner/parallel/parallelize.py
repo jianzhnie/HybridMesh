@@ -44,6 +44,7 @@ from llmtuner.config import (
     CompileConfig,
     MemoryBudgetACConfig,
     ParallelConfig,
+    RegionACConfig,
     SelectiveACConfig,
 )
 
@@ -73,6 +74,7 @@ def parallelize_hf_transformers(
     activation_checkpoint: str = "none",
     selective_ac: SelectiveACConfig | None = None,
     memory_budget_ac: MemoryBudgetACConfig | None = None,
+    region_ac: RegionACConfig | None = None,
     global_batch_size: int | None = None,
     dataset: str = "random",
 ) -> nn.Module | PipelineParallelSetup:
@@ -86,9 +88,10 @@ def parallelize_hf_transformers(
     ``None`` is the plain whole-model compile.
     ``global_batch_size`` is required only on the ``pp > 1`` path (microbatch
     validation); ``dataset`` gates the same path's corpus restriction;
-    ``selective_ac`` / ``memory_budget_ac`` are read only when
+    ``selective_ac`` / ``memory_budget_ac`` / ``region_ac`` are read only when
     ``activation_checkpoint`` names their mode (``'selective'`` /
-    ``'memory_budget'``; the latter also requires ``compile=True``).
+    ``'memory_budget'`` -- which also requires ``compile=True`` -- or
+    ``'region'``, which needs the optional ``torch_remat`` at apply time).
     Those AC arguments reach both paths through the one ``_apply_ac`` below,
     so the split path cannot checkpoint with a different policy than the
     unsplit one.
@@ -113,6 +116,7 @@ def parallelize_hf_transformers(
             activation_checkpoint,
             selective=selective_ac,
             memory_budget=memory_budget_ac,
+            region=region_ac,
             compile_enabled=compile,
         )
 

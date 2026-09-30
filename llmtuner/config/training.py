@@ -7,7 +7,7 @@ from dataclasses import dataclass, field
 from llmtuner.config.checkpoint import CheckpointConfig
 from llmtuner.config.data import DataloaderConfig
 from llmtuner.config.optimizer import EMAConfig
-from llmtuner.errors import ConfigError, EnvironmentUnsupportedError
+from llmtuner.errors import ConfigError
 
 
 @dataclass(kw_only=True)
@@ -128,15 +128,22 @@ class ProfilerConfig:
 # A plain `checkpoint` field would be nicer to read, but a dataclass field and
 # the class it types cannot share a name.
 
-VALID_AC_MODES: tuple[str, ...] = ("none", "full", "selective", "memory_budget")
+VALID_AC_MODES: tuple[str, ...] = (
+    "none",
+    "full",
+    "selective",
+    "memory_budget",
+    "region",
+)
 """The accepted ``training.activation_checkpoint_mode`` values.
 
 Declared here because this is where the value is constrained (the field is
 parsed and validated in this module), and imported by
 ``parallel/activation_checkpoint.py`` -- which dispatches on the same set -- so
-the config's accepted set and the applier's set cannot drift apart. The
-``"region"`` mode is deliberately absent: it is refused separately, with its
-unlock conditions, before this membership test.
+the config's accepted set and the applier's set cannot drift apart. These are
+upstream's four policies plus the off switch; ``"region"`` needs the optional
+``torch_remat`` package at apply time, which requires torch >= 2.10 (see
+``RegionACConfig``).
 """
 
 
@@ -239,6 +246,82 @@ class MemoryBudgetACConfig:
             raise ConfigError(
                 "memory_budget must be finite and between 0 and 1, got "
                 f"{self.memory_budget}"
+            )
+
+
+@dataclass(kw_only=True)
+class RegionACConfig:
+    """Settings for ``activation_checkpoint_mode='region'``.
+
+    Ported from torchtitan's ``RegionAC.Config``: ``save_regions`` is the same
+    knob with the same semantics -- shell globs relative to a transformer block,
+    so one policy covers every block -- and ``determinism_check`` keeps
+    upstream's default. What differs is where the region *names* come from.
+    Upstream's own model code names them at ``torch_remat.region`` call sites
+    (``attention.qkv``, ``feed_forward.w13``, ...) and
+    ``Module.configure_remat_regions`` hands the patterns down. llmtuner runs HF
+    models and does not own their decoder code, so the vocabulary is structural:
+    every ``nn.Linear`` in a block is a region, named by its FQN relative to the
+    block (``self_attn.q_proj``, ``mlp.gate_proj``, an MoE router's ``gate``).
+    ``parallel/remat_regions.py`` explains why that is the same policy in HF's
+    spelling, and what the vocabulary deliberately leaves out.
+
+    Of the three knobs upstream's ``RegionAC.Config`` inherits from its policy
+    base class, ``determinism_check`` carries over as it stands and ``debug`` is
+    not exposed at all: ``torch_remat``'s checkpoint has no debug knob to forward
+    it to (upstream only carries that field because the base class has it for the
+    other policies). ``preserve_rng_state`` is kept, but can only stay ``False``
+    -- ``torch_remat.checkpoint`` refuses ``True`` outright (a generator drawn
+    inside a skipped save region would desync the recompute, and boundary-only
+    stashing would hide that rather than fix it), and upstream's
+    ``RegionAC.Config`` refuses it too, pointing at ``RecomputeStateHook``. The
+    field is kept so that answer arrives at config-parse time, with that
+    guidance, instead of from inside the library.
+
+    Selecting the mode does not load ``torch_remat``: the package is imported
+    when the policy is applied, so a config can name the mode on a machine that
+    cannot run it.
+    """
+
+    save_regions: list[str] = field(
+        default_factory=list,
+        metadata={
+            "help": "Shell-style glob patterns, relative to a decoder block, "
+            "naming the regions whose outputs are retained instead of "
+            "recomputed -- e.g. 'self_attn.*' or 'mlp.down_proj'. Everything "
+            "else in the block is recomputed, so an empty list (the default) "
+            "retains nothing and behaves like full checkpointing. Region names "
+            "are the block's nn.Linear FQNs; the set is logged at apply time "
+            "and listed in parallel/remat_regions.py."
+        },
+    )
+    determinism_check: str = field(
+        default="default",
+        metadata={
+            "help": "The check torch_remat runs to compare the recompute "
+            "against the original forward. 'default' checks the tensors that "
+            "have no data-invariant structure; 'none' disables it, which is "
+            "torch_remat's own default."
+        },
+    )
+    preserve_rng_state: bool = field(
+        default=False,
+        metadata={
+            "help": "Must stay false: torch_remat does not preserve torch's "
+            "RNG state, and a region whose callable draws random numbers needs "
+            "an explicit RecomputeStateHook instead."
+        },
+    )
+
+    def __post_init__(self) -> None:
+        if self.preserve_rng_state:
+            raise ConfigError(
+                "region activation checkpointing does not support "
+                "preserve_rng_state=True: torch_remat.checkpoint refuses it "
+                "because a generator drawn inside a skipped save region would "
+                "desync the recompute, and boundary-only stashing would hide "
+                "that rather than fix it. Register a RecomputeStateHook for the "
+                "random state your retained regions use, or leave it false."
             )
 
 
@@ -365,10 +448,12 @@ class TrainingConfig:
             "help": "Activation checkpointing: 'none' (off), 'full' (recompute "
             "each decoder layer during backward), 'selective' (per-op: save "
             "the expensive ops, recompute the rest -- tune it with "
-            "selective_ac), or 'memory_budget' (let the compile partitioner "
+            "selective_ac), 'memory_budget' (let the compile partitioner "
             "trade compute for memory -- tune it with memory_budget_ac, "
-            "requires compile=True). Wraps layers after TP/EP/CP and before "
-            "compile/FSDP."
+            "requires compile=True), or 'region' (retain the block's "
+            "nn.Linear regions named by region_ac.save_regions and recompute "
+            "the rest -- needs the optional torch_remat package). Wraps layers "
+            "after TP/EP/CP and before compile/FSDP."
         },
     )
     selective_ac: SelectiveACConfig = field(
@@ -383,6 +468,15 @@ class TrainingConfig:
         metadata={
             "help": "Memory-budget activation checkpointing. Read only under "
             "activation_checkpoint_mode='memory_budget'."
+        },
+    )
+    region_ac: RegionACConfig = field(
+        default_factory=RegionACConfig,
+        metadata={
+            "help": "Region activation checkpointing (torch_remat). Read only "
+            "under activation_checkpoint_mode='region', and the mode needs the "
+            "optional torch_remat package (torch >= 2.10) when the policy is "
+            "applied."
         },
     )
     deterministic: bool = field(
@@ -537,13 +631,6 @@ class TrainingConfig:
             raise ConfigError(
                 "chunked_loss_num_chunks must be >= 1 (1 disables chunking), "
                 f"got {self.chunked_loss_num_chunks}"
-            )
-        if self.activation_checkpoint_mode == "region":
-            raise EnvironmentUnsupportedError(
-                "training.activation_checkpoint_mode='region' (upstream "
-                "RegionAC) needs torch_remat and model-declared remat "
-                "regions, which llmtuner has no equivalent of; see "
-                "parallel/activation_checkpoint.py's docstring."
             )
         if self.activation_checkpoint_mode not in VALID_AC_MODES:
             raise ConfigError(

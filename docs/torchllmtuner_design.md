@@ -232,7 +232,7 @@ fail-fast 按类型分三类，全部继承 `LLMTunerError`，并各自双继承
 |---|---|---|---|
 | `ConfigError` | `ValueError` | 配置错了，改 flag/字段值 | `config/*` 的 `__post_init__` 校验 |
 | `UnsupportedCombinationError` | `NotImplementedError` | 各自合法、组合拒绝（tp×ep×cp、PP×validation、shared-expert×tp、ulysses×load balancer、TP 的 MoE 布局） | `parallel/parallelize.py`、`apply_*`、EP swap |
-| `EnvironmentUnsupportedError` | `NotImplementedError` | 构建/宿主缺依赖，文案必须带解锁条件（所需 torch 版本/包） | compile 的 inductor/dynamo knob、AC 的 budget knob、deepep/hybridep、RegionAC |
+| `EnvironmentUnsupportedError` | `NotImplementedError` | 构建/宿主缺依赖，文案必须带解锁条件（所需 torch 版本/包） | compile 的 inductor/dynamo knob、AC 的 budget knob、deepep/hybridep |
 
 两条边界规则：可选**包**缺失保持 `ImportError`（Python 惯例：renderers、
 torchao、torchvision，安装指引放文案）；模块内部的抽象方法/未知枚举值
@@ -267,7 +267,8 @@ device.py 本身就是设备注册表）；DTensor/flex_attention/spmd_types 是
 分工（2026-09-26 收窄后）：**config 期能判的组合校验住在各 config 的
 `__post_init__`**（`config/parallel.py` 的 tp×ep×cp、deepep/hybridep、
 dispatcher@ep=1、ptrr、ulysses×load balancer、sequence_parallel；
-`config/training.py` 的 region AC、memory_budget×compile；`config/root.py` 的
+`config/training.py` 的 region AC（`preserve_rng_state=True` 即拒）、
+memory_budget×compile；`config/root.py` 的
 cp 整除 seq_len、async_tp×{compile,tp}），与其余字段校验同处、同序触发——
 这些判定只需要配置本身，不应绕道 parallel 层。
 

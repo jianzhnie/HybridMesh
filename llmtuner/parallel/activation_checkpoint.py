@@ -1,12 +1,17 @@
 """Activation checkpointing: recompute each decoder layer during backward.
 
 Vendored in shape from torchtitan's ``distributed/activation_checkpoint.py``.
-Three of its four policies are ported:
+All four of its policies are ported:
 
 * ``"full"`` (upstream ``FullAC``) wraps each decoder layer in torch's
   non-reentrant ``checkpoint_wrapper``, so a forward keeps only the layer's
   inputs and recomputes its activations inside backward -- one extra forward
-  per layer in exchange for the layer's activation memory.
+  per layer in exchange for the layer's activation memory. Upstream routes this
+  through a selective checkpoint context carrying a constant
+  ``PREFER_RECOMPUTE`` policy (``_full_ac_policy``), which is what lets torch
+  still *save* an op whose output cannot be recomputed -- a registered effect --
+  rather than replay it blindly; ``wrap_full``/``full_policy`` here are the same
+  two pieces.
 
 * ``"selective"`` (upstream ``SelectiveAC``) is per-op: a ``context_fn`` policy
   is asked about every op inside the layer and answers ``MUST_SAVE`` for the
@@ -29,7 +34,18 @@ Three of its four policies are ported:
   dump into a trainer dump folder) is not ported; llmtuner's AC path has no
   dump folder.
 
-Both wrapping modes use the same wrapper factory as upstream
+* ``"region"`` (upstream ``RegionAC``) keeps the block's declared regions and
+  recomputes the rest, using the optional ``torch_remat`` package (imported at
+  apply time; it needs torch >= 2.10, so this mode is the one policy llmtuner
+  cannot exercise on its development torch). Upstream gets its region names
+  from ``torch_remat.region`` call sites in its own model code, wired by
+  ``Module.configure_remat_regions``; HF models carry neither, so
+  ``remat_regions`` derives the same vocabulary structurally -- the block's
+  ``nn.Linear``s -- and ``wrap_region`` annotates them and then checkpoints the
+  block's forward. ``wrap_region``'s docstring and ``remat_regions``' state the
+  naming rules and what the vocabulary deliberately leaves out.
+
+``"full"`` and ``"selective"`` use the same wrapper factory as upstream
 (``torch.distributed.algorithms._checkpoint.checkpoint_wrapper``) and the same
 ``early_stop`` setting as upstream, which since upstream #4836 is the torch
 default ``True``: the recompute stops as soon as every needed tensor is
@@ -38,16 +54,13 @@ workaround for an upstream llama4 memory leak that no longer applies, and
 carried a 1-4% step-time cost. ``"full"`` additionally keeps
 ``preserve_rng_state=True`` by default, so the recompute sees the RNG state
 the original forward saw and the run stays bitwise-equal to the
-uncheckpointed one.
+uncheckpointed one. (``"region"`` wraps with ``torch_remat``'s own checkpoint
+instead, which has no ``early_stop`` knob to set.)
 
-Not ported, deliberately:
-
-* ``RegionAC`` needs ``torch_remat``, which llmtuner does not depend on -- its
-  model-declared regions are a ``Module``-protocol feature
-  (``configure_remat_regions``) llmtuner has no equivalent of. Selecting mode
-  ``"region"`` is a loud ``NotImplementedError`` at both the config and the
-  ``apply_ac`` boundary; unlocking it means adding the ``torch_remat``
-  dependency plus a region-declaration channel on HF decoder layers.
+Not ported, deliberately: upstream's RegionAC has no other moving parts. The
+region *declaration* channel is the one piece llmtuner had to reinvent rather
+than copy, because ``Module.configure_remat_regions`` presumes model code
+llmtuner does not own; see ``remat_regions``.
 
 Upstream's ``disable_dynamo_lru_cache`` IS ported, because the case it fixes
 is reachable here: activation checkpointing applies on the ``pp > 1`` path too
@@ -78,10 +91,20 @@ from torch.utils.checkpoint import (
     create_selective_checkpoint_contexts,
 )
 
-from llmtuner.config import VALID_AC_MODES, MemoryBudgetACConfig, SelectiveACConfig
+from llmtuner.config import (
+    VALID_AC_MODES,
+    MemoryBudgetACConfig,
+    RegionACConfig,
+    SelectiveACConfig,
+)
 
 from ..accelerator.capabilities import has
 from ..utils.logger_utils import get_logger
+from .remat_regions import (
+    region_names,
+    region_policy,
+    unmatched_save_patterns,
+)
 
 logger = get_logger(__name__)
 
@@ -89,7 +112,14 @@ logger = get_logger(__name__)
 # (``config/training.py``) and imported here. It stays in ``__all__`` as a
 # re-export so ``from llmtuner.parallel.activation_checkpoint import
 # VALID_AC_MODES`` keeps working.
-__all__ = ["VALID_AC_MODES", "apply_ac"]
+__all__ = [
+    "VALID_AC_MODES",
+    "apply_ac",
+    "full_policy",
+    "require_torch_remat",
+    "wrap_full",
+    "wrap_region",
+]
 
 
 def get_default_save_ops() -> set:
@@ -274,6 +304,39 @@ def wrap_selective(
     )
 
 
+def full_policy(_ctx, _op, *_args, **_kwargs) -> CheckpointPolicy:
+    """Prefer recompute for every op, letting torch keep registered effects.
+
+    Upstream's ``_full_ac_policy``, verbatim: the policy that module-level full
+    AC hands to the *selective* checkpoint context. ``PREFER_RECOMPUTE`` still
+    lets torch fall back to saving an op whose output cannot be recomputed (a
+    registered effect), which is what this constant policy buys over running the
+    wrapper with no policy at all -- the two arguments are the op's context and
+    handle and are unused, as upstream's are.
+    """
+    return CheckpointPolicy.PREFER_RECOMPUTE
+
+
+def wrap_full(module: nn.Module, *, preserve_rng_state: bool = True) -> nn.Module:
+    """Wrap one block with the full policy (upstream's ``FullAC._wrap_block``).
+
+    Upstream does not hand the wrapper a bare block: it passes ``full_policy``
+    through a selective checkpoint context, so full AC runs on the same
+    machinery as ``"selective"`` and torch preserves the outputs of ops with
+    registered effects instead of recomputing them blindly.
+    ``determinism_check`` and ``debug`` keep torch's defaults -- ``"default"``
+    and ``False``, which are upstream's own defaults for this policy -- and
+    llmtuner does not expose them for this mode (registered in the symbol
+    guide). ``early_stop`` matches upstream #4836.
+    """
+    return ptd_checkpoint_wrapper(
+        module,
+        context_fn=lambda: create_selective_checkpoint_contexts(full_policy),
+        preserve_rng_state=preserve_rng_state,
+        early_stop=True,
+    )
+
+
 def disable_dynamo_lru_cache() -> None:
     """Select dynamo graphs in insertion order (upstream's SAC+PP workaround).
 
@@ -325,12 +388,101 @@ def apply_memory_budget(cfg: MemoryBudgetACConfig) -> None:
     logger.info("Selected %s memory budget option", cfg.memory_budget)
 
 
+def require_torch_remat():
+    """Import the optional ``torch_remat`` package, or fail with the unlock.
+
+    Imported here rather than at module scope for the same reason the
+    checkpointer's backend imports are deferred: the package is optional and
+    needs ``torch >= 2.10``, far ahead of what llmtuner otherwise runs on, so
+    every caller of this module -- ``parallelize``, the trainer, the tests --
+    stays importable without it. Reaching the region policy without the package
+    is a loud ``ImportError`` naming the install command, at the point the
+    dependency is actually needed.
+    """
+    try:
+        import torch_remat
+    except ImportError as error:
+        raise ImportError(
+            "activation_checkpoint_mode='region' needs the optional "
+            "`torch_remat` package, which is not installed. It also requires "
+            "torch >= 2.10. Install it with: pip install \"torch_remat @ "
+            'git+https://github.com/meta-pytorch/remat.git" -- or use '
+            "activation_checkpoint_mode='full'/'selective'."
+        ) from error
+    return torch_remat
+
+
+def wrap_region(
+    block: nn.Module,
+    cfg: RegionACConfig,
+    *,
+    base_fqn: str,
+) -> nn.Module:
+    """Wrap one block with the region policy (upstream's ``RegionAC``).
+
+    Upstream mutates the block in place: its ``apply`` sets ``module.forward``
+    to a ``torch_remat.checkpoint``-wrapped forward, after
+    ``Module.configure_remat_regions`` has pushed the save patterns into the
+    module tree that the model's own ``remat.region`` call sites read. HF models
+    carry no such call sites, so this stands in for both halves at once: it
+    annotates the block's ``nn.Linear``s as the regions -- see
+    ``remat_regions`` for that vocabulary and why it is upstream's policy in
+    HF's spelling -- and then checkpoints the block's forward.
+
+    Two naming rules, both deliberate:
+
+    * ``cfg.save_regions`` patterns are matched against region names *relative
+      to the block* (``self_attn.q_proj``). That is upstream's rule, and it is
+      what lets one policy cover every block.
+    * the label handed to ``torch_remat`` is block-qualified
+      (``layers.0.self_attn.q_proj``), so a trace or a memory report can tell
+      two blocks' regions apart. torch_remat treats the name as an opaque label
+      -- the matching happens here -- and block-qualified names are unique
+      within a forward, which is the only property its uniqueness rule asks for.
+
+    The package is reached through ``require_torch_remat``, so a test can stand
+    the real thing in for a ``sys.modules`` entry -- the same way the torchao
+    adapter is tested.
+    """
+    remat = require_torch_remat()
+    regions = region_names(block)
+    policy = region_policy(regions, cfg.save_regions)
+    for name, module in block.named_modules():
+        if name in policy:
+            module.forward = remat.region(
+                module.forward, f"{base_fqn}.{name}", recompute=policy[name]
+            )
+    retained = sum(1 for recompute in policy.values() if not recompute)
+    logger.info(
+        "RegionAC on %s: %d regions, %d retained%s",
+        base_fqn,
+        len(regions),
+        retained,
+        f" ({', '.join(sorted(regions))})" if regions else "",
+    )
+    unmatched = unmatched_save_patterns(regions, cfg.save_regions)
+    if unmatched:
+        logger.warning(
+            "RegionAC save_regions matched nothing in %s: %s (available: %s)",
+            base_fqn,
+            ", ".join(unmatched),
+            ", ".join(sorted(regions)) or "none",
+        )
+    block.forward = remat.checkpoint(
+        region_name=base_fqn,
+        determinism_check=cfg.determinism_check,
+        preserve_rng_state=cfg.preserve_rng_state,
+    )(block.forward)
+    return block
+
+
 def apply_ac(
     model: nn.Module,
     mode: str = "none",
     *,
     selective: SelectiveACConfig | None = None,
     memory_budget: MemoryBudgetACConfig | None = None,
+    region: RegionACConfig | None = None,
     compile_enabled: bool = False,
     preserve_rng_state: bool = True,
 ) -> nn.Module:
@@ -350,9 +502,13 @@ def apply_ac(
 
     ``mode == "memory_budget"`` wraps nothing: it needs ``memory_budget`` (the
     ``MemoryBudgetACConfig``) and ``compile_enabled=True``, and sets the
-    process-global budget the compile partitioner later reads. ``mode ==
-    "region"`` is upstream's RegionAC, which llmtuner does not port. Any other
-    mode is a loud error.
+    process-global budget the compile partitioner later reads.
+
+    ``mode == "region"`` needs ``region`` (the ``RegionACConfig``) and the
+    optional ``torch_remat`` package, imported at apply time. It has no flat
+    ``preserve_rng_state`` argument: torch_remat refuses ``True``, so the mode
+    carries its own field, which can only stay ``False`` (see
+    ``RegionACConfig``). Any other mode is a loud error.
 
     Apply after TP/EP/CP and before compile/FSDP (torchtitan's order in
     ``parallelize_llama``): the wrapper must enclose the TP-sharded layer, and
@@ -363,15 +519,6 @@ def apply_ac(
     """
     if mode == "none":
         return model
-    if mode == "region":
-        raise NotImplementedError(
-            "mode='region' (upstream RegionAC) needs torch_remat, which "
-            "llmtuner does not depend on, and model-declared remat regions "
-            "(upstream's Module.configure_remat_regions), which HF models "
-            "have no equivalent of. Unlocking it means adding the torch_remat "
-            "dependency plus a region-declaration channel on HF decoder "
-            "layers."
-        )
     if mode not in VALID_AC_MODES:
         raise ValueError(
             f"Unknown activation checkpointing mode {mode!r}; expected one of "
@@ -382,6 +529,11 @@ def apply_ac(
             "mode='selective' needs the SelectiveACConfig that carries its "
             "save set and rng/determinism settings; pass "
             "selective=cfg.training.selective_ac."
+        )
+    if mode == "region" and region is None:
+        raise ValueError(
+            "mode='region' needs the RegionACConfig that carries its save "
+            "patterns; pass region=cfg.training.region_ac."
         )
     if mode == "memory_budget":
         if memory_budget is None:
@@ -416,11 +568,13 @@ def apply_ac(
             wrapped = wrap_selective(
                 transformer_block, selective, base_fqn=f"layers.{layer_id}"
             )
+        elif mode == "region":
+            wrapped = wrap_region(
+                transformer_block, region, base_fqn=f"layers.{layer_id}"
+            )
         else:
-            wrapped = ptd_checkpoint_wrapper(
-                transformer_block,
-                preserve_rng_state=preserve_rng_state,
-                early_stop=True,
+            wrapped = wrap_full(
+                transformer_block, preserve_rng_state=preserve_rng_state
             )
         layers.register_module(layer_id, wrapped)
 

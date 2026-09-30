@@ -176,6 +176,7 @@ def build_trainer_state(self, cfg) -> None:
         activation_checkpoint=cfg.training.activation_checkpoint_mode,
         selective_ac=cfg.training.selective_ac,
         memory_budget_ac=cfg.training.memory_budget_ac,
+        region_ac=cfg.training.region_ac,
         global_batch_size=cfg.training.global_batch_size,
         dataset=cfg.training.dataloader.dataset,
     )

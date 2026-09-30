@@ -96,7 +96,7 @@ C 类上会把项目**故意删掉**的抽象又拽回来。
 | `models/common/rope.py` | `models/common/rope.py` | 0.616 | 上游持续重构后结构已分叉；同步公式与边界修复，不同步 Module/缓存形状 |
 | `models/common/scatter_add.py` | `ops/scatter_add.py` | 0.711 | |
 | `models/common/moe/dispatcher.py` | `models/common/token_dispatcher.py` | 0.441 | 2026-09-25 起含 `TorchAOTokenDispatcher` 可选导入适配层（torchao `permute_and_pad` 委托，未装 loud-raise）；DeepEP/HybridEP 保持登记缺口，见 D 表 |
-| `parallel/activation_checkpoint.py` | `distributed/activation_checkpoint.py` | 0.374 | **FullAC + SelectiveAC + MemoryBudgetAC 已移植**（后者按上游语义设 `torch._functorch.config.activation_memory_budget`，需 compile，torch 无该 knob 时 loud-raise）；RegionAC 未移植（需 `torch_remat` + `Module.configure_remat_regions`，配置即 NotImplementedError），理由见文件 docstring |
+| `parallel/activation_checkpoint.py` | `distributed/activation_checkpoint.py` | 0.374 | **FullAC + SelectiveAC + MemoryBudgetAC 已移植**（后者按上游语义设 `torch._functorch.config.activation_memory_budget`，需 compile，torch 无该 knob 时 loud-raise）；RegionAC 已接入（2026-09-29 二十五次增量：`region_ac` + `parallel/remat_regions.py`，声明通道以 HF block 的 `nn.Linear` FQN 结构等价替代上游 `Module.configure_remat_regions`，受限项只有上游自带的 torch_remat 需 torch ≥ 2.10，apply 期 loud-raise） |
 | `parallel/fully_shard/fsdp.py` | `distributed/fsdp.py` | 0.815 | 多轴 mesh 重建、HF decoder 与 MoE placement 是 llmtuner 适配（2026-09-28 逐项复核，见审计“八次增量”） |
 | `parallel/parallel_dims.py` | `distributed/parallel_dims.py` | 0.772 | llmtuner 扩展 world/loss/sparse mesh 视图，不能按旧 A1 结构覆盖；`build_parallel_dims` / `build_mesh` 自 `accelerator/mesh.py` 并入，上游无单一对应物（mesh 逻辑散在 `distributed/parallel_dims.py` 与 `trainer.py`） |
 | `parallel/pipeline_parallel/pipeline.py` | `experiments/transformers_modeling_backend/pipeline.py` | 0.686 | `None` → `nn.Identity`；每 stage 追加 `rotary_emb`；stage 内 layer 保留原始索引（不重新编号），避免多 stage state-dict FQN 冲突 |
@@ -337,11 +337,14 @@ partitioner 做取舍，落为 `training.activation_checkpoint_mode='memory_budg
 compile 关闭时 fail-fast；torch 无该 knob（本机 2.2.2 即如此）时 loud-raise 而非
 静默设一个没人读的全局量；上游的 `visualize_memory_budget_pareto`（往 dump folder
 倒 SVG）未移植，llmtuner 的 AC 路径没有 dump folder 概念。该文件仍有一处未移植，是
-依赖而非删减：`RegionAC` 需要 `torch_remat`（llmtuner 不依赖，且它的"模型声明
-region"建立在 llmtuner 没有的 `Module.configure_remat_regions` 协议上）——配置
-`mode='region'` 在 config 与 `apply_ac` 两处都是显式 `NotImplementedError`，解锁
-条件写在报错与文件 docstring 里。原先同列的 `disable_dynamo_lru_cache`（SAC+PP 的
-重编译 workaround）已于 2026-09-27 随 pp×AC 对齐一并移植，见下方六次增量。
+依赖而非删减：`RegionAC` 需要 `torch_remat`——**已于 2026-09-29 二十五次增量接入**
+（`mode='region'` + `RegionACConfig` + `parallel/remat_regions.py`），受限条件只剩上游
+那一个：`torch_remat` 要求 torch ≥ 2.10，本机 2.2.2 无法 import，故 apply 期
+loud-raise ImportError 并把 torch 版本与安装命令一并写进文案；上游的
+`Module.configure_remat_regions` 声明通道以"HF block 的 `nn.Linear` FQN"结构等价替代，
+理由与取舍见 `remat_regions.py` 与 `wrap_region` 的 docstring。原先同列的
+`disable_dynamo_lru_cache`（SAC+PP 的重编译 workaround）已于 2026-09-27 随 pp×AC 对齐
+一并移植，见下方六次增量。
 
 **已从 D 移除**：`tools/validate.py`——上一版既写了它、又写"上游也没有这个路径，已从
 表里移除"，自相矛盾。核实：上游 `torchtitan/tools/validate.py` **确实不存在**，这一行
@@ -431,7 +434,7 @@ llmtuner 侧是 `datasets/multimodal/image.py`），本表的 llmtuner 列是唯
   | 提交 | 结论 |
   |---|---|
   | `9e159aed7` TP projection 后端重构（#4704） | **语义已对齐，无代码动作**。通信角色不变量在 llmtuner 已成立：column 拥有 input collective（`ColumnParallelLinear` 融合 all-gather）、row 拥有 output collective（`RowParallelLinear` 融合 reduce-scatter）；共享输入多投影在父模块一次性 gather（`GatherSequenceFirst` + `ColwiseLinearNoGather`，同上游"父模块持有、子投影为 plain Linear"语义）。`_linear()` seam 服务 LoRA/量化（llmtuner 裁剪面，不移植）；`PartialBiasRowwiseLinear` 上游删除并并入 `RowParallelLinear`，llmtuner 同名类的 bias I→P 语义本就一致，保留（仅测试使用）。AsyncTensorParallelTransform 重写是上游 Module-registry 面的模块替换实现，llmtuner async TP 走 inductor `_micro_pipeline_tp` + symm-mem，机制不受影响；"转换后（LoRA/量化）投影不支持 async TP"的约束在 llmtuner 无对应面（两者均裁剪），不登记守卫。上游 `dist_gemm.py` 改名 `async_linear.py`，本文映射随之更新。 |
-  | `847f98a6f` RegionAC AllToAll remat regions（#4837） | **随 RegionAC/DeepEP 缺口锁定，解锁条件不变**（torch_remat + CUDA deep_ep 核）。TokenDispatcher 变 Module 是 remat region 机制的载体，llmtuner 无消费方。可独立移植的语义——dispatch/combine 恒 SAVE——经核对**已在 llmtuner 成立**：selective AC 的 save set 含 `_c10d_functional.all_to_all_single`（`activation_checkpoint.py` 的 `comm_ops`），即 llmtuner AllToAllTokenDispatcher 用的原语，无需动作。 |
+  | `847f98a6f` RegionAC AllToAll remat regions（#4837） | **RegionAC 侧本条已不再受阻**（2026-09-29 二十五次增量接入 RegionAC）；仍缺的是 **DeepEP** 那一半（CUDA deep_ep 核 + 上游 `distributed/deepep/` wrappers，D 表登记）。上游把 TokenDispatcher 变成 Module 是 remat region 的载体，llmtuner 的 dispatcher 不是 Module，故这条 region 声明在 llmtuner 无对应物——但可独立移植的语义（dispatch/combine 恒 SAVE）经核对**已在 llmtuner 成立**：selective AC 的 save set 含 `_c10d_functional.all_to_all_single`（`activation_checkpoint.py` 的 `comm_ops`），即 llmtuner AllToAllTokenDispatcher 用的原语；RegionAC 路径下的差别登记于此：region 词表只含 `nn.Linear`，该 collective 不在任何 region 内，因而随 block 整体重算（上游是把它声明成恒 SAVE 的 region）；要抹平需要给 dispatcher 一个 remat region 通道，属 D 表 DeepEP 那一半的解锁范围。 |
   | `090c0c931` graph_trainer none AC MemoryPolicy（#4476） | **实验目录，不适用**。`experiments/graph_trainer/` 无 llmtuner 对应面；等义语义 llmtuner 已有（`activation_checkpoint_mode='none'`）。 |
   上一轮审计（llmtuner `528dc9d` × TorchTitan `c6e416bbd`）引用的
   `llmtuner_torchtitan_alignment_audit_2026-09-21.md` 不在当前工作区。
@@ -1289,7 +1292,8 @@ llmtuner 侧是 `datasets/multimodal/image.py`），本表的 llmtuner 列是唯
   并保留 `__all__` 里的再导出，故 `from llmtuner.parallel.activation_checkpoint import
   VALID_AC_MODES`（测试在用）与 `apply_ac` 自身的成员校验都不变。验证：两处取到的是
   **同一个对象**；四个合法模式全部接受、`'bogus'` 被拒（消息含字段名与集合）、
-  `'region'` 仍走 `EnvironmentUnsupportedError` 分支；`test_activation_checkpoint.py` 那条
+  `'region'` 当时仍走 `EnvironmentUnsupportedError` 分支（**二十五次增量已改为正常模式**，
+  见该条目）；`test_activation_checkpoint.py` 那条
   `test_valid_modes_are_the_configs_accepted_set` 的断言名至此名副其实。
   (c) **四处同形状的 `>= 1` 守卫 → 一个循环**：`TrainingConfig.__post_init__` 里
   `global_batch_size`/`max_seq_len`/`steps`/`gradient_accumulation_steps` 四段
@@ -1361,6 +1365,84 @@ llmtuner 侧是 `datasets/multimodal/image.py`），本表的 llmtuner 列是唯
   这一层，正文按关注点分文件，属有意结构而非过度拆分；拆掉它反而要重写这些测试。
   (e) 验证：`ruff check`（含 `tests`）、`git diff --check`、`python -m compileall -q llmtuner`
   全通过；`tests/unit_tests` = 248 passed / 56 skipped / 9 failed（失败集不变）。
+
+- 2026-09-29 二十五次增量（**接入 RegionAC**，AC 四种 policy 至此全部落地）：
+  (a) **上游结构**（`torchtitan/distributed/activation_checkpoint.py` + 本轮 clone 的
+  `meta-pytorch/remat@d302699b`）：`RegionAC.Config.save_regions` 是一组"相对 transformer
+  block"的 glob；`Module.configure_remat_regions` 把 pattern 下推到模块树的
+  `_remat_save_patterns`，模型代码在 `remat.region(fn, name, recompute=...)` 的调用点把
+  局部名解析成 `attention.qkv` 这类相对名；`RegionAC.apply` 逐 block
+  `configure_remat_regions(...)` 再用 `remat.checkpoint(region_name=f"layers.{i}",
+  determinism_check=..., preserve_rng_state=False)(module.forward)` 包住 forward。
+  `preserve_rng_state=True` 与 `debug=True` 都被上游 config 拒绝。
+  (b) **llmtuner 的等价物**：HF 模型既没有 `remat.region` 调用点也没有 `Module` 协议，
+  所以声明通道改为**结构等价**——`parallel/remat_regions.py` 把"block 内每个 `nn.Linear`
+  的 block 相对 FQN"当作 region 名（`self_attn.q_proj`/`mlp.down_proj`/MoE 的
+  `router.gate`），这正是上游 `save_regions` 示例所指的那些投影；`wrap_region` 逐 Linear 装
+  `remat.region`、再对 block 装 `remat.checkpoint`。三条取舍写在该文件与 `wrap_region`
+  的 docstring 里：① Linear 的 `forward(input) -> Tensor` 才是 `remat.region` 要求的
+  扁张量签名（任意 HF 子模块可能收发嵌套结构），② 这些 region 互为兄弟、不嵌套，
+  因此撞不上 torch_remat 的"save 里套 recompute"错误与"同一 phase 内名字唯一"约束，
+  ③ 词表有意不含 packed 专家权重（`GroupedExperts` 不是 `Linear`）、attention 内部
+  softmax（HF 无对应子模块）与 norm/激活（重算很便宜，正是该模式的意义）。pattern 仍按
+  **块相对名** fnmatch（上游规则，一份策略覆盖所有 block），交给 torch_remat 的 label 则
+  是**块限定名**（`layers.0.self_attn.q_proj`，便于 trace/显存报告区分 block；remat 只把名字
+  当标签，匹配在 llmtuner 这侧）。
+  (c) **接线**：`VALID_AC_MODES` 增加 `"region"`（第五个取值）；新增
+  `RegionACConfig(save_regions, determinism_check="default", preserve_rng_state=False)`，
+  `preserve_rng_state=True` 在 config 期即 `ConfigError`（上游与 torch_remat 都拒，文案指向
+  `RecomputeStateHook`）；上游的 `debug` 字段**不暴露**（torch_remat 的 checkpoint 没有该
+  旋钮，上游只是因为基类带了这个字段）；`TrainingConfig.region_ac` 字段 +
+  `parallelize_hf_transformers(region_ac=...)` + `builder` 透传；原先 config 与 `apply_ac`
+  两处的 `NotImplementedError` 全部删除。`torch_remat` 走**懒 import**
+  （`require_torch_remat`，与 checkpointer 的 `require_torch_checkpointing` 同法），因此
+  config 期与本模块 import 期都不需要该包，缺包时 apply 期抛 ImportError 并同时给出
+  **torch ≥ 2.10** 与安装命令（本机 torch 2.2.2 装不上：`torch_remat` 的依赖即
+  `torch>=2.10.0`，已实测 pip 报错）。
+  (d) **验证**：本机 torch 2.2.2 连 `activation_checkpoint.py` 都 import 不了（缺
+  `torch._functorch.partitioners.get_default_op_list`、`torch.utils.checkpoint.CheckpointPolicy`、
+  `torch.ops.aten.mm.dtype` 三处新 API），所以数值与真包行为**未验证**，如实登记。
+  可验证的部分全部钉住：`remat_regions` + `RegionACConfig` + `VALID_AC_MODES` 的 13 条用例
+  在本机**实跑通过**（`tests/unit_tests/cpu/parallel/test_remat_regions.py`，非门控）；
+  `wrap_region`/`require_torch_remat` 用 AST 取出后在带 fake `torch_remat` 的命名空间里实跑，
+  观察到的标注与 checkpoint 调用与设计一致（7 个 region、`self_attn.*`+`mlp.down_proj`
+  共 5 个 retained、`checkpoint(region_name='layers.0', determinism_check='default',
+  preserve_rng_state=False)`、block 返回且 forward 已替换、forward/backward 可跑通、
+  未命中 pattern 记 warning、空 pattern 全 recompute、缺包 ImportError 含 torch ≥ 2.10）；
+  AC 测试模块新增 3 条 region 用例（fake 包 + 缺包守卫 + HF 词表断言，本机被 module 级
+  env 门控跳过）。解锁条件：torch ≥ 2.10 机器上装 `torch_remat` 后复跑这些用例并
+  与未 checkpoint 的 forward/backward 对数值。
+  (e) 验证：`ruff check`（含 `tests`）、`git diff --check`、`compileall` 全通过；
+  `tests/unit_tests` = 261 passed / 56 skipped / 9 failed（比上一轮 +13，全部是本轮新增用例；
+  失败集不变）。
+
+- 2026-09-29 二十六次增量（`full` AC 与上游 `FullAC` 逐字对齐）：
+  (a) **查出的差异**：上游 `FullAC._wrap_block` **不是裸 wrapper**，它把恒
+  `PREFER_RECOMPUTE` 的 `_full_ac_policy` 经 `create_selective_checkpoint_contexts`
+  作为 `context_fn` 传给 `ptd_checkpoint_wrapper`；llmtuner 此前传的是 torch 默认的
+  `noop_context_fn`（纯非重入路径）。语义差别在"输出不可重算/带注册副作用"的算子上：
+  上游那条路径让 torch 仍落 SAVE（上游注释："Recompute pure operations while PyTorch
+  preserves registered effects"），裸 wrapper 则一律重算。该差异此前**没有登记**，
+  本轮修掉。torch 侧依据：非重入实现里 `context_fn` 是叠加层，重算由
+  `_checkpoint_hook` 驱动（`torch/utils/checkpoint.py` 的
+  `_checkpoint_without_reentrant_generator`），所以两条路径同源、不是两种机制。
+  (b) **对齐方式**：新增 `full_policy`（上游 `_full_ac_policy` 的同义实现）与
+  `wrap_full`（上游 `FullAC._wrap_block` 的同形实现，含 `context_fn`/`preserve_rng_state`/
+  `early_stop=True`），`apply_ac` 的 full 分支改调 `wrap_full`；`full` 的
+  `determinism_check`/`debug` 仍不暴露，但已核实 torch 的非重入默认值就是
+  `determinism_check="default"`、`debug=False`（`torch/utils/checkpoint.py` 的
+  `_DEFAULT_DETERMINISM_MODE`），与上游 config 的默认相同——即行为一致、只是不可配，
+  原登记项继续成立。
+  (c) 验证：本机缺 `CheckpointPolicy`（torch 2.2.2），该模块与相关用例仍被 env 门控
+  跳过，故数值未在本机复跑（既有 `test_full_ac_matches_uncheckpointed_bitwise`
+  与"内层 forward 两次"的重算证明即那台机器上的守卫）。可验证部分全部实跑：
+  AST 取出 `full_policy`/`wrap_full` 后在带 stub 的命名空间执行，确认 wrapper 收到
+  `context_fn`（其构建时把 `full_policy` 交给 selective 上下文）、
+  `preserve_rng_state`（默认 True）与 `early_stop=True`；新增两条用例
+  （`test_full_policy_prefers_recompute_for_every_op`、
+  `test_full_ac_runs_on_the_selective_context`）钉住策略与接线。
+  `ruff check`（含 `tests`）、`git diff --check`、`compileall` 全通过；
+  `tests/unit_tests` = 261 passed / 56 skipped / 9 failed（失败集不变）。
 
 - 检查后续漂移：`git -C <torchtitan> log f35966713..HEAD -- torchtitan/`。
 - 2026-09-23 映射修订：上游 `distributed/linear.py` 已删除、内容迁入

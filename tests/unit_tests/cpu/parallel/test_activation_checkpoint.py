@@ -22,8 +22,9 @@ Four things are pinned:
 
 Plus the two non-wrapping modes: ``memory_budget`` sets (and validates) its
 one ``torch._functorch.config`` global and refuses a torch that lacks it or a
-run without compile; ``region`` is a loud ``NotImplementedError`` naming its
-unlock conditions.
+run without compile; ``region`` (torch_remat) is wired against a fake package
+here -- the real one needs torch >= 2.10 -- so its call shape, its HF
+vocabulary, and the loud error for a missing package are pinned without it.
 """
 
 from __future__ import annotations
@@ -35,6 +36,7 @@ require_env(
 )
 
 
+import sys
 from types import SimpleNamespace
 
 import pytest
@@ -47,6 +49,7 @@ from torch.utils.checkpoint import CheckpointPolicy
 from llmtuner.config import (
     MemoryBudgetACConfig,
     ParallelConfig,
+    RegionACConfig,
     SelectiveACConfig,
     TrainingConfig,
 )
@@ -61,6 +64,7 @@ from llmtuner.parallel.activation_checkpoint import (
     selective_policy,
 )
 from llmtuner.parallel.parallelize import parallelize_hf_transformers
+from llmtuner.parallel.remat_regions import region_names
 
 _VOCAB = 32
 _HIDDEN = 16
@@ -122,14 +126,108 @@ def test_selective_needs_its_config() -> None:
 
 
 def test_valid_modes_are_the_configs_accepted_set() -> None:
-    assert VALID_AC_MODES == ("none", "full", "selective", "memory_budget")
+    assert VALID_AC_MODES == (
+        "none",
+        "full",
+        "selective",
+        "memory_budget",
+        "region",
+    )
 
 
-def test_region_mode_is_a_loud_not_implemented() -> None:
-    """RegionAC is not silently aliased to another mode: its unlock conditions
-    (a torch_remat dependency plus model-declared remat regions) are named."""
-    with pytest.raises(NotImplementedError, match="torch_remat"):
+class _FakeRemat:
+    """Records what RegionAC asks of ``torch_remat``, and wraps nothing.
+
+    The real package needs torch >= 2.10, so the call shape -- which regions get
+    annotated, with which recompute flag, and how the block is checkpointed --
+    is pinned against this instead. It is the same stand-in the torchao adapter's
+    tests use.
+    """
+
+    def __init__(self) -> None:
+        self.regions: list[tuple[str, bool]] = []
+        self.checkpoints: list[tuple[str, str, bool]] = []
+
+    def region(self, function, name, *, recompute):
+        self.regions.append((name, recompute))
+        return function
+
+    def checkpoint(
+        self,
+        *,
+        region_name=None,
+        determinism_check="none",
+        preserve_rng_state=False,
+    ):
+        self.checkpoints.append((region_name, determinism_check, preserve_rng_state))
+
+        def decorate(function):
+            def wrapped(*args, **kwargs):
+                return function(*args, **kwargs)
+
+            return wrapped
+
+        return decorate
+
+
+def _fake_remat(monkeypatch: pytest.MonkeyPatch) -> _FakeRemat:
+    fake = _FakeRemat()
+    monkeypatch.setitem(sys.modules, "torch_remat", fake)
+    return fake
+
+
+def test_region_needs_its_config() -> None:
+    """Not downgraded to full when its config is missing, like selective."""
+    with pytest.raises(ValueError, match="RegionACConfig"):
         apply_ac(_model(), "region")
+
+
+def test_region_without_torch_remat_is_a_loud_import_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The package is optional *and* version-gated: the error names both."""
+    monkeypatch.setitem(sys.modules, "torch_remat", None)
+    with pytest.raises(ImportError, match="torch >= 2.10"):
+        apply_ac(_model(), "region", region=RegionACConfig())
+
+
+def test_region_annotates_the_hf_projections_and_checkpoints_each_block(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The vocabulary is the HF block's own projections, one checkpoint per block."""
+    fake = _fake_remat(monkeypatch)
+    model = apply_ac(
+        _model(), "region", region=RegionACConfig(save_regions=["self_attn.*"])
+    )
+
+    assert fake.checkpoints == [
+        (f"layers.{layer_id}", "default", False) for layer_id in range(_NUM_LAYERS)
+    ]
+    vocabulary = region_names(model.layers[0])
+    assert vocabulary == (
+        "self_attn.q_proj",
+        "self_attn.k_proj",
+        "self_attn.v_proj",
+        "self_attn.o_proj",
+        "mlp.gate_proj",
+        "mlp.up_proj",
+        "mlp.down_proj",
+    )
+    # Block-qualified labels for torch_remat, block-relative names for the
+    # patterns: the retained set is exactly the attention projections.
+    assert [name for name, _ in fake.regions] == [
+        f"layers.{layer_id}.{region}"
+        for layer_id in range(_NUM_LAYERS)
+        for region in vocabulary
+    ]
+    assert {
+        name.split(".", 2)[-1] for name, recompute in fake.regions if not recompute
+    } == {
+        "self_attn.q_proj",
+        "self_attn.k_proj",
+        "self_attn.v_proj",
+        "self_attn.o_proj",
+    }
 
 
 def test_full_wraps_every_layer() -> None:
@@ -144,6 +242,38 @@ def test_selective_wraps_every_layer() -> None:
 
     assert len(model.layers) == _NUM_LAYERS
     assert all(isinstance(layer, CheckpointWrapper) for layer in model.layers)
+
+
+def test_full_policy_prefers_recompute_for_every_op() -> None:
+    """Upstream's ``_full_ac_policy`` is a constant: recompute all, save effects."""
+    assert (
+        ac_mod.full_policy(object(), object(), "arg", kw="v")
+        is CheckpointPolicy.PREFER_RECOMPUTE
+    )
+
+
+def test_full_ac_runs_on_the_selective_context(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """FullAC is not a bare wrapper: the blanket policy goes through the context.
+
+    That is upstream's shape, and it is what lets torch keep an op whose output
+    cannot be recomputed. ``checkpoint_wrapper`` calls the ``context_fn`` it was
+    handed per layer forward, so this only shows up once a forward runs.
+    """
+    seen: list[object] = []
+    build_contexts = ac_mod.create_selective_checkpoint_contexts
+
+    def record(policy):
+        seen.append(policy)
+        return build_contexts(policy)
+
+    monkeypatch.setattr(ac_mod, "create_selective_checkpoint_contexts", record)
+    model = apply_ac(_model(), "full")
+    _loss_and_backward(model)
+
+    assert seen, "full AC never built a selective checkpoint context"
+    assert all(policy is ac_mod.full_policy for policy in seen)
 
 
 def test_parallelize_hf_transformers_wires_ac_before_fsdp() -> None:
@@ -391,8 +521,10 @@ def test_training_config_validates_memory_budget_and_region_modes() -> None:
     TrainingConfig(activation_checkpoint_mode="memory_budget", compile=True)
     with pytest.raises(ValueError, match="requires training.compile"):
         TrainingConfig(activation_checkpoint_mode="memory_budget")
-    with pytest.raises(NotImplementedError, match="torch_remat"):
-        TrainingConfig(activation_checkpoint_mode="region")
+    # Region AC is a config-valid mode: what it cannot do without torch_remat is
+    # apply the policy, and that failure belongs to apply time (pinned above).
+    cfg = TrainingConfig(activation_checkpoint_mode="region")
+    assert cfg.region_ac.save_regions == []
 
 
 # -- numerics ------------------------------------------------------------------

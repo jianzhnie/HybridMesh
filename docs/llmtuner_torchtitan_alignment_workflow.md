@@ -155,8 +155,9 @@ D 类必须独立设计和验收，不能伪装成单文件同步。当前清单
 [`llmtuner_upstream_map.md`](./llmtuner_upstream_map.md) D 类表为准。截至 2026-09-27 的
 剩余项只有：
 
-- RegionAC：需要 `torch_remat` 与上游 `Module.configure_remat_regions` 协议，llmtuner
-  两者皆无（配置 `mode='region'` 即 loud-raise）。
+- RegionAC：**已接入**（2026-09-29），声明通道改为结构等价（HF block 的 `nn.Linear`
+  FQN 即 region 名），唯一受限项是上游自带的 `torch_remat` 需 torch ≥ 2.10；apply 期
+loud-raise 并给出安装命令，数值待 torch ≥ 2.10 机器复跑。
 - DeepEP / HybridEP dispatcher：CUDA-only，且上游 `distributed/deepep/` wrappers
   未 vendor。
 - TP×MoE 的**多卡等价性证据**：声明层与装配层已就位（`shard_experts_for_tp` +
