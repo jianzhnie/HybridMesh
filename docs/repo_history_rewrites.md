@@ -37,8 +37,9 @@ recompute the branch.
   `git log --all --format=%ae | sort -u` is a single value.
 * **Pre-rewrite history**: the bare mirror
   `/Users/jianzhengnie/work_dir/HybridMesh-backup-pre-email-rewrite.git` (kept
-  outside this repository) holds every ref as it was, with `REWRITE-NOTES.md`
-  carrying the replay and restore commands.
+  outside this repository) held every ref as it was, with `REWRITE-NOTES.md`
+  carrying the replay and restore commands. It was deleted from disk on
+  2026-09-30 -- see the cleanup section for what survives and how to recover it.
 * **What to expect afterwards**: GitHub aggregates the profile timeline and the
   contribution graph asynchronously and keys them by SHA, so the days around a
   rewrite can lag behind -- they may briefly show fewer commits than the branch
@@ -119,24 +120,45 @@ history. What is left is (a) this clone's residue and (b) GitHub's ledger.
 
 * **Local residue** -- done on 2026-09-30; recorded here because the numbers are
   themselves the check that it worked. Before: 627 commit objects against 180
-  reachable from `main` (`.git` 6.6M). The four refs were first archived to
-  `/Users/jianzhengnie/work_dir/TorchLLMTuner-history-archive.bundle` (1.9M,
-  outside this repository), verified with `git bundle verify` ("records a
-  complete history") and by cloning that bundle into `/tmp` and comparing every
-  ref -- all four matched. Then the branches were dropped and the rest reaped:
+  reachable from `main` (`.git` 6.6M). The four refs were first archived to a
+  1.9M bundle outside this repository (since deleted at the author's request;
+  no other document links to it), verified with
+  `git bundle verify` ("records a complete history") and by cloning that bundle
+  into `/tmp` and comparing every ref -- all four matched. Then the branches
+  were dropped and the rest reaped:
 
   ```bash
-  git bundle create /Users/jianzhengnie/work_dir/TorchLLMTuner-history-archive.bundle --all
+  git bundle create <somewhere-outside-the-repo>.bundle --all
   git branch -D backup-before-0919-fill backup-before-redate backup-redated-history
   git reflog expire --expire=now --all && git gc --prune=now
   ```
 
   After: 180 commit objects (all of `main`), `.git` 2.1M, `git fsck` silent and
-  `git branch` showing `main` only. Restore with
-  `git clone /Users/jianzhengnie/work_dir/TorchLLMTuner-history-archive.bundle`.
-  The bundle holds every ref (the three backups and `main`); what is gone is the
-  ~170 intermediate revisions that no ref ever pointed at. The 09-29 entry's
-  bare mirror remains the older, independent copy.
+  `git branch` showing `main` only. What is gone is the ~170 intermediate
+  revisions that no ref ever pointed at.
+
+  The mirror from the 09-29 entry was then deleted from disk as well: `work_dir`
+  holds no backup, mirror or bundle, and the Trash is empty, so no pre-rewrite
+  ref exists locally any more (the redate revision that carried
+  `scripts/redate_history.py` included).
+
+  What survives is on GitHub, as *unreachable* objects. Both mirror tips still
+  resolve through the commit API while the local-only ones do not:
+
+  | commit | source | API |
+  | --- | --- | --- |
+  | `ec2af876b2822f6564541837cb52ad84957415f2` | mirror `backup-before-0919-fill` / `backup-before-redate`, 148 commits | `GET .../git/commits/<sha>` -> 200 |
+  | `b0a273a371687ba60d9cef2f23f566dbce223bde` | mirror `backup-redated-history`, 149 commits, holds `scripts/redate_history.py` | 200 |
+  | `e7b9fe4ab77c9322a58f0973b538cf99002687d1` | this clone's `backup-before-*`, never pushed | 404 |
+  | `d0d93490be108723717a0e8abc292fa1e2322d3a` | this clone's `backup-redated-history`, never pushed | 404 |
+
+  So a reachable copy can still be re-attached from the two 200s --
+  `git push origin <sha>:refs/heads/<name>` -- but GitHub may prune unreachable
+  objects on its own schedule, and nothing short of a Support request removes
+  them sooner. Whether the year-spanning redate revision was ever pushed, and
+  how much of the graph's out-of-September credit comes from it rather than from
+  the author's other repositories, is still not something this repository can
+  answer.
 * **GitHub's ledger** -- nothing on our side changes it. The only targeted fix
   is asking GitHub Support to recompute the contribution graph for the account
   (there is no self-service button); deleting and recreating the repository
