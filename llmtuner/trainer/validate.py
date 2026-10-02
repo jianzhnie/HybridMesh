@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import torch
 
+from llmtuner.accelerator.capabilities import require
 from llmtuner.config import ValidationConfig
 from llmtuner.parallel import matrix
 
@@ -26,7 +27,6 @@ from ..datasets.types import Batch
 def check_validation_feasibility(
     validation: ValidationConfig,
     *,
-    pp_enabled: bool,
     dp_world_size: int,
     training_dataset: str,
 ) -> None:
@@ -43,14 +43,7 @@ def check_validation_feasibility(
           and loss reductions every rank must enter together).
         * ``steps=-1`` against the synthetic corpus has no exhaustion at all:
           the random source is infinite, so "one finite pass" never ends.
-        * llmtuner wires the pipeline schedule for training only (the loss is
-          computed and backwarded *inside* the schedule step, and the loss
-          denominator is published on the schedule object); the schedule's own
-          eval driver is not wired to that seam, so the combination loudly
-          rejects rather than silently skipping validation or training.
         """
-    if pp_enabled:
-        matrix.pp_validation()
     if validation.steps != -1:
         return
     if dp_world_size > 1:
@@ -113,6 +106,9 @@ def validate(self, step: int) -> None:
 
 def validate_body(self, validation: ValidationConfig, step: int) -> None:
     parallel_dims = self.parallel_dims
+    if parallel_dims is not None and parallel_dims.pp_enabled:
+        validate_body_pp(self, validation, step)
+        return
     # The same mesh split as ``train_step``: the token count is taken from
     # the unsharded batch, so it is summed over the dp axis alone; the loss
     # is summed over each rank's own slice of the batch, so it is reduced
@@ -209,6 +205,128 @@ def validate_body(self, validation: ValidationConfig, step: int) -> None:
             "average validation loss. Ensure the validation batches "
             "contain unmasked labels."
         )
+    if loss_mesh is not None:
+        global_loss_sum = accumulated_loss.clone()
+        all_reduce(global_loss_sum, group=loss_mesh.get_group())
+    else:
+        global_loss_sum = accumulated_loss
+    global_avg_loss = float(global_loss_sum) / num_global_valid_tokens
+    self.metrics.log_validation(loss=global_avg_loss, step=step)
+
+
+def validate_body_pp(self, validation: ValidationConfig, step: int) -> None:
+    """The PP validation pass: drive the schedule's ``eval`` per step.
+
+    Upstream torchtitan's ``Validator`` seam: the pipeline schedule carries an
+    eval-only driver, so a validation pass runs the same stages forward-only.
+    The microbatch plumbing mirrors the training body (``pp_steps``): first
+    stage gets the inputs, last stage the labels, and every stage gets the
+    per-microbatch kwargs (positions, masks).
+
+    The schedule's loss function divides by the run's denominator attribute;
+    for the pass it is pinned to 1 so the reported per-microbatch losses are
+    raw summed cross-entropies, and the division happens once at the end, by
+    the pass's global valid-token count -- the same normalization as the
+    non-PP path and the training loss. The training body re-publishes the
+    real denominator before every train step, so no restore is needed.
+
+    Only the last stage's ranks hold losses; every other stage's ranks run
+    the same loop (same loader reads, same token counting, same eval calls)
+    and simply do not report.
+    """
+    require("pipelining_schedule_eval", feature="validation with pipeline parallelism")
+
+    parallel_dims = self.parallel_dims
+    dp_mesh = parallel_dims.get_optional_mesh("dp")
+    loss_sharded = parallel_dims.dp_cp_enabled or parallel_dims.tp_enabled
+    loss_mesh = parallel_dims.get_optional_mesh("loss") if loss_sharded else dp_mesh
+
+    dp_rank, dp_world_size = self.dp_rank_world_size()
+    batch_size_per_rank = self.batch_size_per_rank(dp_world_size)
+    validation_dataloader = build_dataloader(
+        self.cfg,
+        dp_rank=dp_rank,
+        dp_world_size=dp_world_size,
+        num_tokens_per_batch=batch_size_per_rank * self.cfg.max_seq_len,
+        repeat=validation.steps != -1,
+        dataset=validation.dataset,
+    )
+
+    accumulated_loss: torch.Tensor | None = None
+    total_global_valid_tokens = torch.zeros(
+        (), dtype=torch.int64, device=self.device
+    )
+    num_steps = 0
+    try:
+        data_iterator = iter(validation_dataloader)
+        while validation.steps == -1 or num_steps < validation.steps:
+            try:
+                batch = next(data_iterator)
+            except (DataLoaderExhausted, StopIteration):
+                break
+            labels = batch.labels if isinstance(batch, Batch) else batch["labels"]
+            self.metrics.add_tokens(labels.numel())
+            local_valid_tokens = self.count_valid_tokens(batch)
+            global_valid_tokens = torch.tensor(
+                local_valid_tokens, dtype=torch.int64, device=self.device
+            )
+            if dp_mesh is not None:
+                all_reduce(global_valid_tokens, group=dp_mesh.get_group())
+
+            arg_mbs: list[tuple[torch.Tensor, ...]] = []
+            kwarg_mbs: list[dict] = []
+            target_mbs: list[torch.Tensor] | None = (
+                [] if self.pp_has_last_stage else None
+            )
+            for mb in self.pp_microbatches(batch):
+                inputs, mb_labels, extra_kwargs = self.preprocess({"batch": mb})
+                if self.pp_has_first_stage:
+                    arg_mbs.append((inputs,))
+                kwarg_mbs.append(extra_kwargs)
+                if target_mbs is not None:
+                    target_mbs.append(mb_labels)
+
+            losses: list[torch.Tensor] | None = [] if self.pp_has_last_stage else None
+            with self.param_context(), spmd_context(self.parallel_dims):
+                self.pp_schedule._llmtuner_global_valid_tokens = torch.ones(
+                    (), dtype=torch.float32
+                )
+                self.pp_schedule.eval(
+                    arg_mbs=arg_mbs if self.pp_has_first_stage else None,
+                    kwarg_mbs=kwarg_mbs,
+                    target_mbs=target_mbs,
+                    losses=losses,
+                )
+            if self.pp_has_last_stage:
+                assert losses is not None
+                step_loss = torch.sum(torch.stack([loss.detach() for loss in losses]))
+                if accumulated_loss is None:
+                    accumulated_loss = step_loss
+                else:
+                    accumulated_loss = accumulated_loss + step_loss
+            total_global_valid_tokens.add_(global_valid_tokens)
+            num_steps += 1
+    finally:
+        validation_dataloader.close()
+
+    if num_steps == 0:
+        raise ValueError(
+            "Validation ran zero batches on this rank. This happens when "
+            "the validation dataset supplies fewer than one batch of "
+            "tokens on this rank, because concat-then-split packing drops "
+            "partially filled batches. Decrease the per-rank batch size or "
+            "use a larger validation dataset."
+        )
+    num_global_valid_tokens = int(total_global_valid_tokens.item())
+    if num_global_valid_tokens == 0:
+        raise ValueError(
+            "Validation ran on zero valid tokens; cannot compute an "
+            "average validation loss. Ensure the validation batches "
+            "contain unmasked labels."
+        )
+    if not self.pp_has_last_stage:
+        return
+    assert accumulated_loss is not None
     if loss_mesh is not None:
         global_loss_sum = accumulated_loss.clone()
         all_reduce(global_loss_sum, group=loss_mesh.get_group())

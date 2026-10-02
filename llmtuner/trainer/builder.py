@@ -71,14 +71,10 @@ def build_trainer_state(self, cfg) -> None:
 
     # Validation's infeasible combinations are rejected here, before the
     # model and dataloader exist: a ``steps=-1`` pass that cannot terminate
-    # cleanly would otherwise hang on its collectives mid-run, and a
-    # pipeline-parallel pass has no eval seam to run through at all.
+    # cleanly would otherwise hang on its collectives mid-run.
     if cfg.validation is not None:
         self.check_validation_feasibility(
             cfg.validation,
-            pp_enabled=(
-                self.parallel_dims is not None and self.parallel_dims.pp_enabled
-            ),
             dp_world_size=(
                 1
                 if self.parallel_dims is None
@@ -178,7 +174,6 @@ def build_trainer_state(self, cfg) -> None:
         memory_budget_ac=cfg.training.memory_budget_ac,
         region_ac=cfg.training.region_ac,
         global_batch_size=cfg.training.global_batch_size,
-        dataset=cfg.training.dataloader.dataset,
     )
     if isinstance(orchestration, PipelineParallelSetup):
         # pp > 1: no single model survives the split -- this rank holds its

@@ -918,7 +918,6 @@ class Trainer:
     def check_validation_feasibility(
         validation: ValidationConfig,
         *,
-        pp_enabled: bool,
         dp_world_size: int,
         training_dataset: str,
     ) -> None:
@@ -928,7 +927,6 @@ class Trainer:
         """
         validation_pass.check_validation_feasibility(
             validation,
-            pp_enabled=pp_enabled,
             dp_world_size=dp_world_size,
             training_dataset=training_dataset,
         )

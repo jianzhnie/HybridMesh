@@ -144,20 +144,20 @@ def test_validation_defaults_to_off() -> None:
 # -- build-time feasibility ---------------------------------------------------
 
 
-def test_feasibility_rejects_pipeline_parallelism() -> None:
+def test_feasibility_accepts_pipeline_parallelism() -> None:
+    """PP x validation composes since 2026-10-02: the schedule's eval driver
+    (upstream Validator's seam) drives the pass; see validate_body_pp."""
     Trainer = _trainer_cls()
-    with pytest.raises(NotImplementedError, match="pipeline parallelism"):
-        Trainer.check_validation_feasibility(
-            ValidationConfig(), pp_enabled=True, dp_world_size=1,
-            training_dataset="local_jsonl",
-        )
+    Trainer.check_validation_feasibility(
+        ValidationConfig(), dp_world_size=1, training_dataset="local_jsonl",
+    )
 
 
 def test_feasibility_rejects_steps_neg1_when_dp_gt_1() -> None:
     Trainer = _trainer_cls()
     with pytest.raises(ValueError, match="validation collectives"):
         Trainer.check_validation_feasibility(
-            ValidationConfig(steps=-1), pp_enabled=False, dp_world_size=2,
+            ValidationConfig(steps=-1), dp_world_size=2,
             training_dataset="local_jsonl",
         )
 
@@ -166,13 +166,13 @@ def test_feasibility_rejects_steps_neg1_on_the_infinite_corpus() -> None:
     Trainer = _trainer_cls()
     with pytest.raises(ValueError, match="infinite synthetic source"):
         Trainer.check_validation_feasibility(
-            ValidationConfig(steps=-1), pp_enabled=False, dp_world_size=1,
+            ValidationConfig(steps=-1), dp_world_size=1,
             training_dataset="random",
         )
     # The override corpus is what the pass reads, so it is the one checked.
     with pytest.raises(ValueError, match="infinite synthetic source"):
         Trainer.check_validation_feasibility(
-            ValidationConfig(steps=-1, dataset="random"), pp_enabled=False,
+            ValidationConfig(steps=-1, dataset="random"),
             dp_world_size=1, training_dataset="local_jsonl",
         )
 
@@ -180,11 +180,11 @@ def test_feasibility_rejects_steps_neg1_on_the_infinite_corpus() -> None:
 def test_feasibility_accepts_the_terminating_combinations() -> None:
     Trainer = _trainer_cls()
     Trainer.check_validation_feasibility(
-        ValidationConfig(steps=-1), pp_enabled=False, dp_world_size=1,
+        ValidationConfig(steps=-1), dp_world_size=1,
         training_dataset="local_jsonl",
     )
     Trainer.check_validation_feasibility(
-        ValidationConfig(steps=10), pp_enabled=False, dp_world_size=8,
+        ValidationConfig(steps=10), dp_world_size=8,
         training_dataset="random",
     )
 
@@ -239,6 +239,72 @@ def test_validate_reports_token_normalized_loss_and_restores_train_mode(
     # Validation is a pure observer of the checkpointed training counter.
     assert trainer.ntokens_seen == 7
     assert loader.closed
+
+
+class _FakePPSchedule:
+    """Records the eval call; each microbatch's loss is a known constant."""
+
+    def __init__(self, per_mb_loss: float):
+        self.per_mb_loss = per_mb_loss
+        self.eval_calls: list[dict[str, Any]] = []
+
+    def eval(self, *, arg_mbs, kwarg_mbs, target_mbs, losses):
+        self.eval_calls.append(
+            {"arg_mbs": arg_mbs, "kwarg_mbs": kwarg_mbs, "target_mbs": target_mbs}
+        )
+        assert losses is not None
+        n = len(target_mbs)
+        losses.extend(torch.tensor(self.per_mb_loss) for _ in range(n))
+
+
+def test_validate_pp_drives_schedule_eval_and_reports_normalized_loss(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Under PP the pass runs the schedule's eval driver, with the loss
+    denominator pinned to 1 so the division happens once at the end."""
+    Trainer = _trainer_cls()
+    import llmtuner.trainer.validate as validate_mod
+
+    batches = [_batch(2), _batch(2)]
+    loader = _ListLoader(batches)
+    trainer = Trainer.__new__(Trainer)
+    cfg = LLMTunerConfig()
+    cfg.training.validation_config = ValidationConfig(steps=-1)
+    trainer.cfg = cfg
+    trainer.device = torch.device("cpu")
+
+    class _Dims:
+        pp_enabled = True
+        dp_cp_enabled = False
+        tp_enabled = False
+
+        def get_optional_mesh(self, name):
+            return None
+
+    trainer.parallel_dims = _Dims()
+    trainer.model_parts = [_EchoModel()]
+    trainer.pp_has_first_stage = True
+    trainer.pp_has_last_stage = True
+    trainer.pp_schedule = _FakePPSchedule(per_mb_loss=6.0)
+    logged: dict[str, Any] = {}
+    trainer.metrics = SimpleNamespace(
+        add_tokens=lambda n: None,
+        log_validation=lambda loss, step: logged.update(loss=loss, step=step),
+    )
+    monkeypatch.setattr(validate_mod, "build_dataloader", lambda *a, **k: loader)
+
+    trainer.validate(step=3)
+
+    # Two batches, each split into num_pp_microbatches microbatches (default 1).
+    assert len(trainer.pp_schedule.eval_calls) == 2
+    call = trainer.pp_schedule.eval_calls[0]
+    assert call["arg_mbs"] is not None and call["target_mbs"] is not None
+    # Denominator pinned to 1 during eval.
+    assert float(trainer.pp_schedule._llmtuner_global_valid_tokens) == 1.0
+    # Raw sums: 6.0 per microbatch x 1 microbatch x 2 batches, over 4 valid
+    # tokens (2 per batch).
+    assert logged["loss"] == pytest.approx(6.0 * 2 / 4)
+    assert logged["step"] == 3
 
 
 def test_validate_positive_steps_bounds_the_pass(

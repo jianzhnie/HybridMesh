@@ -231,7 +231,7 @@ fail-fast 按类型分三类，全部继承 `LLMTunerError`，并各自双继承
 | 类型 | 同时继承 | 语义 | 典型位置 |
 |---|---|---|---|
 | `ConfigError` | `ValueError` | 配置错了，改 flag/字段值 | `config/*` 的 `__post_init__` 校验 |
-| `UnsupportedCombinationError` | `NotImplementedError` | 各自合法、组合拒绝（PP×validation、shared-expert×tp、ulysses×load balancer、TP 的 MoE 布局等；tp×ep×cp 自 2026-10-02 起按上游语义放行） | `parallel/parallelize.py`、`apply_*`、EP swap |
+| `UnsupportedCombinationError` | `NotImplementedError` | 各自合法、组合拒绝（shared-expert×tp、ulysses×load balancer、TP 的 MoE 布局等；tp×ep×cp、PP×EP、PP×CP、PP×validation、PP×真实语料 2026-10-02 起按上游语义放行） | `parallel/parallelize.py`、`apply_*`、EP swap |
 | `EnvironmentUnsupportedError` | `NotImplementedError` | 构建/宿主缺依赖，文案必须带解锁条件（所需 torch 版本/包） | compile 的 inductor/dynamo knob、AC 的 budget knob、deepep/hybridep |
 
 两条边界规则：可选**包**缺失保持 `ImportError`（Python 惯例：renderers、
@@ -277,7 +277,7 @@ cp 整除 seq_len、async_tp×{compile,tp}），与其余字段校验同处、�
 底部 `ENTRIES` 扁平表里的一行（函数引用 / 阶段 / 异常类型 / 守卫位置；`name`
 与 `reason` 由函数派生）。两个阶段：
 
-* **assembly**：需模型/运行时信息（PP×AC、PP×validation、EP×checkpoint、
+* **assembly**：需模型/运行时信息（PP×AC、EP×checkpoint、
   chunked×PP、pp×{cp,ep,dataset,tying}、shared-expert×tp、quantile@ep=1 等）。
   触发条件留在守卫点，判定（类型+文案）由矩阵函数给出，双写不可能。
 * **probe**：需 HF 布局（GPT-OSS、group_limited_greedy、router bias、
@@ -622,9 +622,11 @@ torch≥2.12 多卡复跑。）
 `parallel/matrix.py`，下列条目与矩阵行一一对应）：
 
 1. PP+chunked loss 与 tied
-   embeddings 的 PP 均明确拒绝；PP × validation 同样构造期拒绝——原因不是"不存在
-   eval-only 通路"（torch 的 schedule 有 `eval`，上游校验器正在用），而是 llmtuner 只把
-   训练驱动器接到了 PP 接缝上（见 §5.1 与 `llmtuner_trainer_walkthrough.md` 的 D18）。
+   embeddings 的 PP 均明确拒绝；PP × validation 自 2026-10-02 起支持——schedule 自带
+   eval 驱动（与上游校验器同 seam），`trainer/validate.py::validate_body_pp` 接入
+   （`tests/integration_tests/pp_validation_equivalence.py` 待 torch≥2.12 复跑）；
+   PP × 真实语料同日解锁（positions 随 microbatch 穿管，
+   `pp_real_corpus_equivalence.py` 同样待复跑）。
 2. ptrr load balancer 未实现；Ulysses 不与 load balancer 组合（packed/varlen 自
    2026-09-25 起支持，文档 mask 全长透传，见 §CP 与
    `tests/integration_tests/cp_ulysses_varlen_equivalence.py`）。

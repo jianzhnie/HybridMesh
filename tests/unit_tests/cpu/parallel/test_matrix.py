@@ -58,12 +58,10 @@ def test_rows_reject_with_their_entry_type() -> None:
         pass
 
     cases = [
-        (matrix.pp_validation, (), "pipeline parallelism"),
         (matrix.validation_once_requires_dp1, (4,), "data-parallel"),
         (matrix.validation_once_requires_finite_corpus, (), "infinite synthetic"),
         (matrix.ep_checkpoint, (2,), "checkpointing"),
         (matrix.chunked_loss_pp, (2, 2), "chunked_loss_num_chunks=2"),
-        (matrix.pp_real_corpus, (), "synthetic 'random' corpus"),
         (matrix.pp_weight_tying, (), "tied word embeddings"),
         (matrix.shared_expert_tp, ("layers.0.mlp", _Block()), "shared expert"),
         (matrix.tp_moe_specs_without_block, (2, _Block()), "no HF MoE block"),

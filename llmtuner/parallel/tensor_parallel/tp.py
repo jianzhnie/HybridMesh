@@ -286,6 +286,45 @@ class TPMoeSequenceBoundary:
         return reduce_scatter_along(out, -2, self._tp_seq_group)
 
 
+def shard_shared_expert_for_tp(
+    block: nn.Module, *, tp_size: int, tp_rank: int
+) -> set[int]:
+    """Feature-shard a shared expert's dense MLP -- no collectives involved.
+
+    Inside the MoE sequence boundary the token stream is already gathered
+    (full T, replicated across the TP group), so the shared expert needs no
+    input collective: ``gate_proj``/``up_proj`` are sharded on the output
+    features (dim 0) and ``down_proj`` on the input features (dim 1), which
+    makes its output partial over the TP group. The block's output -- routed
+    plus shared -- is then partial on both halves, and the boundary
+    reduce-scatter sums them (upstream's layout: shared w2 stays Partial
+    until the boundary's single reduction).
+
+    Only the gate/up/down layout is known; anything else keeps the refusal at
+    the call site. Returns the sharded parameters' ids so the trainer's
+    replicated-gradient all-reduce excludes them (their gradients are complete
+    per shard, exactly like the routed experts').
+    """
+    shared = getattr(block, "shared_expert", None) or getattr(
+        block, "shared_experts", None
+    )
+    assert shared is not None  # the caller checked
+    ids: set[int] = set()
+    for name, dim in (("gate_proj", 0), ("up_proj", 0), ("down_proj", 1)):
+        proj = getattr(shared, name, None)
+        if proj is None or not isinstance(proj, nn.Linear):
+            continue
+        proj.weight = nn.Parameter(
+            shard_weight(proj.weight.data, dim, tp_size=tp_size, tp_rank=tp_rank)
+        )
+        if dim == 0:
+            proj.out_features = proj.weight.shape[0]
+        else:
+            proj.in_features = proj.weight.shape[1]
+        ids.add(id(proj.weight))
+    return ids
+
+
 def shard_experts_for_tp(
     block: nn.Module, *, tp_size: int, tp_rank: int
 ) -> frozenset[int]:

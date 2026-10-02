@@ -78,6 +78,15 @@ def dynamo_lru_cache_knob() -> bool:
     return getattr(eval_frame, "_set_lru_cache", None) is not None
 
 
+def _pipelining_has_eval() -> bool:
+    """Whether torch's pipeline schedules carry the eval-only driver."""
+    if not importable("torch.distributed.pipelining.schedules", "_PipelineSchedule")():
+        return False
+    import torch.distributed.pipelining.schedules as schedules
+
+    return hasattr(schedules._PipelineSchedule, "eval")
+
+
 def grouped_mm_runs() -> bool:
     """Whether ``torch._grouped_mm`` can run here.
 
@@ -173,6 +182,14 @@ CAPABILITIES: dict[str, Capability] = {
         hint="Upgrade torch; without the knob, activation checkpointing runs "
         "without upstream's SAC + pipeline-parallel cache workaround.",
         consumers="parallel/activation_checkpoint.py (disable_dynamo_lru_cache)",
+    ),
+    # -- pipeline eval driver (consumer: trainer/validate.py) ----------------
+    "pipelining_schedule_eval": Capability(
+        _pipelining_has_eval,
+        what="torch.distributed.pipelining _PipelineSchedule.eval",
+        since="torch 2.9 (eval-only pipeline driver)",
+        hint="Upgrade torch, or run validation with pipeline_parallel_size=1.",
+        consumers="trainer/validate.py (validation pass under PP)",
     ),
     # -- model kernels (consumer: models/common/moe/experts.py) ----------------
     "torch_grouped_mm": Capability(

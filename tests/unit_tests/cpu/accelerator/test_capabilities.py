@@ -13,6 +13,7 @@ ALL_NAMES = [
     "symm_mem",
     "functorch_activation_memory_budget",
     "dynamo_lru_cache",
+    "pipelining_schedule_eval",
     "torch_grouped_mm",
 ]
 

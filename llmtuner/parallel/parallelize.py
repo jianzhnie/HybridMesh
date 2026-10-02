@@ -76,7 +76,6 @@ def parallelize_hf_transformers(
     memory_budget_ac: MemoryBudgetACConfig | None = None,
     region_ac: RegionACConfig | None = None,
     global_batch_size: int | None = None,
-    dataset: str = "random",
 ) -> nn.Module | PipelineParallelSetup:
     """Apply every parallelism dimension the config asks for, in order.
 
@@ -87,7 +86,8 @@ def parallelize_hf_transformers(
     ``compile_config`` tunes the compile step (per-block, backend, async TP);
     ``None`` is the plain whole-model compile.
     ``global_batch_size`` is required only on the ``pp > 1`` path (microbatch
-    validation); ``dataset`` gates the same path's corpus restriction;
+    validation). Per-token positions and masks of a packed corpus ride the
+    schedule's per-microbatch kwargs, so no corpus restriction applies.
     ``selective_ac`` / ``memory_budget_ac`` / ``region_ac`` are read only when
     ``activation_checkpoint`` names their mode (``'selective'`` /
     ``'memory_budget'`` -- which also requires ``compile=True`` -- or
@@ -140,7 +140,6 @@ def parallelize_hf_transformers(
             cfg=cfg,
             device=device if device is not None else next(model.parameters()).device,
             global_batch_size=global_batch_size,
-            dataset=dataset,
         )
         dense_mesh = parallel_dims.spmd_dense_mesh()
         tp_mesh = parallel_dims.get_optional_mesh("tp")

@@ -287,7 +287,6 @@ def apply_pp(
     cfg: ParallelConfig,
     device: torch.device,
     global_batch_size: int,
-    dataset: str = "random",
     first_stage_module_fqns: Sequence[str] | None = None,
 ) -> tuple[list[PipelineStage], list[nn.Module], bool, bool]:
     """Split ``model`` into this rank's pipeline stages.
@@ -298,9 +297,9 @@ def apply_pp(
     is ``parallelize_hf_transformers``'s job, which owns that assembly order
     for the split and unsplit paths alike.
 
-    ``global_batch_size`` and ``dataset`` are training-side values the PP
-    guards need; they are explicit parameters rather than reads off a
-    run-wide config so this layer never sees ``LLMTunerConfig``.
+    ``global_batch_size`` is a training-side value the PP guards need; it is
+    an explicit parameter rather than a read off a run-wide config so this
+    layer never sees ``LLMTunerConfig``.
 
     ``first_stage_module_fqns`` names extra top-level modules (e.g. a
     multimodal encoder) to co-locate with stage 0; see
@@ -316,8 +315,6 @@ def apply_pp(
     Returns ``(stages, model_parts, has_first_stage, has_last_stage)``; the
     schedule over the stages is built separately (``build_pipeline_schedule``).
     """
-    if dataset != "random":
-        matrix.pp_real_corpus()
     if getattr(model, "enable_weight_tying", False):
         matrix.pp_weight_tying()
     parallelism = cfg

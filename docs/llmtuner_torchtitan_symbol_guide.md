@@ -59,7 +59,7 @@ step 1 恢复 optimizer、scheduler、dataloader 和 train state 后完成并保
 | `Trainer._allreduce_replicated_tp_grads` | 上游 SPMD/TP placement 自动归约 | llmtuner 手写 TP plan，复制参数必须显式 SUM | 通过（适配）；新增 TP module 类型时必须更新识别集合 |
 | `Trainer.state_dict`, `load_state_dict` | 上游 trainer state Stateful | llmtuner 只保存训练步等最小状态 | 通过 |
 | `Trainer.train`, `close` | 上游同名方法 | 生命周期更短；仍保证 profiler/checkpointer/logger drain | 通过 |
-| `Trainer.validate`, `should_validate`, `check_validation_feasibility` | `components/validate.py::Validator`（含上游 6c2dadbb3 零 batch/零有效 token 报错、90b25912f dp>1 拒绝 `steps=-1`） | 2026-09-24 移植：`training.validation_config`（`ValidationConfig`，freq/steps/dataset，默认 None 关闭且逐位不变）；eval 模式 + `no_grad`，结束后恢复 train；loss 按全局有效 token 归一化，token 走 dp mesh、loss 走 dp×cp×tp loss mesh，与训练同语义；`steps=-1` 对 random 无限语料亦拒绝；PP 组合无 eval 管线通路，构造期 fail-fast（上游走 `pp_schedule.eval`，llmtuner 的 PP loss 内嵌在 schedule 训练步里，未验证） | 通过（适配）；多 rank 归约语义与 PP 组合待目标设备验证 |
+| `Trainer.validate`, `should_validate`, `check_validation_feasibility` | `components/validate.py::Validator`（含上游 6c2dadbb3 零 batch/零有效 token 报错、90b25912f dp>1 拒绝 `steps=-1`） | 2026-09-24 移植：`training.validation_config`（`ValidationConfig`，freq/steps/dataset，默认 None 关闭且逐位不变）；eval 模式 + `no_grad`，结束后恢复 train；loss 按全局有效 token 归一化，token 走 dp mesh、loss 走 dp×cp×tp loss mesh，与训练同语义；`steps=-1` 对 random 无限语料亦拒绝；PP 组合 2026-10-02 起支持：`trainer/validate.py::validate_body_pp` 驱动 schedule 的 eval 通路（与上游 `pp_schedule.eval` 同 seam），microbatch 管线与训练体一致 | 通过（适配）；多 rank 归约语义与 PP 组合待目标设备验证 |
 
 ## 3. Hugging Face 模型适配层
 
@@ -345,7 +345,7 @@ import 并保留 `__all__` 再导出（此前两侧各写一份同一个四元�
     `ValidationConfig`，上游 `components/validate.py::Validator` 对应物；上游
     6c2dadbb3 的零 batch/零有效 token 报错与 90b25912f 的 dp>1 拒绝
     `steps=-1` 两条校验一并移植，另对 random 无限语料的 `steps=-1` 同样
-    fail-fast；PP × validation 无 eval 管线通路，构造期 NotImplementedError，
+    fail-fast；PP × validation 已于 2026-10-02 解锁（schedule eval 驱动），
     见 §2 trainer 表）。
 - 2026-09-24 复核新增登记：
   - `token_dispatcher.py` 的 TorchAO/DeepEP/HybridEP 三个 dispatcher：**已对齐**

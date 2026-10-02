@@ -102,21 +102,6 @@ class Row:
 # == assembly phase: verdicts called from the guard sites =================
 
 
-def pp_validation() -> None:
-    """llmtuner wires only the pipeline schedule's training driver, so a validation pass
-    has no driver of its own to run on.
-    """
-    raise UnsupportedCombinationError(
-        "validation with pipeline parallelism is not supported: "
-        "llmtuner wires the pipeline schedule for training only -- the "
-        "last stage's loss is computed and backwarded inside the schedule "
-        "step, and the loss denominator rides on the schedule object "
-        "(trainer/pp_steps.py). An eval driver is not wired to that "
-        "seam; run validation with pipeline_parallel_size=1."
-    )
-
-
-
 def validation_once_requires_dp1(dp_world_size: int) -> None:
     """steps=-1 stops each rank when its own shard is exhausted; with DP > 1 the ranks
     can exhaust at different iterations and hang on the pass's collectives.
@@ -175,18 +160,6 @@ def chunked_loss_pp(chunks: int, pp: int) -> None:
 
 
 
-def pp_real_corpus() -> None:
-    """A packed real corpus supplies per-token positions, and the pipeline body does not
-    thread them through the schedule.
-    """
-    raise UnsupportedCombinationError(
-        "pp > 1 supports only the synthetic 'random' corpus: a packed real "
-        "corpus supplies per-token positions, and the pipeline body does "
-        "not thread them through the schedule."
-    )
-
-
-
 def pp_weight_tying() -> None:
     """The split puts the embedding on the first stage and the head on the last, and
     each stage's deep copy would train an independent copy of the shared weight.
@@ -201,16 +174,17 @@ def pp_weight_tying() -> None:
 
 
 def shared_expert_tp(module_path: str, block: object) -> None:
-    """The TP plan shards a shared expert with the dense colwise/rowwise realizers;
-    composing those with the MoE sequence-boundary collectives is unverified. Use
-    tp=1, or ep>1 (the EP swap handles shared experts).
+    """A shared expert whose layout is not the gate/up/down MLP cannot be
+    feature-sharded by ``shard_shared_expert_for_tp`` -- e.g. Qwen2Moe's
+    multiplicative shared_expert_gate. Use tp=1, or ep>1 (the EP swap handles
+    shared experts).
     """
     raise UnsupportedCombinationError(
         f"TP over {module_path} ({type(block).__name__}): the block "
-        "has a shared expert, which the plan shards with the dense "
-        "colwise/rowwise realizers. Composing those with the MoE "
-        "sequence-boundary collectives is unverified; use tp=1, or "
-        "ep > 1 (the EP swap handles shared experts)."
+        "has a shared expert whose layout is not the gate_proj/up_proj/"
+        "down_proj MLP this sharding knows (e.g. a multiplicative "
+        "shared_expert_gate). Use tp=1, or ep > 1 (the EP swap handles "
+        "shared experts)."
     )
 
 
@@ -367,8 +341,6 @@ def shared_expert_tp_ep(block: object) -> None:
 
 
 ENTRIES: tuple[Row, ...] = (
-    Row(pp_validation, "assembly", UnsupportedCombinationError,
-        'trainer/validate.py::check_validation_feasibility'),
     Row(validation_once_requires_dp1, "assembly", ConfigError,
         'trainer/validate.py::check_validation_feasibility'),
     Row(validation_once_requires_finite_corpus, "assembly", ConfigError,
@@ -377,8 +349,6 @@ ENTRIES: tuple[Row, ...] = (
         'trainer/trainer.py::Trainer.__init__'),
     Row(chunked_loss_pp, "assembly", UnsupportedCombinationError,
         'trainer/trainer.py::Trainer.__init__'),
-    Row(pp_real_corpus, "assembly", UnsupportedCombinationError,
-        'parallel/pipeline_parallel/apply.py::apply_pp'),
     Row(pp_weight_tying, "assembly", UnsupportedCombinationError,
         'parallel/pipeline_parallel/apply.py::apply_pp'),
     Row(shared_expert_tp, "assembly", UnsupportedCombinationError,

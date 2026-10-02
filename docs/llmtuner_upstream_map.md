@@ -295,7 +295,7 @@ None 关闭，关闭时训练循环逐位不变；programmatic-only，同 `ema_c
 checkpoint save 之后、profiler.step 之前，与上游同序。两条上游 bug fix 一并
 移植：零 batch / 零有效 token 报 `ValueError`（上游 6c2dadbb3），dp>1 拒绝
 `steps=-1`（上游 90b25912f，在 trainer 构造期、真实 dp degree 已知后检查）；
-另对 random 无限语料的 `steps=-1` 同样 fail-fast。PP × validation 未支持：
+另对 random 无限语料的 `steps=-1` 同样 fail-fast。PP × validation 2026-10-02 起支持（schedule eval 驱动，见 symbol guide）；此前未支持：
 llmtuner 的 PP loss 计算内嵌在 schedule 的训练步里，无 `pp_schedule.eval`
 对应的 eval 通路，构造期 `NotImplementedError`（loud-raise，不静默跳过）。
 

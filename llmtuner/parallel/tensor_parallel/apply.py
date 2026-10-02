@@ -28,6 +28,7 @@ from .tp import (
     model_tp_plan,
     resolve_plan,
     shard_experts_for_tp,
+    shard_shared_expert_for_tp,
     supports_symm_mem,
 )
 
@@ -136,16 +137,29 @@ def apply_tp(
         enable_symm_mem(group)
 
     for module_path, block in moe_blocks:
-        if getattr(block, "shared_expert", None) is not None or (
-            getattr(block, "shared_experts", None) is not None
-        ):
-            matrix.shared_expert_tp(module_path, block)
+        shared = getattr(block, "shared_expert", None) or getattr(
+            block, "shared_experts", None
+        )
+        shared_ids: set[int] = set()
+        if shared is not None:
+            # The gate/up/down layout shards featurewise with no collectives
+            # (the boundary already gathered the sequence); anything else --
+            # e.g. Qwen2Moe's multiplicative shared_expert_gate -- keeps the
+            # refusal.
+            if not all(
+                isinstance(getattr(shared, n, None), nn.Linear)
+                for n in ("gate_proj", "up_proj", "down_proj")
+            ):
+                matrix.shared_expert_tp(module_path, block)
+            shared_ids = shard_shared_expert_for_tp(
+                block, tp_size=tp_size, tp_rank=tp_rank
+            )
         # The sharded expert parameters are excluded from the trainer's
         # replicated-gradient all-reduce through this id set: each rank's
         # F-shard gradient is complete, and summing it with a different
         # shard's gradient would corrupt it.
-        block.tp_sharded_param_ids = shard_experts_for_tp(
-            block, tp_size=tp_size, tp_rank=tp_rank
+        block.tp_sharded_param_ids = (
+            shard_experts_for_tp(block, tp_size=tp_size, tp_rank=tp_rank) | shared_ids
         )
         block._tp_seq_group = group
         block._tp_moe_boundary = True
