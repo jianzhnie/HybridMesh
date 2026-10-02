@@ -17,7 +17,12 @@ import logging
 
 import pytest
 
-from llmtuner.accelerator.monitoring import Color, NoColor, colors_enabled, get_peak_flops
+from llmtuner.accelerator.monitoring import (
+    Color,
+    NoColor,
+    colors_enabled,
+    get_peak_flops,
+)
 from llmtuner.components import metrics as metrics_module
 from llmtuner.components.metrics import (
     BaseLogger,

@@ -84,6 +84,22 @@ def test_ep_that_divides_is_accepted() -> None:
     assert dims.dp_shard * dims.cp * dims.tp == 8
 
 
+def test_tp_cp_ep_together_resolve_the_sparse_region() -> None:
+    """tp x ep x cp: EP tiles dp_shard*cp*tp, so cp and tp both feed the region."""
+    # sparse region = dp_shard * cp * tp = 1 * 2 * 2 = 4; ep=2 tiles it, efsdp=2.
+    dims = _dims(world_size=4, dp_shard=1, cp=2, tp=2, ep=2)
+    assert dims.dp_shard * dims.cp * dims.tp == 4
+    assert dims.ep == 2
+
+
+def test_tp_cp_ep_sparse_region_must_still_divide() -> None:
+    """The same divisibility guard fires when cp/tp join the sparse region."""
+    # dp_shard * cp * tp = 3, which ep=2 cannot tile.
+    with pytest.raises(ValueError, match=r"must divide"):
+        _dims(world_size=6, dp_shard=3, cp=1, tp=1, ep=2)
+        _dims(world_size=3, dp_shard=1, cp=3, tp=1, ep=2)
+
+
 def test_a_non_positive_size_is_rejected() -> None:
     """A zero size would divide by zero deep in the mesh builder."""
     with pytest.raises(ValueError, match="dp_shard must be -1 or >= 1"):

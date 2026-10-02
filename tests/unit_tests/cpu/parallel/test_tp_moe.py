@@ -289,13 +289,15 @@ def test_tp_and_ep_together_are_now_allowed() -> None:
     ParallelConfig(tensor_parallel_size=2, expert_parallel_size=2)
 
 
-def test_tp_ep_cp_together_fail_fast_at_the_config() -> None:
-    with pytest.raises(NotImplementedError, match="tp x ep x cp"):
-        ParallelConfig(
-            tensor_parallel_size=2,
-            expert_parallel_size=2,
-            context_parallel_size=2,
-        )
+def test_tp_ep_cp_together_are_now_allowed() -> None:
+    # tp x ep x cp, upstream-aligned (torchtitan runs FSDP+TP+EP+CP together):
+    # TP shards the dense parts, EP owns the routed experts, CP shards the
+    # sequence; the sparse region tiles over dp_shard*cp*tp.
+    ParallelConfig(
+        tensor_parallel_size=2,
+        expert_parallel_size=2,
+        context_parallel_size=2,
+    )
 
 
 def test_ep_alone_and_tp_alone_are_still_valid_configs() -> None:

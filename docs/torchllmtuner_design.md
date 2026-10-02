@@ -231,7 +231,7 @@ fail-fast 按类型分三类，全部继承 `LLMTunerError`，并各自双继承
 | 类型 | 同时继承 | 语义 | 典型位置 |
 |---|---|---|---|
 | `ConfigError` | `ValueError` | 配置错了，改 flag/字段值 | `config/*` 的 `__post_init__` 校验 |
-| `UnsupportedCombinationError` | `NotImplementedError` | 各自合法、组合拒绝（tp×ep×cp、PP×validation、shared-expert×tp、ulysses×load balancer、TP 的 MoE 布局） | `parallel/parallelize.py`、`apply_*`、EP swap |
+| `UnsupportedCombinationError` | `NotImplementedError` | 各自合法、组合拒绝（PP×validation、shared-expert×tp、ulysses×load balancer、TP 的 MoE 布局等；tp×ep×cp 自 2026-10-02 起按上游语义放行） | `parallel/parallelize.py`、`apply_*`、EP swap |
 | `EnvironmentUnsupportedError` | `NotImplementedError` | 构建/宿主缺依赖，文案必须带解锁条件（所需 torch 版本/包） | compile 的 inductor/dynamo knob、AC 的 budget knob、deepep/hybridep |
 
 两条边界规则：可选**包**缺失保持 `ImportError`（Python 惯例：renderers、
@@ -265,7 +265,7 @@ device.py 本身就是设备注册表）；DTensor/flex_attention/spmd_types 是
 ## 3.3 跨层组合裁决单一来源（parallel/matrix.py）
 
 分工（2026-09-26 收窄后）：**config 期能判的组合校验住在各 config 的
-`__post_init__`**（`config/parallel.py` 的 tp×ep×cp、deepep/hybridep、
+`__post_init__`**（`config/parallel.py` 的 deepep/hybridep、
 dispatcher@ep=1、ptrr、ulysses×load balancer、sequence_parallel；
 `config/training.py` 的 region AC（`preserve_rng_state=True` 即拒）、
 memory_budget×compile；`config/root.py` 的
@@ -656,7 +656,7 @@ vocab-parallel embedding 的全局 `padding_idx` 越界/梯度抑制（上游 #4
     不是遗漏：上游弃用它是因为其声明式放置下这条路要复制 token 计算，llmtuner 的结构化
     实现（F 维原地切分 + 块边界 AG/RS 对偶）不复制 token。**因此不照搬该守卫**——
     照搬会删掉本仓已实现并有单测的能力；两边不构成同一实现的两个版本，不能按
-    "上游有守卫、本地没有"判为缺口。已登记的组合边界仍然有效：`tp×ep×cp`、shared-expert
+    "上游有守卫、本地没有"判为缺口。已登记的组合边界仍然有效：shared-expert
     块 × tp 都是 loud-raise。
 
 多卡设备验证清单（按环境选择 gloo/nccl/hccl，并确保 PyTorch API 版本匹配）：

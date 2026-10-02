@@ -161,7 +161,7 @@ step 1 恢复 optimizer、scheduler、dataloader 和 train state 后完成并保
 | `ColumnParallelLinear`, `RowParallelLinear`（2026-09-26 改名对齐上游，原 `ColwiseLinear`/`RowwiseLinear`） | 上游 `models/common/linear.py` 同名类（9e159aed7 起拥有各自 collective） | llmtuner 替换 HF `nn.Linear`，不使用 ParallelStyle；plan 规格字符串 `colwise`/`rowwise` 与 factory 不变，**通过（适配）** |
 | `ColwiseLinearNoGather` | 无对应物（上游为父模块一次性 gather + plain Linear 子投影） | llmtuner 特有 realizer：输出保留 sequence shard；保持原名（llmtuner 特有，非改名对象），**通过** |
 | `resolve_plan`, `match` | HF `_tp_plan` + 上游 sharding registry | 支持 colwise/rowwise/replicated；`colwise_gather_output` 当前保守保持 lm_head 复制，**通过（适配）** |
-| `apply_tp` | transformers backend parallelize + 各模型 parallelize | 手写 pattern plan；plan 里的 MoE 规格（`packed_colwise`/`packed_rowwise`/`moe_tp_experts`）解析为 None 并走结构路径（`shard_experts_for_tp` 沿 F 维原地切分专家权重、`TPMoeSequenceBoundary` 加块边界 AG/RS 对偶），不再 raise；tp×ep 放行（TP 只切 dense、EP 独占 routed 专家，ep>1 时 `apply_tp` 把 MoE 块留给 swap），tp×ep×cp 与 shared-expert×tp 仍 loud-raise，**受限：真多卡前后向等价性环境未覆盖**（见 §9.1） |
+| `apply_tp` | transformers backend parallelize + 各模型 parallelize | 手写 pattern plan；plan 里的 MoE 规格（`packed_colwise`/`packed_rowwise`/`moe_tp_experts`）解析为 None 并走结构路径（`shard_experts_for_tp` 沿 F 维原地切分专家权重、`TPMoeSequenceBoundary` 加块边界 AG/RS 对偶），不再 raise；tp×ep 放行（TP 只切 dense、EP 独占 routed 专家，ep>1 时 `apply_tp` 把 MoE 块留给 swap），shared-expert×tp 仍 loud-raise；tp×ep×cp 自 2026-10-02 起按上游语义放行（**受限：真多卡前后向等价性环境未覆盖**，等价脚本 tests/integration_tests/tp_ep_cp_equivalence.py 待 torch≥2.12 复跑）（见 §9.1） |
 
 ### 5.3 FSDP2
 
@@ -286,7 +286,7 @@ import 并保留 `__all__` 再导出（此前两侧各写一份同一个四元�
   `apply_tp` 接受 `moe_tp_experts` 等规格并结构性地实现 MoE-under-TP——专家权重
   F 维原地切分、router Replicate、块边界 AG/RS;**tp×ep 同日起按上游语义放行**
   （TP 只切 dense、EP 独占 routed 专家、router Replicate;`apply_tp` 在 ep>1 时把
-  MoE 块留给 swap，专家梯度排除由 `tp_sharded_param_ids` 统一判定）;tp×ep×cp 与
+  MoE 块留给 swap，专家梯度排除由 `tp_sharded_param_ids` 统一判定）;
   shared-expert×tp 保持 loud-raise。真多卡前后向等价性环境未覆盖，待 torch≥2.12
   复跑。符号对应：上游
   `expert_param_placement_sparse`（EP 轴 S(0) 声明）→ llmtuner EP swap 的 per-rank

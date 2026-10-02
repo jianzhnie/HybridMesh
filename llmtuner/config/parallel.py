@@ -213,10 +213,10 @@ class ParallelConfig:
     EP borrows ranks from FSDP and TP: efsdp = dp_shard * cp * tp / ep.
     pp and dp_replicate are outer dimensions unaffected by this constraint.
 
-    Not composable with context_parallel_size > 1 when tensor_parallel_size >
-    1 (rejected in ``__post_init__``, the tp x ep x cp combination is
-    unverified). tp x ep itself IS supported: TP shards only the dense parts
-    and EP owns the routed experts.
+    tp x ep x cp IS supported (upstream-aligned: torchtitan runs
+    FSDP+TP+EP+CP together; the sparse region dp_shard*cp*tp tiles over all
+    three, and the token-count/balance reductions already cover cp and tp).
+    TP shards only the dense parts and EP owns the routed experts.
 
     Deliberate divergence: upstream requires ep >= tp on MoE models, having
     deprecated pure TP on routed experts. llmtuner keeps tp > 1 with ep == 1
@@ -354,17 +354,6 @@ class ParallelConfig:
                 "replicated-activation TP path to fall back to, so this flag "
                 "has nothing to disable. Leave it true, or set "
                 "tensor_parallel_size=1 to drop TP."
-            )
-        if (
-            self.tensor_parallel_size > 1
-            and self.expert_parallel_size > 1
-            and self.context_parallel_size > 1
-        ):
-            raise UnsupportedCombinationError(
-                "tensor_parallel_size > 1 with expert_parallel_size > 1 and "
-                "context_parallel_size > 1 is not supported: tp x ep x cp is "
-                "unverified. Run tp x ep with context_parallel_size=1, or ep x "
-                "cp with tensor_parallel_size=1."
             )
         if self.data_parallel_shard_size < 1 and self.data_parallel_shard_size != -1:
             raise ConfigError(

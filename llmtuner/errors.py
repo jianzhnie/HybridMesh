@@ -9,7 +9,7 @@ The three leaf classes answer different operator questions:
   Field-level validation and cross-field contradictions, raised in
   ``llmtuner/config/*``'s ``__post_init__`` (and equivalent guard points).
 * ``UnsupportedCombinationError`` -- "each half is legal alone; the
-  combination is rejected." The composition-matrix refusals: tp x ep x cp,
+  combination is rejected." The composition-matrix refusals: PP x AC,
   PP x validation, shared-expert x tp, ulysses x load-balancer, an HF MoE
   layout the swap/TP path does not express. Not a dependency problem -- the
   combination is unverified or meaningless, and the fix is to change the
