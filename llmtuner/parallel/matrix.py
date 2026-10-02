@@ -175,18 +175,6 @@ def chunked_loss_pp(chunks: int, pp: int) -> None:
 
 
 
-def pp_cp_ep() -> None:
-    """CP shards the batch the schedule consumes and EP swaps MoE blocks per chunk;
-    neither path is wired through the pipeline.
-    """
-    raise UnsupportedCombinationError(
-        "pp > 1 does not compose with cp > 1 or ep > 1 yet: CP shards the "
-        "batch the schedule consumes and EP swaps MoE blocks per chunk, and "
-        "neither path is wired through the pipeline. Run them separately."
-    )
-
-
-
 def pp_real_corpus() -> None:
     """A packed real corpus supplies per-token positions, and the pipeline body does not
     thread them through the schedule.
@@ -389,8 +377,6 @@ ENTRIES: tuple[Row, ...] = (
         'trainer/trainer.py::Trainer.__init__'),
     Row(chunked_loss_pp, "assembly", UnsupportedCombinationError,
         'trainer/trainer.py::Trainer.__init__'),
-    Row(pp_cp_ep, "assembly", UnsupportedCombinationError,
-        'parallel/pipeline_parallel/apply.py::apply_pp'),
     Row(pp_real_corpus, "assembly", UnsupportedCombinationError,
         'parallel/pipeline_parallel/apply.py::apply_pp'),
     Row(pp_weight_tying, "assembly", UnsupportedCombinationError,

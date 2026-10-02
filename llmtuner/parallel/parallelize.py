@@ -144,8 +144,14 @@ def parallelize_hf_transformers(
         )
         dense_mesh = parallel_dims.spmd_dense_mesh()
         tp_mesh = parallel_dims.get_optional_mesh("tp")
+        # The EP group under PP is per-stage: the sparse mesh carries the pp
+        # axis, so this rank's "ep" slice is its own stage's group.
+        ep_mesh = parallel_dims.get_optional_mesh("ep")
+        ep_group = None if ep_mesh is None else ep_mesh.get_group()
         pp_runners = {
             "tp": lambda m: apply_tp(m, dense_mesh, cfg),
+            "ep": lambda m: apply_ep(m, cfg, ep_group=ep_group),
+            "cp": lambda m: apply_cp(m, dense_mesh, cfg),
             "ac": _apply_ac,
             "compile": lambda m: apply_compile(
                 m, compile_config=compile_config, tp_mesh=tp_mesh

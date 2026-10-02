@@ -316,8 +316,6 @@ def apply_pp(
     Returns ``(stages, model_parts, has_first_stage, has_last_stage)``; the
     schedule over the stages is built separately (``build_pipeline_schedule``).
     """
-    if parallel_dims.cp_enabled or parallel_dims.ep_enabled:
-        matrix.pp_cp_ep()
     if dataset != "random":
         matrix.pp_real_corpus()
     if getattr(model, "enable_weight_tying", False):

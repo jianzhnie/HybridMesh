@@ -32,7 +32,7 @@ def test_sharding_wrappers_come_before_ac_and_compile() -> None:
 
 
 def test_the_pp_order_is_a_subsequence_of_the_full_order() -> None:
-    assert PP_STAGE_ORDER == ("tp", "ac", "compile", "fsdp")
+    assert PP_STAGE_ORDER == ("tp", "ep", "cp", "ac", "compile", "fsdp")
     positions = [STAGE_ORDER.index(name) for name in PP_STAGE_ORDER]
     assert positions == sorted(positions)
 

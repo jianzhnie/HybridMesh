@@ -524,7 +524,7 @@ optimizer；checkpoint 的 optimizer state 一律按参数 FQN 扁平存取
 非 PP 也不再是 positional 格式，见
 [`optimizer_checkpoint_format.md`](./optimizer_checkpoint_format.md)。
 
-已知边界：pp+cp / pp+ep 组合显式 raise；tied embeddings 拒绝（deepcopy 会拆断共享
+已知边界：tied embeddings 拒绝（deepcopy 会拆断共享
 权重）；只支持 `dataset="random"`（packed 语料的 positions 没有穿过 schedule 的
 通道）；looped schedule 已覆盖 Interleaved1F1B，V 风格 schedule 尚未验证。
 
@@ -612,10 +612,16 @@ vocab-parallel embedding 的全局 `padding_idx` 越界/梯度抑制（上游 #4
 `ntokens_seen` 在 CP/TP>1 下虚高 cp×tp 倍、HSDP 下专家分片度误选 `Shard(1)`（上游
 4b5023b80 同源）。
 
+（2026-10-02 起 pp×ep 与 pp×cp 解锁：sparse mesh 的 pp 轴让每个 stage
+自带 EP 组、swap 按 stage chunk 执行；CP 在 PP 下逐 stage 切序列、p2p 按同
+CP 坐标传已切分的激活——对齐上游 dense CP+PP 与 MoE PP+EP 路径。等价脚本
+tests/integration_tests/pp_ep_equivalence.py / pp_cp_equivalence.py 待
+torch≥2.12 多卡复跑。）
+
 剩余边界（均为 loud-raise，不静默错；判定的单一来源是 §3.3 组合矩阵
 `parallel/matrix.py`，下列条目与矩阵行一一对应）：
 
-1. pp+cp / pp+ep 组合未接线；PP+activation checkpoint、PP+chunked loss 与 tied
+1. PP+chunked loss 与 tied
    embeddings 的 PP 均明确拒绝；PP × validation 同样构造期拒绝——原因不是"不存在
    eval-only 通路"（torch 的 schedule 有 `eval`，上游校验器正在用），而是 llmtuner 只把
    训练驱动器接到了 PP 接缝上（见 §5.1 与 `llmtuner_trainer_walkthrough.md` 的 D18）。

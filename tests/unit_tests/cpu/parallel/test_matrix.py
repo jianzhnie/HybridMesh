@@ -63,7 +63,6 @@ def test_rows_reject_with_their_entry_type() -> None:
         (matrix.validation_once_requires_finite_corpus, (), "infinite synthetic"),
         (matrix.ep_checkpoint, (2,), "checkpointing"),
         (matrix.chunked_loss_pp, (2, 2), "chunked_loss_num_chunks=2"),
-        (matrix.pp_cp_ep, (), "does not compose"),
         (matrix.pp_real_corpus, (), "synthetic 'random' corpus"),
         (matrix.pp_weight_tying, (), "tied word embeddings"),
         (matrix.shared_expert_tp, ("layers.0.mlp", _Block()), "shared expert"),

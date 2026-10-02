@@ -35,11 +35,16 @@ REPO_ROOT = SCRIPT_DIR.parents[1]
 # Helpers, not runnable scripts: no ``__main__`` driver, imported by hand.
 _HELPERS = {"full_precision_equivalence.py"}
 
-_TORCHRUN_RE = re.compile(r"torchrun\s+(--nproc_per_node=\d+)\s+\\\s*\n?\s*(\S+)")
+_TORCHRUN_RE = re.compile(r"torchrun\s+(--nproc_per_node=\d+)[\s\\]+(\S+)")
 
 
 def _torchrun_args(script: Path) -> list[str]:
-    """The torchrun flags from the script's docstring command, or the default."""
+    """The torchrun flags from the script's docstring command, or the default.
+    A docstring line-continuation (backslash-newline) is gone by
+    the time the docstring is parsed, so the separator between
+    the flag and the script path may be plain whitespace, a
+    literal backslash, or both.
+    """
     docstring = ast.get_docstring(ast.parse(script.read_text())) or ""
     match = _TORCHRUN_RE.search(docstring)
     if match:

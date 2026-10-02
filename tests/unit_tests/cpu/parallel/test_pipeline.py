@@ -25,9 +25,9 @@ from torch.distributed.device_mesh import init_device_mesh
 
 from llmtuner.models.hf.factory import build_model_config
 from llmtuner.models.hf.model import HFTransformerModel
+from llmtuner.parallel import matrix
 from llmtuner.parallel.parallel_dims import ParallelDims
 from llmtuner.parallel.pipeline_parallel.apply import (
-    apply_pp,
     make_schedule_loss_fn,
     prepend_first_stage_modules,
     validate_microbatches,
@@ -290,19 +290,17 @@ def test_microbatch_divisibility_is_still_enforced() -> None:
     )
 
 
-def test_pp_with_ep_is_refused_loudly() -> None:
-    """pp+ep is not wired through the pipeline; it must raise at setup, not
-    silently drop the EP degree."""
+def test_pp_with_ep_composes() -> None:
+    """pp+ep composes since 2026-10-02: the sparse mesh carries a pp axis, so
+    each stage's ranks form their own EP group and the swap runs per stage
+    chunk (parallelize.py's PP per-part path). The config no longer refuses,
+    and the matrix has no pp x ep row."""
     dims = _dims(pp=2, ep=2, world_size=8)
-    cfg = ParallelConfig(pipeline_parallel_size=2, expert_parallel_size=2)
-    with pytest.raises(NotImplementedError, match="does not compose"):
-        apply_pp(
-            nn.Module(),
-            parallel_dims=dims,
-            cfg=cfg,
-            device=torch.device("cpu"),
-            global_batch_size=8,
-        )
+    assert dims.pp == 2 and dims.ep == 2
+    # Config-level acceptance.
+    ParallelConfig(pipeline_parallel_size=2, expert_parallel_size=2)
+    # The assembly-level refusal is gone from the matrix.
+    assert not hasattr(matrix, "pp_cp_ep")
 
 
 # -- first_stage_module_fqns: co-locating extra modules with stage 0 ----------

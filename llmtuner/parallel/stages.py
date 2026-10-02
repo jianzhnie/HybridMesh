@@ -39,15 +39,19 @@ STAGES: tuple[Stage, ...] = (
     ),
     Stage(
         "ep",
-        False,
+        True,
         "After TP: the swap consumes TP's dense sharding and owns the routed "
-        "experts. Not on the PP path -- pp x ep is refused (matrix.pp_cp_ep).",
+        "experts. On the PP path too: the sparse mesh carries a pp axis, so "
+        "each stage's ranks form their own EP group and the swap runs per "
+        "stage chunk (upstream: pipeline() parallelizes each model part).",
     ),
     Stage(
         "cp",
-        False,
-        "With the other sharding wrappers. Not on the PP path -- pp x cp is "
-        "refused (matrix.pp_cp_ep).",
+        True,
+        "With the other sharding wrappers. On the PP path too (upstream's "
+        "dense CP+PP runs in CI): every stage's layers run the CP attention "
+        "over this rank's sequence shard, and the p2p channel carries the "
+        "sharded activations between stages at the same CP coordinate.",
     ),
     Stage(
         "ac",
