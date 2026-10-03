@@ -278,7 +278,7 @@ cp 整除 seq_len、async_tp×{compile,tp}），与其余字段校验同处、�
 与 `reason` 由函数派生）。两个阶段：
 
 * **assembly**：需模型/运行时信息（PP×AC、EP×checkpoint、
-  chunked×PP、pp×{cp,ep,dataset,tying}、shared-expert×tp、quantile@ep=1 等）。
+  chunked×PP、pp×tying、shared-expert×tp（未知布局）、quantile@ep=1 等）。
   触发条件留在守卫点，判定（类型+文案）由矩阵函数给出，双写不可能。
 * **probe**：需 HF 布局（GPT-OSS、group_limited_greedy、router bias、
   shared_expert_gate、quantile×softmax/group、shared-expert×tp×ep）。同上。
@@ -525,7 +525,7 @@ optimizer；checkpoint 的 optimizer state 一律按参数 FQN 扁平存取
 [`optimizer_checkpoint_format.md`](./optimizer_checkpoint_format.md)。
 
 已知边界：tied embeddings 拒绝（deepcopy 会拆断共享
-权重）；只支持 `dataset="random"`（packed 语料的 positions 没有穿过 schedule 的
+权重）；2026-10-02 前只支持 `dataset="random"`（packed 语料的 positions 没有穿过 schedule 的
 通道）；looped schedule 已覆盖 Interleaved1F1B，V 风格 schedule 尚未验证。
 
 ### 5.6 components / datasets

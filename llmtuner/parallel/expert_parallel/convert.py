@@ -26,6 +26,7 @@ from ...models.common.moe.router import (
     TokenChoiceTopKRouter,
 )
 from .. import matrix
+from .ckpt import mark_experts_ep_sharded
 from .probe import (
     fused_experts_of,
     read_expert_groups,
@@ -144,6 +145,10 @@ def convert_block(
         dispatcher = AllToAllTokenDispatcher(num_experts, top_k)
     if ep_group is not None:
         dispatcher.wire_meshes(ep_group=ep_group)
+        # Flag the stacked expert weights as expert-dim-sharded over the EP
+        # group so the checkpointer can all-gather them on save and slice
+        # them back on load (see expert_parallel/ckpt.py).
+        mark_experts_ep_sharded(grouped, ep_group)
 
     shared = getattr(block, "shared_expert", None) or getattr(
         block, "shared_experts", None

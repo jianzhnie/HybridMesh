@@ -58,6 +58,11 @@ from torch.distributed.checkpoint.stateful import Stateful
 from torch.distributed.tensor import DTensor
 
 from ...accelerator import dist_utils
+from ...parallel.expert_parallel.ckpt import (
+    expert_shard_map,
+    gather_expert_state,
+    load_expert_state,
+)
 from ...utils.gc import GarbageCollection
 from ...utils.logger_utils import get_logger
 from . import filesystem
@@ -165,10 +170,17 @@ class ModelWrapper(Stateful):
 
     def __init__(self, model: nn.Module | list[nn.Module]) -> None:
         self.model = [model] if isinstance(model, nn.Module) else model
+        # EP-sharded expert weights are rank-heterogeneous under one FQN;
+        # they ride through this wrapper as all-gathered full tensors and are
+        # sliced back per rank on load (parallel/expert_parallel/ckpt.py).
+        self._ep_shards = expert_shard_map(self.model)
         self.cached_state_dict = self._get_state_dict()
 
     def _get_state_dict(self) -> dict[str, Any]:
-        return {k: v for model in self.model for k, v in model.state_dict().items()}
+        flat = {
+            k: v for model in self.model for k, v in model.state_dict().items()
+        }
+        return gather_expert_state(flat, self._ep_shards, self.model)
 
     def state_dict(self) -> dict[str, Any]:
         # Recompute so hook-produced tensors reflect the current parameters,
@@ -188,6 +200,7 @@ class ModelWrapper(Stateful):
     def load_state_dict(self, state_dict: dict[str, Any]) -> None:
         # strict=False because this is the flattened checkpoint dict, which
         # mixes model FQN keys with non-model keys (optimizer, lr_scheduler, ...).
+        state_dict = load_expert_state(state_dict, self._ep_shards, self.model)
         for model in self.model:
             model.load_state_dict(state_dict, strict=False)
         # Refresh the cache so state_dict() reflects the freshly loaded values.

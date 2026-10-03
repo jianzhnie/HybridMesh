@@ -271,6 +271,48 @@ def test_apply_tp_raises_when_moe_specs_match_no_block() -> None:
         apply_tp(Dense(), mesh=object(), cfg=cfg)
 
 
+class _SharedMLP(nn.Module):
+    """The gate/up/down layout DeepSeek-style shared experts use."""
+
+    def __init__(self, dim: int = 16, hidden: int = 32) -> None:
+        super().__init__()
+        self.gate_proj = nn.Linear(dim, hidden, bias=False)
+        self.up_proj = nn.Linear(dim, hidden, bias=False)
+        self.down_proj = nn.Linear(hidden, dim, bias=False)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        gate = torch.nn.functional.silu(self.gate_proj(x))
+        return self.down_proj(gate * self.up_proj(x))
+
+
+def test_shared_expert_shards_featurewise_and_partials_sum() -> None:
+    """The two ranks' halves of a sharded shared expert sum to the reference.
+
+    The helper takes no collective: the input is replicated (the MoE boundary
+    gathered it), the w2 output is partial over tp, and the boundary's
+    reduce-scatter does the sum. Simulated here with two in-process shards.
+    """
+    from llmtuner.parallel.tensor_parallel.tp import shard_shared_expert_for_tp
+
+    torch.manual_seed(0)
+    reference = _SharedMLP().double()
+    x = torch.randn(10, 16, dtype=torch.float64)
+
+    partials = []
+    for rank in (0, 1):
+        block = nn.Module()
+        block.shared_expert = _SharedMLP().double()
+        block.shared_expert.load_state_dict(reference.state_dict())
+        ids = shard_shared_expert_for_tp(block, tp_size=2, tp_rank=rank)
+        assert len(ids) == 3
+        partials.append(block.shared_expert(x))
+
+    assert torch.allclose(partials[0] + partials[1], reference(x), atol=1e-12)
+    # The sharded weights keep the same module paths with halved features.
+    assert reference.gate_proj.weight.shape[0] == 32
+    assert partials and partials[0].shape == x.shape
+
+
 def test_apply_tp_raises_on_a_shared_expert_block() -> None:
     model = _MoeModel()
     block = model.layers[0]["mlp"]

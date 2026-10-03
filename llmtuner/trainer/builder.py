@@ -120,16 +120,6 @@ def build_trainer_state(self, cfg) -> None:
 
     # 2. the model -- HF's own initialization, wrapped for this loop
     #
-    # EP expert tensors are rank-heterogeneous plain tensors. Until they
-    # have an EP-aware checkpoint representation, any save or load would
-    # silently collapse all ranks onto one expert slice. Reject the whole
-    # checkpoint surface before model construction rather than merely warn.
-    if (
-        self.parallel_dims is not None
-        and self.parallel_dims.ep_enabled
-        and cfg.checkpoint.enable
-    ):
-        matrix.ep_checkpoint(self.parallel_dims.ep)
     # Chunked loss + PP is rejected up front: under PP the last stage's
     # loss is computed inside the schedule
     # (``pipeline_parallel/apply.py:scalar_loss_fn``), which receives logits

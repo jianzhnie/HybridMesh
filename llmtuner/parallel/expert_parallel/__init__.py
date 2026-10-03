@@ -4,17 +4,25 @@ EP core idea (MoE): shard experts across ranks; an all-to-all routes each token
 to its expert's rank and back. ``swap.py`` is the weight-moving swap itself;
 ``apply.py`` wires it onto a model given the EP process group.
 
-Both are re-exported eagerly. ``swap.py`` imports ``models/common/moe`` (the
-stack it swaps in), which used to import ``parallel/spmd_types`` back -- the
-cycle that once forced a lazy re-export here. The SPMD mesh context now lives
-in ``llmtuner/accelerator/spmd_context.py`` below both layers, so nothing under
-``models/common`` imports ``llmtuner.parallel`` and the cycle is gone.
+The two entry points are re-exported lazily (PEP 562): ``swap.py`` pulls in the
+whole MoE stack (``models/common/moe`` and its custom ops), and lighter
+submodules like ``ckpt.py`` -- imported by the checkpointer and optimizer
+containers -- must stay loadable on hosts whose torch predates those ops.
 """
-
-from .apply import apply_ep
-from .swap import swap_hf_moe_blocks
 
 __all__ = [
     "apply_ep",
     "swap_hf_moe_blocks",
 ]
+
+
+def __getattr__(name: str):
+    if name == "apply_ep":
+        from .apply import apply_ep
+
+        return apply_ep
+    if name == "swap_hf_moe_blocks":
+        from .swap import swap_hf_moe_blocks
+
+        return swap_hf_moe_blocks
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

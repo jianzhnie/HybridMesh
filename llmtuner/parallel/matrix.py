@@ -130,21 +130,6 @@ def validation_once_requires_finite_corpus() -> None:
 
 
 
-def ep_checkpoint(ep: int) -> None:
-    """Expert weights are rank-heterogeneous plain tensors and the current checkpoint
-    backends treat them as replicated. Unlock: EP-aware expert state
-    serialization.
-    """
-    raise UnsupportedCombinationError(
-        f"expert_parallel_size={ep} with checkpointing "
-        "is not supported: expert weights are rank-heterogeneous plain "
-        "tensors and the current checkpoint backends treat them as "
-        "replicated. Disable checkpointing until EP-aware expert state "
-        "serialization is implemented."
-    )
-
-
-
 def chunked_loss_pp(chunks: int, pp: int) -> None:
     """Under PP the last stage's loss runs inside the schedule on materialized logits;
     rewiring that seam for hidden states plus a per-chunk backward is a PP-side
@@ -345,8 +330,6 @@ ENTRIES: tuple[Row, ...] = (
         'trainer/validate.py::check_validation_feasibility'),
     Row(validation_once_requires_finite_corpus, "assembly", ConfigError,
         'trainer/validate.py::check_validation_feasibility'),
-    Row(ep_checkpoint, "assembly", UnsupportedCombinationError,
-        'trainer/trainer.py::Trainer.__init__'),
     Row(chunked_loss_pp, "assembly", UnsupportedCombinationError,
         'trainer/trainer.py::Trainer.__init__'),
     Row(pp_weight_tying, "assembly", UnsupportedCombinationError,

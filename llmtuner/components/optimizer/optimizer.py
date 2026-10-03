@@ -67,6 +67,11 @@ from torch.distributed.checkpoint.stateful import Stateful
 from torch.optim import Optimizer
 
 from ...accelerator.device import device_type
+from ...parallel.expert_parallel.ckpt import (
+    expert_shard_map,
+    gather_expert_state,
+    load_expert_state,
+)
 from ...utils.logger_utils import get_logger
 from ..checkpointer.utils import canonical_fqn
 from .utils import (
@@ -361,15 +366,25 @@ class OptimizersContainer(Optimizer, Stateful):
         for optimizer in self.optimizers:
             init_optim_state(optimizer)
             result.update(get_flat_optim_state_dict(optimizer))
-        return result
+        # Expert optimizer states are rank-heterogeneous like the expert
+        # weights themselves; gather them to the full tensors the checkpoint
+        # stores (parallel/expert_parallel/ckpt.py).
+        return gather_expert_state(result, self._ep_shards(), self.model_parts)
 
     def load_state_dict(self, state_dict: dict[str, Any]) -> None:
         # init_optim_state must run first: the unflattening step reads each
         # optimizer's live state to learn which state tensors to expect, so a
         # fresh optimizer would find nothing to write into.
+        state_dict = load_expert_state(
+            state_dict, self._ep_shards(), self.model_parts
+        )
         for optimizer in self.optimizers:
             init_optim_state(optimizer)
             load_flat_optim_state_dict(optimizer, state_dict)
+
+    def _ep_shards(self) -> dict[str, Any]:
+        """The EP-sharded expert parameters of ``model_parts`` (empty at ep=1)."""
+        return expert_shard_map(getattr(self, "model_parts", []))
 
     def _post_init(self, all_params: list[nn.Parameter]) -> None:
         # ``Optimizer.__init__`` is what populates ``param_groups`` and sets up
